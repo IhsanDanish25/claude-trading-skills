@@ -425,7 +425,7 @@ def main() -> None:
     parser.add_argument(
         "--project-root",
         type=Path,
-        default=Path(__file__).resolve().parent.parent.parent,
+        default=Path(__file__).resolve().parent.parent,  # fixed below
         help="Root of the claude-trading-skills repository",
     )
     parser.add_argument(
