@@ -121,8 +121,8 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
         {
             "name": "Economic Calendar",
             "script": str(skills_dir / "economic-calendar-fetcher" / "scripts" / "get_economic_calendar.py"),
-            "args": ["--output-dir", "{tmpdir}", "--api-key", os.environ.get("FMP_API_KEY", "")],
-            "glob": "economic_calendar_*.json",
+            "args": ["--output", "{tmpdir}/economic_calendar_latest.json", "--api-key", os.environ.get("FMP_API_KEY", "")],
+            "glob": "economic_calendar_latest.json",
         },
     ]
 
