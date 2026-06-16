@@ -346,7 +346,7 @@ async def _stream_response(
 
 def _inject_static_assets() -> None:
     st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
-    st.html(_IME_FIX_JS, height=0)
+    st.html(_IME_FIX_JS)
 
 
 def _build_prompt_context(
