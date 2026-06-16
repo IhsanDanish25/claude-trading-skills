@@ -488,8 +488,18 @@ def main():
     print("Fetching FINVIZ industry performance...", file=sys.stderr)
     raw_industries = get_industry_performance()
     if not raw_industries:
-        print("ERROR: No industry data from FINVIZ. Exiting.", file=sys.stderr)
-        sys.exit(1)
+        print("WARNING: No FINVIZ data - producing minimal output.", file=sys.stderr)
+        import json as _json, pathlib as _pl
+        out = {
+            "summary": {"bullish_themes": [], "bearish_themes": [], "neutral_themes": []},
+            "themes": [], "industry_rankings": {},
+            "metadata": {"status": "no_finviz_data", "generated_at": metadata["generated_at"]}
+        }
+        _pl.Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+        ts = metadata["generated_at"].replace(" ","_").replace(":","").replace("-","")
+        fname = f"theme_detector_{ts}.json"
+        (_pl.Path(args.output_dir) / fname).write_text(_json.dumps(out))
+        return
 
     metadata["data_sources"]["finviz_industries"] = len(raw_industries)
     print(f"  Got {len(raw_industries)} industries", file=sys.stderr)
