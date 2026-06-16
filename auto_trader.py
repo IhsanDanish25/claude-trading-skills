@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/homebrew/bin/python3.11
 """Auto Trader — FTD + VCP + Claude Opus 4.7 analysis → Alpaca paper trade."""
 import os, json, logging
 from pathlib import Path
