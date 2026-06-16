@@ -1,3 +1,4 @@
+import os
 #!/usr/bin/env python3
 """Generate a daily market dashboard by running 5 skills in parallel.
 
@@ -123,7 +124,7 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
         {
             "name": "FTD Detector",
             "script": str(skills_dir / "ftd-detector" / "scripts" / "ftd_detector.py"),
-            "args": ["--output-dir", "{tmpdir}"],
+            "args": ["--output-dir", "{tmpdir}", "--api-key", os.environ.get("FMP_API_KEY", "")],
             "glob": "ftd_detector_*.json",
         },
         {
