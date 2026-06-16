@@ -346,7 +346,7 @@ async def _stream_response(
 
 def _inject_static_assets() -> None:
     st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
-    st.components.v1.html(_IME_FIX_JS, height=0)
+    st.html(_IME_FIX_JS, height=0)
 
 
 def _build_prompt_context(
@@ -544,7 +544,7 @@ def render_app() -> None:
         return
 
     # Auto-switch to Chat tab when user submits from Dashboard tab
-    st.components.v1.html(
+    st.html(
         """<script>
         (function() {
             var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
