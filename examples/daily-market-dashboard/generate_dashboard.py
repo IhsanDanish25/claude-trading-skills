@@ -1,4 +1,3 @@
-import os
 #!/usr/bin/env python3
 """Generate a daily market dashboard by running 5 skills in parallel.
 
@@ -12,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import glob
 import json
 import logging
