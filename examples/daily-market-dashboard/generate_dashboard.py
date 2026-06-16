@@ -144,7 +144,7 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
         {
             "name": "Theme Detector",
             "script": str(skills_dir / "theme-detector" / "scripts" / "theme_detector.py"),
-            "args": ["--output-dir", "{tmpdir}", "--api-key", os.environ.get("FMP_API_KEY", "")],
+            "args": ["--output-dir", "{tmpdir}", "--fmp-api-key", os.environ.get("FMP_API_KEY", "")],
             "glob": "theme_detector_*.json",
         },
         {
