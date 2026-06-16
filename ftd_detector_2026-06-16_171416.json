@@ -1,0 +1,89 @@
+{
+  "metadata": {
+    "generated_at": "2026-06-16 17:14:16",
+    "api_calls": {
+      "cache_entries": 2,
+      "api_calls_made": 6,
+      "rate_limit_reached": false
+    },
+    "index_prices": {
+      "sp500": 7558.09,
+      "qqq": null
+    }
+  },
+  "market_state": {
+    "combined_state": "FTD_CONFIRMED",
+    "dual_confirmation": false,
+    "ftd_index": "S&P 500"
+  },
+  "sp500": {
+    "state": "FTD_CONFIRMED",
+    "current_price": 7561.76,
+    "lookback_high": 7609.77,
+    "correction_depth_pct": -0.63,
+    "swing_low": {
+      "date": "2026-03-30",
+      "price": 6343.73,
+      "decline_pct": -3.76,
+      "down_days": 3,
+      "recent_high_date": "2026-03-25",
+      "recent_high_price": 6591.89
+    },
+    "rally_attempt": {
+      "day1_date": "2026-03-31",
+      "current_day_count": 54,
+      "invalidated": false,
+      "invalidation_reason": null
+    },
+    "ftd": {
+      "ftd_detected": true,
+      "ftd_date": "2026-04-08",
+      "ftd_day_number": 6,
+      "ftd_low": 6740.28,
+      "gain_pct": 2.51,
+      "gain_tier": "strong",
+      "volume_above_avg": true
+    }
+  },
+  "nasdaq": {
+    "state": "NO_SIGNAL",
+    "current_price": null,
+    "lookback_high": null,
+    "correction_depth_pct": null
+  },
+  "quality_score": {
+    "total_score": 95,
+    "breakdown": {
+      "base": "Day 6 FTD: +60 (prime window)",
+      "gain": "+2.51% gain: +15 (strong)",
+      "volume": "Above 50-day avg volume: +10",
+      "dual_confirm": "Single index (S&P 500): +0",
+      "post_ftd": "No post-FTD distribution (5 days clean): +10"
+    },
+    "signal": "Strong FTD",
+    "guidance": "Aggressively increase exposure to 75-100%.",
+    "exposure_range": "75-100%",
+    "ftd_source": "S&P 500"
+  },
+  "post_ftd_distribution": {
+    "distribution_count": 0,
+    "days_monitored": 5,
+    "earliest_distribution_day": null,
+    "details": []
+  },
+  "ftd_invalidation": {
+    "invalidated": false,
+    "ftd_low": 6740.28,
+    "days_since_ftd": 48
+  },
+  "power_trend": {
+    "power_trend": true,
+    "conditions_met": 3,
+    "ema_21": 7444.11,
+    "sma_50": 7286.22,
+    "current_price": 7561.76,
+    "ema_above_sma": true,
+    "sma_50_rising": true,
+    "price_above_21ema": true
+  }
+}

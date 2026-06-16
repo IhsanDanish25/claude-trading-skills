@@ -1,0 +1,6 @@
+{
+  "results": [
+    {"ticker": "NVDA", "name": "NVIDIA Corporation", "stage": 2, "contractions": "3C", "pivot_price": 130.50, "status": "Triggered"},
+    {"ticker": "AAPL", "name": "Apple Inc.", "stage": 2, "contractions": "4C", "pivot_price": 215.00, "status": "Setting Up"}
+  ]
+}
