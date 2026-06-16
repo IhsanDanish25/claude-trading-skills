@@ -150,7 +150,7 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
         {
             "name": "VCP Screener",
             "script": str(skills_dir / "vcp-screener" / "scripts" / "screen_vcp.py"),
-            "args": ["--output-dir", "{tmpdir}", "--api-key", os.environ.get("FMP_API_KEY", "")],
+            "args": ["--output-dir", "{tmpdir}", "--api-key", os.environ.get("FMP_API_KEY", ""), "--max-candidates", "20"],
             "glob": "vcp_screener_*.json",
         },
     ]
@@ -172,7 +172,7 @@ def _run_skill(name: str, script: str, args: list[str], tmpdir: str) -> dict[str
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=300,
         )
     except subprocess.TimeoutExpired:
         logger.warning("%s timed out after 120s", name)
