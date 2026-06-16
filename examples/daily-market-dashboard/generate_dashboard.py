@@ -184,7 +184,7 @@ def _run_skill(name: str, script: str, args: list[str], tmpdir: str) -> dict[str
     if result.returncode != 0:
         stderr_preview = (result.stderr or "")[:300]
         logger.warning("%s exited with code %d: %s", name, result.returncode, stderr_preview)
-        return {"name": name, "status": "error", "data": None}
+        return {"name": name, "status": "partial", "data": None}
 
     return {"name": name, "status": "ok", "data": None}
 
