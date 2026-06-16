@@ -2,8 +2,7 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python run_trading.py"
-healthcheckPath = "/health"
-healthcheckTimeout = 30
+startCommand = "streamlit run examples/daily-market-dashboard/app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true"
+healthcheckPath = "/_stcore/health"
+healthcheckTimeout = 60
 restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 3
