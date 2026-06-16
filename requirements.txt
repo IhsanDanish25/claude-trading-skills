@@ -11,3 +11,4 @@ alpaca-trade-api>=3.0.0
 anthropic
 claude-sdk
 claude-agent-sdk>=0.2.102
+finvizfinance
