@@ -1,6 +1,6 @@
 #!/opt/homebrew/bin/python3.11
-"""Auto Trader — FTD + VCP + Claude Opus 4.7 analysis → Alpaca paper trade."""
-import os, json, logging
+"""Auto Trader — FTD + VCP + Claude Opus 4.7 + Congress/Buffett insider tracking."""
+import os, json, logging, urllib.request, re
 from pathlib import Path
 from datetime import datetime
 import anthropic
@@ -22,9 +22,6 @@ def connect_alpaca():
     acct = api.get_account()
     logger.info("Alpaca | Cash: $%.2f | %s", float(acct.cash), "PAPER" if "paper" in ALPACA_URL else "LIVE")
     return api, acct
-
-def connect_claude():
-    return anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 def load_dashboard():
     files = sorted(DASHBOARD_DIR.glob("daily_dashboard_*.md"), reverse=True)
@@ -49,124 +46,151 @@ def load_vcp():
     return [r for r in data.get("results", []) if isinstance(r, dict)
             and r.get("execution_state","") in ("Pre-breakout","Breakout")]
 
-def claude_analyze(claude, dashboard, vcp_list, ticker, price):
-    """Ask Claude Opus 4.7 to confirm or reject the trade."""
+def get_congress_trades():
+    try:
+        url = "https://www.capitoltrades.com/api/trades?pageSize=20&page=1"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        buys = [t for t in data.get("data",[]) if t.get("type","").upper() == "BUY"]
+        logger.info("Congress: %d recent buys", len(buys))
+        return buys
+    except Exception as e:
+        logger.warning("Congress trades failed: %s", e)
+        return []
+
+def get_buffett_holdings():
+    try:
+        url = "https://www.dataroma.com/m/holdings.php?m=BRK"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            html = r.read().decode("utf-8")
+        tickers = re.findall(r'stock=([A-Z]+)"', html)[:10]
+        logger.info("Buffett holdings: %s", tickers[:5])
+        return tickers
+    except Exception as e:
+        logger.warning("Buffett holdings failed: %s", e)
+        return []
+
+def claude_analyze(claude_client, dashboard, vcp_list, ticker, price, congress_buys, buffett_holdings):
     vcp_info = next((v for v in vcp_list if v.get("symbol","") == ticker), {})
-    
-    prompt = f"""You are a professional momentum trader using Minervini VCP strategy and Munger principles.
+    congress_buying = [t for t in congress_buys if t.get("ticker","").upper() == ticker.upper()]
+    buffett_owns = ticker in buffett_holdings
+
+    insider_context = ""
+    if congress_buying:
+        names = [t.get("politician", t.get("name","Unknown")) for t in congress_buying[:3]]
+        insider_context += f"\nCONGRESS BUYING {ticker}: {', '.join(names)}"
+    if buffett_owns:
+        insider_context += f"\nWARREN BUFFETT holds {ticker} in Berkshire portfolio"
+    if not insider_context:
+        insider_context = "\nNo notable insider/political buying found"
+
+    prompt = f"""You are a professional momentum trader using Minervini VCP + Munger principles + political insider data.
 
 MARKET DASHBOARD:
-{dashboard[:2000]}
+{dashboard[:1500]}
 
 VCP SETUP FOR {ticker}:
-- Current Price: ${price:.2f}
-- Execution State: {vcp_info.get('execution_state', 'Unknown')}
-- Composite Score: {vcp_info.get('composite_score', 'N/A')}
-- Rating: {vcp_info.get('rating', 'N/A')}
-- Distance from Pivot: {vcp_info.get('distance_from_pivot_pct', 'N/A')}%
-- Pattern Type: {vcp_info.get('pattern_type', 'N/A')}
+- Price: ${price:.2f}
+- State: {vcp_info.get('execution_state','Unknown')}
+- Score: {vcp_info.get('composite_score','N/A')}
+- Rating: {vcp_info.get('rating','N/A')}
+- Pivot Distance: {vcp_info.get('distance_from_pivot_pct','N/A')}%
 
-DECISION REQUIRED:
-Should I BUY {ticker} right now?
+POLITICAL & INSIDER DATA:{insider_context}
 
-Respond in this exact JSON format only:
+BUY {ticker} right now? Consider technicals + market + who else is buying.
+
+JSON only:
 {{
   "decision": "BUY" or "SKIP",
   "confidence": 1-10,
-  "reason": "one sentence explanation",
-  "risk_note": "one sentence about main risk"
+  "reason": "one sentence",
+  "insider_signal": "strong/neutral/weak",
+  "risk_note": "one sentence"
 }}"""
 
     try:
-        response = claude.messages.create(
+        response = claude_client.messages.create(
             model="claude-opus-4-7",
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}]
         )
         text = response.content[0].text.strip()
-        # Extract JSON
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        result = json.loads(text[start:end])
-        logger.info("Claude on %s: %s (confidence: %s/10) — %s",
-                    ticker, result.get("decision"), result.get("confidence"), result.get("reason"))
+        result = json.loads(text[text.find("{"):text.rfind("}")+1])
+        logger.info("Opus 4.7 on %s: %s (%s/10) insider=%s — %s",
+                    ticker, result.get("decision"), result.get("confidence"),
+                    result.get("insider_signal"), result.get("reason"))
         return result
     except Exception as e:
-        logger.error("Claude analysis failed: %s", e)
-        return {"decision": "SKIP", "confidence": 0, "reason": "Claude analysis failed"}
+        logger.error("Claude failed: %s", e)
+        return {"decision": "SKIP", "confidence": 0, "reason": "Analysis failed"}
 
 def run():
-    logger.info("=== Auto Trader + Claude Opus 4.7 | %s ===", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    logger.info("=== Auto Trader + Opus 4.7 + Insider Tracker | %s ===",
+                datetime.now().strftime("%Y-%m-%d %H:%M"))
 
-    # Connect
     api, acct = connect_alpaca()
-    claude = connect_claude()
+    claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     cash = float(acct.cash)
 
-    # Market open?
     if not api.get_clock().is_open:
         logger.info("Market CLOSED. No trades."); return
 
-    # Load dashboard
     dashboard = load_dashboard()
     if not dashboard:
-        logger.error("No dashboard found."); return
+        logger.error("No dashboard."); return
 
-    # FTD check
     ftd = parse_ftd_score(dashboard)
     logger.info("FTD Score: %.1f", ftd)
     if ftd < MIN_FTD_SCORE:
         logger.info("FTD below %d. No trades.", MIN_FTD_SCORE); return
 
-    # VCP candidates
     vcps = load_vcp()
     if not vcps:
         logger.info("No VCP setups. No trades."); return
+
+    # Fetch insider data once
+    congress_buys = get_congress_trades()
+    buffett_holdings = get_buffett_holdings()
 
     traded = 0
     for vcp in vcps[:2]:
         ticker = vcp.get("symbol", vcp.get("ticker",""))
         if not ticker: continue
 
-        # Skip if holding
         try:
             api.get_position(ticker)
             logger.info("%s: already holding, skip", ticker); continue
         except: pass
 
-        # Get price
         try:
             price = float(api.get_latest_trade(ticker).price)
         except Exception as e:
             logger.error("%s price failed: %s", ticker, e); continue
 
-        # Claude Opus 4.7 analysis
-        analysis = claude_analyze(claude, dashboard, vcps, ticker, price)
-        
-        if analysis.get("decision") != "BUY":
-            logger.info("%s: Claude says SKIP — %s", ticker, analysis.get("reason")); continue
-        
-        if analysis.get("confidence", 0) < 7:
-            logger.info("%s: Claude confidence too low (%s/10), skip", 
-                       ticker, analysis.get("confidence")); continue
+        analysis = claude_analyze(claude_client, dashboard, vcps, ticker, price,
+                                  congress_buys, buffett_holdings)
 
-        # Size position
+        if analysis.get("decision") != "BUY":
+            logger.info("%s: SKIP — %s", ticker, analysis.get("reason")); continue
+
+        if analysis.get("confidence", 0) < 7:
+            logger.info("%s: confidence %s/10 too low", ticker, analysis.get("confidence")); continue
+
         stop = price * 0.93
         shares = int((cash * RISK_PCT) / (price - stop))
         shares = min(shares, int(cash * 0.25 / price))
         if shares < 1:
             logger.warning("%s: shares=0, skip", ticker); continue
 
-        # Place order
         try:
-            order = api.submit_order(
-                symbol=ticker, qty=shares, side="buy",
-                type="market", time_in_force="day"
-            )
-            logger.info("✅ BUY %d %s @ ~$%.2f | Stop $%.2f | Claude: %s/10 | ID: %s",
+            order = api.submit_order(symbol=ticker, qty=shares, side="buy",
+                                     type="market", time_in_force="day")
+            logger.info("✅ BUY %d %s @ ~$%.2f | Stop $%.2f | Opus:%s/10 | Insider:%s | ID:%s",
                        shares, ticker, price, stop,
-                       analysis.get("confidence"), order.id)
-            logger.info("Risk note: %s", analysis.get("risk_note",""))
+                       analysis.get("confidence"), analysis.get("insider_signal"), order.id)
             traded += 1
         except Exception as e:
             logger.error("%s order failed: %s", ticker, e)
