@@ -2,7 +2,7 @@
 """Auto Trader — FTD + VCP + Claude Opus 4.7 + Congress/Buffett insider tracking."""
 import os, json, logging, urllib.request, re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 import anthropic
 import alpaca_trade_api as tradeapi
 
@@ -13,8 +13,16 @@ ALPACA_KEY    = os.environ.get("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.environ.get("ALPACA_SECRET_KEY", "")
 ALPACA_URL    = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
+DRY_RUN = os.environ.get("AUTO_TRADER_DRY_RUN", "0") == "1"
 RISK_PCT      = 0.01
 MIN_FTD_SCORE = 80
+MAX_POS_PCT   = 0.25
+MAX_TRADES_PER_RUN = 2
+STOP_LOSS_PCT = 0.07        # 7% trailing-style stop
+CONFIDENCE_MIN = 7
+DAILY_LOSS_CIRCUIT_PCT = 0.03   # skip trading if equity is down >3% on the day
+STATE_FILE = Path(__file__).parent / ".auto_trader_state.json"
 DASHBOARD_DIR = Path(__file__).parent / "examples/daily-market-dashboard/knowledge"
 
 def connect_alpaca():
@@ -29,11 +37,20 @@ def load_dashboard():
     return files[0].read_text(encoding="utf-8")
 
 def parse_ftd_score(content):
+    # Look for the explicit "Quality Score" row in the FTD report
+    # Format: "| **Quality Score** | **95/100** |"
     for line in content.splitlines():
-        if "FTD Detector" in line and "|" in line:
-            for p in line.split("|"):
-                try: return float(p.strip())
-                except: pass
+        if "Quality Score" in line and "|" in line:
+            m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*100", line)
+            if m:
+                return float(m.group(1))
+    # Fallback: any "X/100" near a Score keyword
+    for line in content.splitlines():
+        if "Score" in line and "/" in line:
+            m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*100", line)
+            if m:
+                return float(m.group(1))
+    logger.warning("FTD Quality Score not found in dashboard")
     return 0.0
 
 def load_vcp():
@@ -113,7 +130,7 @@ JSON only:
 
     try:
         response = claude_client.messages.create(
-            model="claude-opus-4-7",
+            model=ANTHROPIC_MODEL,
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -127,6 +144,59 @@ JSON only:
         logger.error("Claude failed: %s", e)
         return {"decision": "SKIP", "confidence": 0, "reason": "Analysis failed"}
 
+def load_state():
+    """Load {date: {ticker: order_id, last_equity: float, day_start_equity: float}} from disk."""
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except Exception as e:
+        logger.warning("State file unreadable, resetting: %s", e)
+        return {}
+
+def save_state(state):
+    try:
+        STATE_FILE.write_text(json.dumps(state, indent=2))
+    except Exception as e:
+        logger.warning("Could not write state: %s", e)
+
+def daily_pnl_circuit_breaker(api, state):
+    """Return (ok, pct_change) — ok=False means we should NOT trade today."""
+    today = date.today().isoformat()
+    acct = api.get_account()
+    equity = float(acct.equity)
+    last_equity = float(acct.last_equity)
+    # last_equity is end-of-previous-day from Alpaca; today's change is (equity - last_equity) / last_equity
+    if last_equity <= 0:
+        return True, 0.0
+    change = (equity - last_equity) / last_equity
+    if change <= -DAILY_LOSS_CIRCUIT_PCT:
+        logger.warning("Circuit breaker: equity down %.2f%% today (limit %.2f%%). Halting.",
+                       change * 100, DAILY_LOSS_CIRCUIT_PCT * 100)
+        return False, change
+    return True, change
+
+def attach_stop(api, ticker, qty, stop_price, parent_order_id):
+    """Attach a GTC stop-loss to a filled position. Returns order or None."""
+    if DRY_RUN:
+        logger.info("  [DRY-RUN] would attach stop @ $%.2f for %s", stop_price, ticker)
+        return None
+    try:
+        sl = api.submit_order(
+            symbol=ticker,
+            qty=qty,
+            side="sell",
+            type="stop",
+            stop_price=round(stop_price, 2),
+            time_in_force="gtc",
+            client_order_id=f"sl-{parent_order_id}",
+        )
+        logger.info("  ↳ Stop-loss attached @ $%.2f (ID:%s)", stop_price, sl.id)
+        return sl
+    except Exception as e:
+        logger.error("  ↳ Stop-loss attach FAILED for %s: %s", ticker, e)
+        return None
+
 def run():
     logger.info("=== Auto Trader + Opus 4.7 + Insider Tracker | %s ===",
                 datetime.now().strftime("%Y-%m-%d %H:%M"))
@@ -137,6 +207,16 @@ def run():
 
     if not api.get_clock().is_open:
         logger.info("Market CLOSED. No trades."); return
+
+    state = load_state()
+    today = date.today().isoformat()
+    today_bought = set(state.get(today, {}).get("tickers_bought", []))
+
+    # Daily loss circuit breaker
+    ok, change = daily_pnl_circuit_breaker(api, state)
+    if not ok:
+        logger.info("Daily P&L %.2f%%. Skipping all trades.", change * 100)
+        return
 
     dashboard = load_dashboard()
     if not dashboard:
@@ -156,10 +236,15 @@ def run():
     buffett_holdings = get_buffett_holdings()
 
     traded = 0
-    for vcp in vcps[:2]:
+    for vcp in vcps[:MAX_TRADES_PER_RUN]:
         ticker = vcp.get("symbol", vcp.get("ticker",""))
         if not ticker: continue
 
+        # Skip if we already bought this ticker today
+        if ticker in today_bought:
+            logger.info("%s: already bought today, skip", ticker); continue
+
+        # Skip if we already hold it
         try:
             api.get_position(ticker)
             logger.info("%s: already holding, skip", ticker); continue
@@ -176,14 +261,29 @@ def run():
         if analysis.get("decision") != "BUY":
             logger.info("%s: SKIP — %s", ticker, analysis.get("reason")); continue
 
-        if analysis.get("confidence", 0) < 7:
-            logger.info("%s: confidence %s/10 too low", ticker, analysis.get("confidence")); continue
+        if analysis.get("confidence", 0) < CONFIDENCE_MIN:
+            logger.info("%s: confidence %s/10 below %d, skip",
+                        ticker, analysis.get("confidence"), CONFIDENCE_MIN); continue
 
-        stop = price * 0.93
-        shares = int((cash * RISK_PCT) / (price - stop))
-        shares = min(shares, int(cash * 0.25 / price))
+        stop = round(price * (1 - STOP_LOSS_PCT), 2)
+        risk_per_share = price - stop
+        if risk_per_share <= 0:
+            logger.warning("%s: invalid stop calc, skip", ticker); continue
+        shares = int((cash * RISK_PCT) / risk_per_share)
+        shares = min(shares, int(cash * MAX_POS_PCT / price))
         if shares < 1:
             logger.warning("%s: shares=0, skip", ticker); continue
+
+        if DRY_RUN:
+            logger.info("[DRY-RUN] would BUY %d %s @ ~$%.2f | Stop $%.2f | Opus:%s/10 | Insider:%s",
+                        shares, ticker, price, stop,
+                        analysis.get("confidence"), analysis.get("insider_signal"))
+            # Persist state in dry-run too, so re-runs behave consistently
+            today_bought.add(ticker)
+            state.setdefault(today, {})["tickers_bought"] = sorted(today_bought)
+            save_state(state)
+            traded += 1
+            continue
 
         try:
             order = api.submit_order(symbol=ticker, qty=shares, side="buy",
@@ -191,6 +291,15 @@ def run():
             logger.info("✅ BUY %d %s @ ~$%.2f | Stop $%.2f | Opus:%s/10 | Insider:%s | ID:%s",
                        shares, ticker, price, stop,
                        analysis.get("confidence"), analysis.get("insider_signal"), order.id)
+
+            # Attach GTC stop-loss IMMEDIATELY
+            attach_stop(api, ticker, shares, stop, order.id)
+
+            # Persist state so re-runs won't re-buy this ticker today
+            today_bought.add(ticker)
+            state.setdefault(today, {})["tickers_bought"] = sorted(today_bought)
+            save_state(state)
+
             traded += 1
         except Exception as e:
             logger.error("%s order failed: %s", ticker, e)

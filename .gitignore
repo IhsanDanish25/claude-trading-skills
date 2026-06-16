@@ -37,6 +37,7 @@ reviews/
 # Per-symbol runtime state (e.g. parabolic-short SSR carryover files).
 # Kept out of commits so production state never leaks into the repo.
 state/
+.auto_trader_state.json
 
 # CI artifacts
 htmlcov/
