@@ -1,6 +1,11 @@
 [build]
 builder = "dockerfile"
 
-[deploy]
+[[services]]
+name = "web"
 startCommand = "streamlit run examples/daily-market-dashboard/app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true"
-restartPolicyType = "on_failure"
+
+[[services]]
+name = "claude-trading-skills"
+startCommand = "python3 auto_trader.py"
+cronSchedule = "30 9 * * 1-5"
