@@ -1,1 +1,1 @@
-worker: python scripts/run_trading.py
+web: python run_trading.py
