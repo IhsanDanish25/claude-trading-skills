@@ -20,7 +20,7 @@ import os
 import sys
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Optional
 
 # Ensure scripts directory is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -357,7 +357,7 @@ def _get_representative_stocks(
     return static, details
 
 
-def detect_divergence(heat_breakdown: dict, direction: str) -> dict | None:
+def detect_divergence(heat_breakdown: dict, direction: str) -> Optional[dict]:
     """Detect divergence between price momentum and breadth signals."""
     momentum = heat_breakdown.get("momentum_strength", 50)
     uptrend = heat_breakdown.get("uptrend_signal", 50)
