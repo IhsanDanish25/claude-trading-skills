@@ -9,3 +9,4 @@ plotly>=5.0.0
 python-dotenv>=1.0.0
 alpaca-trade-api>=3.0.0
 anthropic
+claude-sdk
