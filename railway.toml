@@ -1,6 +1,6 @@
 [build]
-builder = "nixpacks"
+builder = "dockerfile"
 
 [deploy]
-startCommand = "streamlit run examples/daily-market-dashboard/app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true"
+startCommand = "streamlit run examples/daily-market-dashboard/app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true"
 restartPolicyType = "on_failure"
