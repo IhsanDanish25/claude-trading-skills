@@ -150,7 +150,11 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
         {
             "name": "VCP Screener",
             "script": str(skills_dir / "vcp-screener" / "scripts" / "screen_vcp.py"),
-            "args": ["--output-dir", "{tmpdir}", "--api-key", os.environ.get("FMP_API_KEY", ""), "--max-candidates", "20"],
+            "args": ["--output-dir", "{tmpdir}", "--api-key", os.environ.get("FMP_API_KEY", ""),
+                     "--universe", "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA",
+                     "AVGO", "JPM", "V", "UNH", "XOM", "LLY", "JNJ", "MA",
+                     "HD", "PG", "COST", "ABBV", "MRK", "CVX", "MCD", "NFLX",
+                     "CRM", "AMD", "ORCL", "WMT", "BAC", "PEP", "KO"],
             "glob": "vcp_screener_*.json",
         },
     ]
