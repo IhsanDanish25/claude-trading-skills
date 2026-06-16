@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -373,7 +371,7 @@ def _build_prompt_context(
             knowledge_matches = search_knowledge_markdown(
                 prompt,
                 knowledge_dir=knowledge_dir,
-                project_root=project_root,
+                project_root=PROJECT_ROOT,
                 max_hits=KNOWLEDGE_MAX_HITS,
             )
             builder.add_knowledge_preamble(
@@ -432,13 +430,8 @@ def _find_latest_dashboard() -> str | None:
 
 
 def _resolve_project_root() -> str:
-    """Resolve the parent trading-skills repository root with cloud fallback."""
+    """Resolve the parent trading-skills repository root."""
     candidate = PROJECT_ROOT.parent.parent
-    
-    # Fallback: If we hit system root or skills doesn't exist there, use the working directory
-    if str(candidate) == "/" or not (candidate / "skills").is_dir():
-        candidate = Path(os.getcwd())
-        
     if (candidate / "skills").is_dir():
         return str(candidate)
     return str(PROJECT_ROOT)
@@ -454,4 +447,184 @@ def render_app() -> None:
 
     with st.sidebar:
         st.subheader(_msg("sidebar_title"))
-        st.caption(_msg("sidebar_project",
+        st.caption(_msg("sidebar_project", project=PROJECT_ROOT.name))
+        st.caption(_msg("sidebar_auth", auth=get_auth_description()))
+        if st.button(_msg("clear_chat"), use_container_width=True):
+            try:
+                cleanup_all_uploads(
+                    project_root=PROJECT_ROOT,
+                    storage_dir=ATTACHMENTS_STORAGE_DIR,
+                )
+            except (ValueError, OSError):
+                logger.exception("Attachment storage cleanup failed")
+            st.session_state.messages = []
+            st.session_state.attachment_session_id = uuid4().hex
+            st.session_state.request_timestamps = []
+            st.rerun()
+
+        st.divider()
+        st.subheader(_msg("dashboard_title"))
+        dashboard_lang = st.radio(
+            _msg("dashboard_lang_label"),
+            options=["en", "ja"],
+            format_func=lambda x: "English" if x == "en" else "日本語",
+            index=0,
+            horizontal=True,
+        )
+        if st.button(_msg("dashboard_regenerate"), use_container_width=True):
+            with st.spinner(_msg("dashboard_running")):
+                try:
+                    result = subprocess.run(
+                        [
+                            "python3",
+                            "generate_dashboard.py",
+                            "--project-root",
+                            _resolve_project_root(),
+                            "--lang",
+                            dashboard_lang,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        cwd=str(PROJECT_ROOT),
+                    )
+                except subprocess.TimeoutExpired:
+                    st.error(_msg("dashboard_failed", details="Timeout after 300s"))
+                    result = None
+            if result is not None:
+                if result.returncode == 0:
+                    st.success(_msg("dashboard_success"))
+                else:
+                    detail = (result.stderr or result.stdout or "unknown error")[:200]
+                    st.error(_msg("dashboard_failed", details=detail))
+
+    for warning in get_auth_compliance_warnings():
+        st.warning(warning)
+
+    runtime_errors = validate_runtime_environment()
+    if runtime_errors:
+        st.error(_msg("config_issue"))
+        for error in runtime_errors:
+            st.caption(error)
+
+    tab_dashboard, tab_chat = st.tabs(
+        [
+            _msg("dashboard_title"),
+            _msg("tab_chat"),
+        ]
+    )
+
+    with tab_dashboard:
+        dashboard_content = _find_latest_dashboard()
+        if dashboard_content:
+            st.markdown(dashboard_content)
+        else:
+            st.info(_msg("dashboard_empty"))
+
+    with tab_chat:
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+    # chat_input must be outside tabs to stay pinned at the bottom
+    submitted_input: str | ChatInputValue | None
+    if ATTACHMENTS_ENABLED:
+        submitted_input = st.chat_input(
+            _msg("prompt_placeholder"),
+            disabled=bool(runtime_errors),
+            accept_file="multiple",
+            file_type=list(ATTACHMENTS_ALLOWED_EXTENSIONS),
+        )
+    else:
+        submitted_input = st.chat_input(
+            _msg("prompt_placeholder"),
+            disabled=bool(runtime_errors),
+        )
+    if submitted_input is None:
+        return
+
+    # Auto-switch to Chat tab when user submits from Dashboard tab
+    st.components.v1.html(
+        """<script>
+        (function() {
+            var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+            if (tabs.length >= 2) { tabs[1].click(); }
+        })();
+        </script>""",
+        height=0,
+    )
+
+    uploaded_files: list[Any] = []
+    if isinstance(submitted_input, str):
+        prompt = submitted_input
+    else:
+        prompt = submitted_input.text
+        uploaded_files = list(submitted_input.files) if hasattr(submitted_input, "files") else []
+
+    if not prompt and not uploaded_files:
+        return
+    if not prompt.strip() and uploaded_files:
+        prompt = _msg("attachment_only_prompt")
+
+    updated_timestamps, is_limited, retry_after = _consume_rate_limit(
+        now_seconds=datetime.now(UTC).timestamp(),
+        timestamps=st.session_state.request_timestamps,
+        limit=REQUESTS_PER_MINUTE_LIMIT,
+    )
+    st.session_state.request_timestamps = updated_timestamps
+    if is_limited:
+        st.warning(
+            _msg(
+                "rate_limit_exceeded",
+                limit=REQUESTS_PER_MINUTE_LIMIT,
+                seconds=retry_after,
+            )
+        )
+        return
+
+    prompt_for_agent, context_warnings, attachment_names = _build_prompt_context(
+        prompt,
+        uploaded_files,
+        attachment_session_id=st.session_state.attachment_session_id,
+    )
+
+    user_message_text = prompt
+    if attachment_names:
+        user_message_text = f"{prompt}\n\n{_msg('attachments_selected')}\n" + "\n".join(
+            f"- {filename}" for filename in attachment_names
+        )
+
+    st.session_state.messages.append({"role": "user", "content": user_message_text})
+    with tab_chat:
+        with st.chat_message("user"):
+            st.markdown(user_message_text)
+
+        with st.chat_message("assistant"):
+            status_placeholder = st.empty()
+            response_placeholder = st.empty()
+            status_placeholder.status(_msg("thinking"), state="running")
+            for warning in context_warnings:
+                st.caption(f"{_msg('note')}: {warning}")
+
+            try:
+                response_text = st.session_state.bridge.run(
+                    _stream_response(
+                        agent=st.session_state.agent,
+                        prompt=prompt_for_agent,
+                        status_placeholder=status_placeholder,
+                        response_placeholder=response_placeholder,
+                    )
+                )
+            except Exception as exc:
+                logger.exception("Chat request failed")
+                response_text = _msg("chat_error", details=exc)
+            finally:
+                status_placeholder.empty()
+
+            response_placeholder.markdown(response_text)
+
+    st.session_state.messages.append({"role": "assistant", "content": response_text})
+
+
+if __name__ == "__main__":
+    render_app()
