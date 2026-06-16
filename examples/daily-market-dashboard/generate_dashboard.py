@@ -64,17 +64,29 @@ _I18N: dict[str, dict[str, str]] = {
 def _t(lang: str, key: str) -> str:
     return _I18N.get(lang, _I18N["en"]).get(key, _I18N["en"].get(key, key))
 
+def _load_latest_vcp(project_root: Path) -> Any:
+    """Load most recent VCP JSON — from dashboard dir or project root."""
+    search_dirs = [
+        Path(__file__).resolve().parent,
+        project_root,
+        project_root / "reports",
+        project_root / "skills" / "vcp-screener" / "scripts",
+    ]
+    candidates = []
+    for d in search_dirs:
+        candidates.extend(d.glob("vcp_screener_*.json"))
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    logger.info("Reusing saved VCP JSON: %s", latest)
+    try:
+        return json.loads(latest.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to load VCP JSON: %s", exc)
+        return None
+
 def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
     skills_dir = project_root / "skills"
-    # Expanded 60-stock universe for better VCP hits
-    vcp_universe = [
-        "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","AVGO","JPM","V",
-        "UNH","XOM","LLY","JNJ","MA","HD","PG","COST","ABBV","MRK",
-        "CVX","MCD","NFLX","CRM","AMD","ORCL","WMT","BAC","PEP","KO",
-        "NOW","PANW","ANET","CRWD","MRVL","FICO","GEV","VST","CEG","AXON",
-        "PLTR","APP","HOOD","COIN","RBLX","UBER","ABNB","SNOW","MDB","DDOG",
-        "TTD","ZS","OKTA","NET","GTLB","HUBS","BILL","PAYC","VEEV","WDAY",
-    ]
     return [
         {
             "name": "FTD Detector",
@@ -101,13 +113,6 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
             "glob": "theme_detector_*.json",
         },
         {
-            "name": "VCP Screener",
-            "script": str(skills_dir / "vcp-screener" / "scripts" / "screen_vcp.py"),
-            "args": ["--output-dir", "{tmpdir}", "--api-key", os.environ.get("FMP_API_KEY", ""),
-                     "--universe"] + vcp_universe,
-            "glob": "vcp_screener_*.json",
-        },
-        {
             "name": "Market Top Detector",
             "script": str(skills_dir / "market-top-detector" / "scripts" / "market_top_detector.py"),
             "args": ["--output-dir", "{tmpdir}", "--api-key", os.environ.get("FMP_API_KEY", "")],
@@ -115,7 +120,7 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
         },
         {
             "name": "Economic Calendar",
-            "script": str(skills_dir / "economic-calendar-fetcher" / "scripts" / "economic_calendar.py"),
+            "script": str(skills_dir / "economic-calendar-fetcher" / "scripts" / "get_economic_calendar.py"),
             "args": ["--output-dir", "{tmpdir}", "--api-key", os.environ.get("FMP_API_KEY", "")],
             "glob": "economic_calendar_*.json",
         },
@@ -152,9 +157,14 @@ def _collect_json(tmpdir: str, pattern: str) -> Any | None:
 def run_all_skills(project_root: Path) -> dict[str, Any]:
     defs = _skill_defs(project_root)
     results: dict[str, Any] = {}
+
+    # VCP: reuse saved JSON, no API calls
+    vcp_data = _load_latest_vcp(project_root)
+    results["VCP Screener"] = {"name": "VCP Screener", "status": "cached", "data": vcp_data}
+
     with tempfile.TemporaryDirectory(prefix="dashboard_") as tmpdir:
         futures = {}
-        with ProcessPoolExecutor(max_workers=7) as executor:
+        with ProcessPoolExecutor(max_workers=6) as executor:
             for skill_def in defs:
                 future = executor.submit(
                     _run_skill, skill_def["name"], skill_def["script"],
@@ -186,8 +196,6 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
     lines: list[str] = []
     lines.append(f"# {_t(lang, 'title')}  {today.isoformat()}")
     lines.append("")
-
-    # Signal table
     lines.append(f"## {_t(lang, 'signal_dashboard')}")
     lines.append("")
     lines.append(f"| {_t(lang, 'col_skill')} | {_t(lang, 'col_score')} | {_t(lang, 'col_zone')} |")
@@ -225,7 +233,7 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
     if vcp and isinstance(vcp, dict):
         vcp_results = vcp.get("results", [])
         vcp_count = len(vcp_results) if isinstance(vcp_results, list) else 0
-    lines.append(f"| VCP Screener | {vcp_count} | {_t(lang, 'candidates')} |")
+    lines.append(f"| VCP Screener | {vcp_count} | {_t(lang, 'candidates')} (cached) |")
 
     mktop = results.get("Market Top Detector", {}).get("data")
     mktop_signal = _safe_get(mktop, "signal", default="N/A") if mktop else "N/A"
@@ -233,14 +241,12 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
     lines.append(f"| Market Top Detector | {mktop_score} | {mktop_signal} |")
 
     econ = results.get("Economic Calendar", {}).get("data")
-    econ_count = 0
-    if econ and isinstance(econ, (list, dict)):
+    econ_list = []
+    if econ:
         econ_list = econ if isinstance(econ, list) else econ.get("events", [])
-        econ_count = len(econ_list) if isinstance(econ_list, list) else 0
-    lines.append(f"| Economic Calendar | {econ_count} | events this week |")
+    lines.append(f"| Economic Calendar | {len(econ_list) if econ_list else 0} | events this week |")
     lines.append("")
 
-    # FTD
     lines.append(f"## {_t(lang, 'ftd_status')}")
     lines.append("")
     if ftd:
@@ -253,7 +259,6 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
         lines.append(f"*FTD Detector {_t(lang, 'no_data')}*")
     lines.append("")
 
-    # Breadth & Uptrend
     lines.append(f"## {_t(lang, 'breadth_uptrend')}")
     lines.append("")
     if uptrend:
@@ -264,7 +269,6 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
         lines.append(f"*{_t(lang, 'no_breadth')}*")
     lines.append("")
 
-    # Themes
     lines.append(f"## {_t(lang, 'theme_highlights')}")
     lines.append("")
     if theme and isinstance(theme, dict):
@@ -285,7 +289,6 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
         lines.append(f"*Theme Detector {_t(lang, 'no_data')}*")
     lines.append("")
 
-    # VCP
     lines.append(f"## {_t(lang, 'vcp_candidates')}")
     lines.append("")
     if vcp and isinstance(vcp, dict):
@@ -308,7 +311,6 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
         lines.append(f"*VCP Screener {_t(lang, 'no_data')}*")
     lines.append("")
 
-    # Market Top Detector
     lines.append(f"## {_t(lang, 'market_top')}")
     lines.append("")
     if mktop and isinstance(mktop, dict):
@@ -319,30 +321,22 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
         lines.append(f"*{_t(lang, 'no_market_top')}*")
     lines.append("")
 
-    # Economic Calendar
     lines.append(f"## {_t(lang, 'econ_cal')}")
     lines.append("")
-    if econ:
-        econ_list = econ if isinstance(econ, list) else econ.get("events", [])
-        if isinstance(econ_list, list) and econ_list:
-            lines.append("| Date | Event | Impact |")
-            lines.append("|------|-------|--------|")
-            for ev in econ_list[:10]:
-                if isinstance(ev, dict):
-                    dt = ev.get("date", ev.get("time", "?"))
-                    name = ev.get("event", ev.get("name", "?"))
-                    impact = ev.get("impact", ev.get("importance", "?"))
-                    lines.append(f"| {dt} | {name} | {impact} |")
-                elif isinstance(ev, str):
-                    lines.append(f"| — | {ev} | — |")
-        else:
-            lines.append(f"*{_t(lang, 'no_econ_cal')}*")
+    if econ_list and isinstance(econ_list, list):
+        lines.append("| Date | Event | Impact |")
+        lines.append("|------|-------|--------|")
+        for ev in econ_list[:10]:
+            if isinstance(ev, dict):
+                dt = ev.get("date", ev.get("time", "?"))
+                name = ev.get("event", ev.get("name", "?"))
+                impact = ev.get("impact", ev.get("importance", "?"))
+                lines.append(f"| {dt} | {name} | {impact} |")
     else:
         lines.append(f"*{_t(lang, 'no_econ_cal')}*")
     lines.append("")
 
     lines.append("---")
-    lines.append("")
     lines.append(f"*{_t(lang, 'generated_at')} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
     return "\n".join(lines)
 
@@ -366,7 +360,7 @@ def main() -> None:
         logger.error("skills/ not found at %s", project_root)
         sys.exit(1)
     logger.info("Project root: %s", project_root)
-    logger.info("Running 7 skills in parallel...")
+    logger.info("Running 6 skills + VCP from cache...")
     results = run_all_skills(project_root)
     for name, result in results.items():
         logger.info("  %s: status=%s, has_data=%s", name, result.get("status"), result.get("data") is not None)
