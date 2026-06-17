@@ -19,6 +19,7 @@ env/
 .idea/
 .vscode/
 .claude/
+.env
 .envrc
 .mcp.json
 
