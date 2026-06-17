@@ -1,151 +1,163 @@
-#!/usr/bin/env python3
 """
-Market Open Routine — 08:30 EST / 11:30 Riyadh
-Execute planned trades from pre-market research
-READ memory → TRADE → WRITE memory
+MARKET-OPEN ROUTINE — 8:30 AM ET, Mon-Fri
+──────────────────────────────────────────
+1. Load pre-market watchlist (or re-screen if missing)
+2. Confirm market is open
+3. Filter by opening volume + price action
+4. Execute buys on top AI-scored setups
+5. Set alerts / log orders
 """
-import os, json, logging
-from pathlib import Path
-from datetime import datetime, date
-import anthropic
-import alpaca_trade_api as tradeapi
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+import json
+import datetime
+import pytz
+import time
 
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ALPACA_KEY    = os.environ.get("ALPACA_API_KEY", "")
-ALPACA_SECRET = os.environ.get("ALPACA_SECRET_KEY", "")
-ALPACA_URL    = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-MEMORY_DIR    = Path(__file__).parent.parent / "memory"
-DRY_RUN       = os.environ.get("AUTO_TRADER_DRY_RUN", "0") == "1"
+from core import logger, config
+from core.broker   import BrokerClient
+from core.fmp      import get_quotes, get_market_breadth
+from core.analyst  import analyze_market_regime, score_vcp_candidates
+from core.screener import screen
 
-def read_memory():
-    memory = {}
-    for f in MEMORY_DIR.glob("*.md"):
-        memory[f.stem] = f.read_text(encoding="utf-8")
-    return memory
+log = logger.setup("market_open")
+ET  = pytz.timezone("America/New_York")
 
-def write_memory(filename, content):
-    (MEMORY_DIR / filename).write_text(content, encoding="utf-8")
-    logger.info("Memory updated: %s", filename)
+WATCHLIST_PATH = "/tmp/pre_market_watchlist.json"
+MAX_BUYS       = 3   # max new entries at open
+
+
+def load_watchlist() -> dict:
+    try:
+        with open(WATCHLIST_PATH) as f:
+            data = json.load(f)
+        age_mins = (datetime.datetime.now(ET) -
+                    datetime.datetime.fromisoformat(data["generated"])
+                    .astimezone(ET)).seconds / 60
+        if age_mins > 180:
+            log.warning(f"Watchlist stale ({age_mins:.0f} min old) — rescreening")
+            raise FileNotFoundError
+        log.info(f"Watchlist loaded ({age_mins:.0f} min old)")
+        return data
+    except (FileNotFoundError, KeyError, Exception) as e:
+        log.warning(f"No watchlist ({e}) — running fresh screen")
+        return None
+
 
 def run():
-    logger.info("=== MARKET OPEN ROUTINE | %s ===", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    logger.banner(log, "MARKET OPEN — 8:30 AM ET")
 
-    # READ
-    memory = read_memory()
-    api = tradeapi.REST(ALPACA_KEY, ALPACA_SECRET, ALPACA_URL)
-    acct = api.get_account()
-    cash = float(acct.cash)
-    equity = float(acct.equity)
-    logger.info("Portfolio | Cash: $%.2f | Equity: $%.2f", cash, equity)
+    broker = BrokerClient()
 
-    if not api.get_clock().is_open:
-        logger.info("Market not open yet"); return
+    # ── Wait for market open ──────────────────────────────────────────────────
+    for attempt in range(12):   # wait up to 2 min
+        if broker.is_market_open():
+            log.info("Market is OPEN ✓")
+            break
+        log.info(f"Market not yet open, waiting... ({attempt+1}/12)")
+        time.sleep(10)
+    else:
+        log.error("Market still closed after 2 min wait — aborting")
+        return
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    # ── Load watchlist ────────────────────────────────────────────────────────
+    watchlist_data = load_watchlist()
 
-    # Get positions
-    try:
-        positions = api.list_positions()
-        pos_summary = "\n".join([f"- {p.symbol}: {p.qty} shares @ ${p.avg_entry_price} | P&L: ${p.unrealized_pl}" for p in positions])
-    except:
-        pos_summary = "No positions"
+    if watchlist_data:
+        regime   = watchlist_data.get("regime", {})
+        buy_list = watchlist_data.get("buy_list", [])
+    else:
+        # Fresh screen + regime
+        breadth = get_market_breadth()
+        regime  = analyze_market_regime(breadth)
+        raw     = screen()
+        buy_list = score_vcp_candidates(raw[:15])
+        buy_list = [s for s in buy_list if s.get("action") == "BUY"]
 
-    prompt = f"""You are an autonomous trading agent executing the market open routine.
+    trade_bias = regime.get("trade_bias", "moderate")
+    log.info(f"Regime: {regime.get('regime','?').upper()} | Bias: {trade_bias}")
 
-AGENT INSTRUCTIONS:
-{memory.get('agent_instructions', '')}
+    if trade_bias == "cash":
+        log.warning("Cash bias — NO new entries")
+        return
 
-TRADING STRATEGY:
-{memory.get('trading_strategy', '')}
+    # ── Account check ─────────────────────────────────────────────────────────
+    pv        = broker.portfolio_value()
+    pos_count = broker.position_count()
+    slots     = config.MAX_OPEN_POSITIONS - pos_count
 
-PRE-MARKET RESEARCH (from earlier today):
-{memory.get('research_log', '')}
+    log.info(f"Portfolio: ${pv:,.2f} | Positions: {pos_count} | Slots: {slots}")
 
-TRADE LOG:
-{memory.get('trade_log', '')}
+    if slots <= 0:
+        log.info("No slots available — no buys")
+        return
 
-CURRENT PORTFOLIO:
-- Cash: ${cash:,.2f}
-- Equity: ${equity:,.2f}
-- Current Positions: {pos_summary}
+    if not buy_list:
+        log.info("No BUY candidates — nothing to execute")
+        return
 
-TASK: Market open execution decision.
-1. Based on pre-market research, which trades should execute NOW?
-2. For each trade: ticker, shares, entry reason, stop price
-3. Any positions to exit based on new information?
+    # ── Live quote filter: confirm volume + price ─────────────────────────────
+    symbols     = [c["symbol"] for c in buy_list[:10]]
+    live_quotes = get_quotes(symbols)
 
-Return JSON:
-{{
-  "trades_to_execute": [
-    {{"ticker": "NVDA", "action": "BUY", "reason": "VCP breakout + defense theme", "confidence": 8}}
-  ],
-  "positions_to_exit": [],
-  "market_assessment": "BULLISH/NEUTRAL/BEARISH",
-  "notes": "brief summary"
-}}"""
+    confirmed = []
+    for candidate in buy_list:
+        sym = candidate["symbol"]
+        q   = live_quotes.get(sym, {})
+        if not q:
+            continue
 
-    try:
-        response = client.messages.create(
-            model="claude-opus-4-7",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        text = response.content[0].text.strip()
-        result = json.loads(text[text.find("{"):text.rfind("}")+1])
-        logger.info("Opus 4.7 decision: %s", result)
+        live_price  = float(q.get("price", 0))
+        live_vol    = float(q.get("volume", 0))
+        avg_vol     = float(q.get("avgVolume", 1))
+        live_rel_v  = live_vol / avg_vol if avg_vol > 0 else 0
 
-        trades_executed = []
-        for trade in result.get("trades_to_execute", []):
-            ticker = trade.get("ticker")
-            confidence = trade.get("confidence", 0)
+        # At open: rel volume will be low — normalize for time-of-day
+        # 8:30 AM = ~10 min in. Expect ~(10/390) of daily vol ≈ 2.5%
+        # So actual rel vol check loosened
+        passes_vol   = live_rel_v >= 0.3 or live_vol > 100_000
+        passes_price = config.MIN_PRICE <= live_price <= config.MAX_PRICE
 
-            if confidence < 7:
-                logger.info("%s: confidence too low (%s/10)", ticker, confidence); continue
+        log.info(f"  {sym}: ${live_price:.2f} | rel_vol={live_rel_v:.2f} | "
+                 f"vol={passes_vol} price={passes_price}")
 
-            try:
-                api.get_position(ticker)
-                logger.info("%s: already holding", ticker); continue
-            except: pass
+        if passes_vol and passes_price:
+            confirmed.append({**candidate, "live_price": live_price, "live_rel_vol": live_rel_v})
 
-            try:
-                price = float(api.get_latest_trade(ticker).price)
-                stop = round(price * 0.93, 2)
-                risk_per_share = price - stop
-                shares = int((cash * 0.01) / risk_per_share)
-                shares = min(shares, int(cash * 0.25 / price))
-                if shares < 1: continue
+    log.info(f"Confirmed after live filter: {len(confirmed)}")
 
-                if DRY_RUN:
-                    logger.info("[DRY-RUN] BUY %d %s @ $%.2f | Stop $%.2f", shares, ticker, price, stop)
-                    trades_executed.append(f"{ticker} {shares}sh @${price:.2f}")
-                else:
-                    order = api.submit_order(symbol=ticker, qty=shares, side="buy",
-                                            type="market", time_in_force="day")
-                    api.submit_order(symbol=ticker, qty=shares, side="sell",
-                                    type="trailing_stop", trail_percent=10,
-                                    time_in_force="gtc")
-                    logger.info("✅ BUY %d %s @ ~$%.2f | 10%% trailing stop | ID: %s",
-                               shares, ticker, price, order.id)
-                    trades_executed.append(f"{ticker} {shares}sh @${price:.2f}")
-            except Exception as e:
-                logger.error("%s trade failed: %s", ticker, e)
+    # ── Execute buys ──────────────────────────────────────────────────────────
+    buys_taken = 0
+    max_buys   = min(MAX_BUYS, slots)
 
-        # WRITE — update trade log
-        today = date.today().isoformat()
-        trade_log = memory.get("trade_log", "")
-        if trades_executed:
-            new_entries = "\n".join([f"| {today} | {t} | OPEN | - | - | - | Market open routine |"
-                                    for t in trades_executed])
-            trade_log = trade_log.replace("_None_", new_entries)
-            write_memory("trade_log.md", trade_log)
+    if trade_bias == "defensive":
+        max_buys = min(1, max_buys)   # defensive: max 1 new entry
+        size_pct = config.MAX_POSITION_SIZE_PCT * 0.5
+    elif trade_bias == "aggressive":
+        size_pct = config.MAX_POSITION_SIZE_PCT * 1.0
+    else:
+        size_pct = config.MAX_POSITION_SIZE_PCT * 0.75
 
-        logger.info("=== MARKET OPEN COMPLETE | %d trades ===", len(trades_executed))
+    for c in confirmed[:max_buys]:
+        sym    = c["symbol"]
+        score  = c.get("score", 0)
+        reason = c.get("reason", "")
+        amount = pv * size_pct
 
-    except Exception as e:
-        logger.error("Market open routine failed: %s", e)
+        log.info(f"  Buying {sym} | score={score} | ${amount:,.0f} | {reason}")
+
+        try:
+            result = broker.buy(sym, dollar_amount=amount)
+            log.info(f"  ✓ Order placed: {result['qty']} shares @ ~${result['price']:.2f} | "
+                     f"SL={result['stop']} TP={result['target']}")
+            buys_taken += 1
+        except Exception as e:
+            log.error(f"  ✗ Buy {sym} failed: {e}")
+
+    log.info(f"Market open complete | Buys taken: {buys_taken}")
+    logger.banner(log, "MARKET OPEN COMPLETE")
+
 
 if __name__ == "__main__":
     run()
