@@ -1,10 +1,14 @@
-#!/opt/homebrew/bin/python3.11
+#!/usr/bin/env python3
 """Auto Trader — FTD + VCP + Claude Opus 4.7 + Congress/Buffett insider tracking."""
-import os, json, logging, urllib.request, re
+import os, json, logging, urllib.request, re, sys
 from pathlib import Path
 from datetime import datetime, date
 import anthropic
 import alpaca_trade_api as tradeapi
+
+# Auto-connect chain: verify Alpaca credentials on startup
+sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
+from alpaca_auto_connect import run_chain as alpaca_auto_connect  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -200,6 +204,13 @@ def attach_stop(api, ticker, qty, stop_price, parent_order_id):
 def run():
     logger.info("=== Auto Trader + Opus 4.7 + Insider Tracker | %s ===",
                 datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+    # Auto-connect chain: detect env, validate creds, write state
+    logger.info("Running Alpaca auto-connect chain...")
+    chain_rc = alpaca_auto_connect(dry_run=False, json_output=False)
+    if chain_rc != 0:
+        logger.error("Alpaca auto-connect failed (exit %d). Aborting.", chain_rc)
+        return
 
     api, acct = connect_alpaca()
     claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)

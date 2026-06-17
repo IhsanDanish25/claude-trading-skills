@@ -1,1 +1,1 @@
-startCommand = "python3 auto_trader.py"
+startCommand = "python3 scripts/alpaca_auto_connect.py && python3 auto_trader.py"
