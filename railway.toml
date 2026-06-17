@@ -2,9 +2,6 @@
 builder = "dockerfile"
 
 [deploy]
-startCommand = "python3 scheduler.py"
+startCommand = "streamlit run examples/daily-market-dashboard/app.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
-
-[cron]
-schedule = "*/10 10-20 * * 1-5"
