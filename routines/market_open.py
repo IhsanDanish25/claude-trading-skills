@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 MARKET-OPEN ROUTINE — 8:30 AM ET, Mon-Fri
 ──────────────────────────────────────────
