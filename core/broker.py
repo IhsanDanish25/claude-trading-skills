@@ -15,10 +15,6 @@ from alpaca.trading.requests import (
 from alpaca.trading.enums import (
     OrderSide, TimeInForce, QueryOrderStatus, OrderClass
 )
-from alpaca.trading.requests import (
-    StopLossRequest, TakeProfitRequest,
-    GetPortfolioHistoryRequest,
-)
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame
