@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3.11
+#!/usr/bin/env python3
 """
 Midday Routine — 12:00 EST / 15:00 Riyadh
 Risk mitigation + portfolio rebalance

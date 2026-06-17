@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3.11
+#!/usr/bin/env python3
 """
 Market Close Routine — 15:00 EST / 18:00 Riyadh
 EOD journaling + performance summary + Telegram notification

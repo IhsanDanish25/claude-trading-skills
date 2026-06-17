@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3.11
+#!/usr/bin/env python3
 """
 Pre-Market Routine — 06:00 EST / 09:00 Riyadh
 Catalyst identification + deep research via Opus 4.8

@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3.11
+#!/usr/bin/env python3
 """
 Weekly Review — Friday 16:00 EST / 19:00 Riyadh
 Self-grade + strategy iteration + Telegram summary

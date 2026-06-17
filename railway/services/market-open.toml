@@ -1,0 +1,3 @@
+[deploy]
+startCommand = "python3 routines/run.py"
+cronSchedule = "30 8 * * 1-5"
