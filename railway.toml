@@ -1,13 +1,10 @@
 [build]
-builder = "nixpacks"
+builder = "dockerfile"
 
 [deploy]
 startCommand = "python3 scheduler.py"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
 
-[[services]]
-name = "trading-bot-scheduler"
-
-[services.cron]
-schedule = "*/10 6-16 * * 1-5"
+[cron]
+schedule = "*/10 10-20 * * 1-5"
