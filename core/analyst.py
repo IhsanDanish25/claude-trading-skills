@@ -2,6 +2,7 @@
 Claude AI analyst.
 Sends market data → gets structured BUY/SKIP/SELL decisions.
 """
+from __future__ import annotations
 import anthropic
 import json
 import logging
@@ -52,7 +53,8 @@ Respond ONLY with valid JSON array. Schema per element:
 {"symbol":"","score":0-100,"action":"BUY|WATCH|SKIP","reason":"<1 sentence>"}
 Sort by score descending."""
 
-    user = f"VCP candidates:\n{json.dumps(candidates, indent=2)}"
+    user = f"VCP candidates:
+{json.dumps(candidates, indent=2)}"
     raw  = _ask(system, user, max_tokens=2048)
 
     try:
@@ -74,7 +76,9 @@ For each position decide: HOLD, SELL (exit now), or TIGHTEN_STOP (move stop up).
 Respond ONLY with valid JSON array. Schema per element:
 {"symbol":"","action":"HOLD|SELL|TIGHTEN_STOP","reason":"<1 sentence>","new_stop":null_or_price}"""
 
-    user = f"Market regime: {market_regime}\nPositions:\n{json.dumps(positions, indent=2)}"
+    user = f"Market regime: {market_regime}
+Positions:
+{json.dumps(positions, indent=2)}"
     raw  = _ask(system, user, max_tokens=1024)
 
     try:
@@ -98,7 +102,8 @@ Write a concise weekly review (max 300 words):
 3. Next week plan (max 3 action items)
 Be specific, data-driven, no fluff."""
 
-    user = f"Week stats:\n{json.dumps(stats, indent=2)}"
+    user = f"Week stats:
+{json.dumps(stats, indent=2)}"
     return _ask(system, user, max_tokens=600)
 
 
@@ -112,7 +117,8 @@ FTD = 4th+ day of rally attempt, index up 1.7%+ on higher volume than prior day.
 Respond ONLY with valid JSON:
 {"ftd_detected":bool,"ftd_date":"YYYY-MM-DD or null","confidence":0-100,"details":"<1 sentence>"}"""
 
-    user = f"Price/volume data (last 20 days):\n{json.dumps(price_data, indent=2)}"
+    user = f"Price/volume data (last 20 days):
+{json.dumps(price_data, indent=2)}"
     raw  = _ask(system, user)
 
     try:
