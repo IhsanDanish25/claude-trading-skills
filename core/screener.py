@@ -2,6 +2,7 @@
 VCP (Volatility Contraction Pattern) screener.
 Scores stocks for tight-base breakout setups.
 """
+from __future__ import annotations
 import logging
 import statistics
 from core.fmp import get_quotes, get_daily_bars, get_52w_stats
