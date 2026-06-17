@@ -1,7 +1,13 @@
 [server]
-address = "127.0.0.1"
 enableXsrfProtection = true
 enableCORS = true
 
+[theme]
+primaryColor = "#4FC3F7"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#1A1F2E"
+textColor = "#FAFAFA"
+font = "sans serif"
+
 [browser]
-serverAddress = "127.0.0.1"
+gatherUsageStats = false

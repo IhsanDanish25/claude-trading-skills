@@ -144,8 +144,97 @@ _CUSTOM_CSS = """
 [data-testid="stChatMessage"] h2 { font-size: 1.2rem !important; }
 [data-testid="stChatMessage"] h3 { font-size: 1.05rem !important; }
 [data-testid="stChatMessage"] p { margin-bottom: 0.4em !important; }
-.stMainBlockContainer { padding-top: 1.5rem !important; }
+.stMainBlockContainer { padding-top: 1rem !important; }
 [data-testid="stStatusWidget"] { display: none !important; }
+
+/* Dashboard professional styling */
+.dashboard-header {
+    background: linear-gradient(135deg, #1A1F2E 0%, #0E1117 100%);
+    padding: 1.5rem 2rem;
+    border-radius: 12px;
+    margin-bottom: 1.5rem;
+    border: 1px solid #2D3748;
+}
+.dashboard-header h1 {
+    margin: 0 0 0.3rem 0;
+    font-size: 1.8rem;
+    color: #FAFAFA;
+}
+.dashboard-header p {
+    margin: 0;
+    color: #A0AEC0;
+    font-size: 0.9rem;
+}
+.metric-card {
+    background: #1A1F2E;
+    border: 1px solid #2D3748;
+    border-radius: 10px;
+    padding: 1.2rem;
+    text-align: center;
+    transition: border-color 0.2s;
+}
+.metric-card:hover { border-color: #4FC3F7; }
+.metric-card .label {
+    font-size: 0.75rem;
+    color: #A0AEC0;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.4rem;
+}
+.metric-card .value {
+    font-size: 1.6rem;
+    font-weight: 700;
+    color: #FAFAFA;
+}
+.metric-card .sub {
+    font-size: 0.8rem;
+    margin-top: 0.3rem;
+}
+.status-green { color: #48BB78; }
+.status-yellow { color: #ECC94B; }
+.status-red { color: #FC8181; }
+.status-gray { color: #A0AEC0; }
+.section-card {
+    background: #1A1F2E;
+    border: 1px solid #2D3748;
+    border-radius: 10px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+}
+.section-card h3 {
+    margin: 0 0 1rem 0;
+    color: #FAFAFA;
+    font-size: 1.1rem;
+    border-bottom: 1px solid #2D3748;
+    padding-bottom: 0.5rem;
+}
+.skill-badge {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+.badge-ok { background: #22543D; color: #48BB78; }
+.badge-partial { background: #744210; color: #ECC94B; }
+.badge-error { background: #742A2A; color: #FC8181; }
+.badge-cached { background: #2A4365; color: #63B3ED; }
+div[data-testid="stMetric"] {
+    background: #1A1F2E;
+    border: 1px solid #2D3748;
+    border-radius: 10px;
+    padding: 1rem;
+}
+div[data-testid="stMetric"] label {
+    color: #A0AEC0 !important;
+    font-size: 0.8rem !important;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    font-size: 1.4rem !important;
+    font-weight: 700 !important;
+}
 </style>
 """
 
@@ -429,6 +518,235 @@ def _find_latest_dashboard() -> str | None:
         return None
 
 
+def _find_latest_dashboard_json() -> dict[str, Any] | None:
+    """Return the parsed JSON of the latest dashboard summary, or None."""
+    knowledge_dir = PROJECT_ROOT / "knowledge"
+    if not knowledge_dir.exists():
+        return None
+    files = sorted(knowledge_dir.glob("daily_dashboard_*.json"), reverse=True)
+    if not files:
+        return None
+    try:
+        return json.loads(files[0].read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _status_color(value: Any) -> str:
+    """Return a CSS color class based on signal/zone value."""
+    if value is None or value == "N/A":
+        return "status-gray"
+    s = str(value).lower()
+    if any(w in s for w in ["bullish", "green", "confirmed", "strong", "high", "ok"]):
+        return "status-green"
+    if any(w in s for w in ["bearish", "red", "danger", "weak", "low", "warning"]):
+        return "status-red"
+    return "status-yellow"
+
+
+def _render_metric_card(label: str, value: Any, sub: str = "", color: str = "") -> str:
+    """Return HTML for a styled metric card."""
+    css_class = color or _status_color(value)
+    return f"""<div class="metric-card">
+        <div class="label">{label}</div>
+        <div class="value {css_class}">{value}</div>
+        <div class="sub {css_class}">{sub}</div>
+    </div>"""
+
+
+def _render_dashboard_professional(data: dict[str, Any]) -> None:
+    """Render the dashboard tab using native Streamlit components."""
+    generated = data.get("generated_at", "N/A")
+    dash_date = data.get("date", "")
+
+    st.markdown(
+        f"""<div class="dashboard-header">
+            <h1>Daily Market Dashboard</h1>
+            <p>{dash_date} &nbsp;&bull;&nbsp; Last updated: {generated}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    ftd = data.get("ftd", {})
+    uptrend = data.get("uptrend", {})
+    breadth = data.get("breadth", {})
+    theme_summary = data.get("theme_summary", {})
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        ftd_signal = ftd.get("signal", "N/A")
+        st.metric("FTD Signal", ftd_signal, ftd.get("state", ""))
+    with c2:
+        st.metric("Uptrend", uptrend.get("score", "N/A"), uptrend.get("zone", ""))
+    with c3:
+        st.metric("Breadth", breadth.get("score", "N/A"), breadth.get("zone", ""))
+    with c4:
+        bull = theme_summary.get("bullish_count", 0)
+        bear = theme_summary.get("bearish_count", 0)
+        st.metric("Themes", f"{bull} Bull / {bear} Bear")
+
+    st.markdown("")
+
+    status = data.get("skill_status", {})
+    signal_rows = []
+    for name, info in status.items():
+        s = info.get("status", "unknown")
+        has_data = info.get("has_data", False)
+        if s == "ok" and has_data:
+            badge = '<span class="skill-badge badge-ok">OK</span>'
+        elif s == "cached":
+            badge = '<span class="skill-badge badge-cached">CACHED</span>'
+        elif s == "partial" or (s == "ok" and not has_data):
+            badge = '<span class="skill-badge badge-partial">PARTIAL</span>'
+        else:
+            badge = '<span class="skill-badge badge-error">ERROR</span>'
+        signal_rows.append(f"<tr><td>{name}</td><td>{badge}</td></tr>")
+
+    st.markdown(
+        f"""<div class="section-card">
+            <h3>Skill Status</h3>
+            <table style="width:100%; border-collapse:collapse;">
+                <thead><tr>
+                    <th style="text-align:left; padding:0.4rem; color:#A0AEC0; border-bottom:1px solid #2D3748;">Skill</th>
+                    <th style="text-align:left; padding:0.4rem; color:#A0AEC0; border-bottom:1px solid #2D3748;">Status</th>
+                </tr></thead>
+                <tbody>{"".join(signal_rows)}</tbody>
+            </table>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        if ftd.get("state") and ftd["state"] != "N/A":
+            st.markdown(
+                f"""<div class="section-card">
+                    <h3>FTD Detector</h3>
+                    <p><strong>State:</strong> <span class="{_status_color(ftd['state'])}">{ftd['state']}</span></p>
+                    <p><strong>Score:</strong> {ftd.get('score', 'N/A')}</p>
+                    <p><strong>Guidance:</strong> {ftd.get('guidance', 'N/A')}</p>
+                    <p><strong>Exposure:</strong> {ftd.get('exposure_range', 'N/A')}</p>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """<div class="section-card">
+                    <h3>FTD Detector</h3>
+                    <p class="status-gray">No FTD data available. Set FMP_API_KEY to enable.</p>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+        themes = data.get("themes", [])
+        if themes:
+            theme_items = ""
+            for t in themes:
+                name = t.get("name", "Unknown")
+                stage = t.get("stage", "")
+                heat = t.get("heat", "")
+                heat_str = f" &bull; Heat {heat:.0f}" if isinstance(heat, (int, float)) else ""
+                theme_items += f'<li><strong>{name}</strong> <span class="status-gray">({stage}{heat_str})</span></li>'
+            st.markdown(
+                f"""<div class="section-card">
+                    <h3>Theme Highlights</h3>
+                    <ul style="padding-left:1.2rem;">{theme_items}</ul>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """<div class="section-card">
+                    <h3>Theme Highlights</h3>
+                    <p class="status-gray">No bullish themes detected.</p>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+    with col_right:
+        vcp_candidates = data.get("vcp_candidates", [])
+        if vcp_candidates:
+            vcp_rows = ""
+            for v in vcp_candidates:
+                ticker = v.get("ticker", "?")
+                score = v.get("score", "?")
+                rating = v.get("rating", "?")
+                pivot = v.get("pivot_dist", "?")
+                pivot_str = f"{pivot:+.1f}%" if isinstance(pivot, (int, float)) else str(pivot)
+                vcp_rows += f"<tr><td><strong>{ticker}</strong></td><td>{score}</td><td>{rating}</td><td>{pivot_str}</td></tr>"
+            st.markdown(
+                f"""<div class="section-card">
+                    <h3>VCP Candidates</h3>
+                    <table style="width:100%; border-collapse:collapse;">
+                        <thead><tr>
+                            <th style="text-align:left; padding:0.4rem; color:#A0AEC0; border-bottom:1px solid #2D3748;">Ticker</th>
+                            <th style="text-align:right; padding:0.4rem; color:#A0AEC0; border-bottom:1px solid #2D3748;">Score</th>
+                            <th style="text-align:left; padding:0.4rem; color:#A0AEC0; border-bottom:1px solid #2D3748;">Rating</th>
+                            <th style="text-align:right; padding:0.4rem; color:#A0AEC0; border-bottom:1px solid #2D3748;">Pivot</th>
+                        </tr></thead>
+                        <tbody>{vcp_rows}</tbody>
+                    </table>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """<div class="section-card">
+                    <h3>VCP Candidates</h3>
+                    <p class="status-gray">No VCP candidates found.</p>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+        econ_events = data.get("economic_calendar", [])
+        if econ_events:
+            econ_rows = ""
+            for ev in econ_events:
+                dt = ev.get("date", "?")
+                name = ev.get("event", "?")
+                impact = ev.get("impact", "?")
+                impact_color = "status-red" if str(impact).lower() == "high" else "status-yellow" if str(impact).lower() == "medium" else "status-gray"
+                econ_rows += f'<tr><td>{dt}</td><td>{name}</td><td><span class="{impact_color}">{impact}</span></td></tr>'
+            st.markdown(
+                f"""<div class="section-card">
+                    <h3>Economic Calendar</h3>
+                    <table style="width:100%; border-collapse:collapse;">
+                        <thead><tr>
+                            <th style="text-align:left; padding:0.4rem; color:#A0AEC0; border-bottom:1px solid #2D3748;">Date</th>
+                            <th style="text-align:left; padding:0.4rem; color:#A0AEC0; border-bottom:1px solid #2D3748;">Event</th>
+                            <th style="text-align:left; padding:0.4rem; color:#A0AEC0; border-bottom:1px solid #2D3748;">Impact</th>
+                        </tr></thead>
+                        <tbody>{econ_rows}</tbody>
+                    </table>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """<div class="section-card">
+                    <h3>Economic Calendar</h3>
+                    <p class="status-gray">No upcoming events found.</p>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+    mktop = data.get("market_top", {})
+    if mktop.get("signal") and mktop["signal"] != "N/A":
+        details_html = ""
+        for k, v in mktop.get("details", {}).items():
+            details_html += f"<p><strong>{k}:</strong> {v}</p>"
+        st.markdown(
+            f"""<div class="section-card">
+                <h3>Market Top Detector</h3>
+                <p><strong>Signal:</strong> <span class="{_status_color(mktop['signal'])}">{mktop['signal']}</span></p>
+                <p><strong>Score:</strong> {mktop.get('score', 'N/A')}</p>
+                {details_html}
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+
 def _resolve_project_root() -> str:
     """Resolve the parent trading-skills repository root."""
     candidate = PROJECT_ROOT.parent.parent
@@ -446,9 +764,25 @@ def render_app() -> None:
     _cleanup_uploads_on_startup_once()
 
     with st.sidebar:
-        st.subheader(_msg("sidebar_title"))
-        st.caption(_msg("sidebar_project", project=PROJECT_ROOT.name))
-        st.caption(_msg("sidebar_auth", auth=get_auth_description()))
+        st.markdown(
+            """<div style="text-align:center; padding: 0.5rem 0 1rem 0;">
+                <h2 style="margin:0; font-size:1.3rem;">Trading Dashboard</h2>
+                <p style="margin:0.2rem 0 0 0; color:#A0AEC0; font-size:0.75rem;">Powered by Claude Skills</p>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        st.divider()
+
+        st.markdown(
+            f"""<div style="padding:0.5rem; background:#1A1F2E; border-radius:8px; margin-bottom:0.5rem;">
+                <p style="margin:0; font-size:0.8rem; color:#A0AEC0;">Project</p>
+                <p style="margin:0; font-size:0.9rem; color:#FAFAFA;">{PROJECT_ROOT.name}</p>
+                <p style="margin:0.3rem 0 0 0; font-size:0.8rem; color:#A0AEC0;">Auth</p>
+                <p style="margin:0; font-size:0.9rem; color:#FAFAFA;">{get_auth_description()}</p>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
         if st.button(_msg("clear_chat"), use_container_width=True):
             try:
                 cleanup_all_uploads(
@@ -463,15 +797,15 @@ def render_app() -> None:
             st.rerun()
 
         st.divider()
-        st.subheader(_msg("dashboard_title"))
+        st.markdown("**Dashboard Controls**")
         dashboard_lang = st.radio(
             _msg("dashboard_lang_label"),
             options=["en", "ja"],
-            format_func=lambda x: "English" if x == "en" else "日本語",
+            format_func=lambda x: "English" if x == "en" else "Japanese",
             index=0,
             horizontal=True,
         )
-        if st.button(_msg("dashboard_regenerate"), use_container_width=True):
+        if st.button(_msg("dashboard_regenerate"), use_container_width=True, type="primary"):
             with st.spinner(_msg("dashboard_running")):
                 try:
                     result = subprocess.run(
@@ -515,11 +849,15 @@ def render_app() -> None:
     )
 
     with tab_dashboard:
-        dashboard_content = _find_latest_dashboard()
-        if dashboard_content:
-            st.markdown(dashboard_content)
+        dashboard_json = _find_latest_dashboard_json()
+        if dashboard_json:
+            _render_dashboard_professional(dashboard_json)
         else:
-            st.info(_msg("dashboard_empty"))
+            dashboard_content = _find_latest_dashboard()
+            if dashboard_content:
+                st.markdown(dashboard_content)
+            else:
+                st.info(_msg("dashboard_empty"))
 
     with tab_chat:
         for message in st.session_state.messages:

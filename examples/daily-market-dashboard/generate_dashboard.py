@@ -192,6 +192,99 @@ def _safe_get(data: Any, *keys: str, default: Any = "N/A") -> Any:
             return default
     return current
 
+def generate_json_summary(results: dict[str, Any], today: date) -> dict[str, Any]:
+    """Build a structured JSON summary for the Streamlit dashboard UI."""
+    ftd = results.get("FTD Detector", {}).get("data")
+    uptrend = results.get("Uptrend Analyzer", {}).get("data")
+    breadth = results.get("Market Breadth", {}).get("data")
+    theme = results.get("Theme Detector", {}).get("data")
+    vcp = results.get("VCP Screener", {}).get("data")
+    mktop = results.get("Market Top Detector", {}).get("data")
+    econ = results.get("Economic Calendar", {}).get("data")
+
+    summary: dict[str, Any] = {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "date": today.isoformat(),
+        "ftd": {
+            "state": _safe_get(ftd, "market_state", "combined_state") if ftd else "N/A",
+            "score": _safe_get(ftd, "quality_score", "total_score") if ftd else "N/A",
+            "signal": _safe_get(ftd, "quality_score", "signal") if ftd else "N/A",
+            "guidance": _safe_get(ftd, "quality_score", "guidance") if ftd else "N/A",
+            "exposure_range": _safe_get(ftd, "quality_score", "exposure_range") if ftd else "N/A",
+        },
+        "uptrend": {
+            "score": _safe_get(uptrend, "composite", "composite_score") if uptrend else "N/A",
+            "zone": _safe_get(uptrend, "composite", "zone") if uptrend else "N/A",
+        },
+        "breadth": {
+            "score": _safe_get(breadth, "composite", "composite_score") if breadth else "N/A",
+            "zone": _safe_get(breadth, "composite", "zone") if breadth else "N/A",
+        },
+        "themes": [],
+        "vcp_candidates": [],
+        "market_top": {
+            "signal": _safe_get(mktop, "signal", default="N/A") if mktop else "N/A",
+            "score": _safe_get(mktop, "score", default="N/A") if mktop else "N/A",
+            "details": {},
+        },
+        "economic_calendar": [],
+        "skill_status": {},
+    }
+
+    if theme and isinstance(theme, dict):
+        bullish = theme.get("themes", {}).get("bullish", []) if isinstance(theme.get("themes"), dict) else []
+        for t in bullish[:5]:
+            if isinstance(t, dict):
+                summary["themes"].append({
+                    "name": t.get("name", t.get("theme", "Unknown")),
+                    "stage": t.get("stage", t.get("lifecycle_stage", "")),
+                    "heat": t.get("heat", ""),
+                    "bias": "bullish",
+                })
+        ts = theme.get("summary", {})
+        if isinstance(ts, dict):
+            summary["theme_summary"] = {
+                "bullish_count": ts.get("bullish_count", 0),
+                "bearish_count": ts.get("bearish_count", 0),
+            }
+
+    if vcp and isinstance(vcp, dict):
+        for item in vcp.get("results", [])[:10]:
+            if isinstance(item, dict):
+                score = item.get("composite_score", item.get("score", "?"))
+                pivot = item.get("distance_from_pivot_pct", "?")
+                summary["vcp_candidates"].append({
+                    "ticker": item.get("symbol", item.get("ticker", "?")),
+                    "score": round(score, 1) if isinstance(score, float) else score,
+                    "rating": item.get("rating", item.get("stage", "?")),
+                    "pivot_dist": round(pivot, 1) if isinstance(pivot, float) else pivot,
+                })
+
+    if mktop and isinstance(mktop, dict):
+        summary["market_top"]["details"] = {
+            k: v for k, v in list(mktop.items())[:8] if not isinstance(v, (dict, list))
+        }
+
+    econ_list = []
+    if econ:
+        econ_list = econ if isinstance(econ, list) else econ.get("events", [])
+    for ev in (econ_list or [])[:10]:
+        if isinstance(ev, dict):
+            summary["economic_calendar"].append({
+                "date": ev.get("date", ev.get("time", "?")),
+                "event": ev.get("event", ev.get("name", "?")),
+                "impact": ev.get("impact", ev.get("importance", "?")),
+            })
+
+    for name, result in results.items():
+        summary["skill_status"][name] = {
+            "status": result.get("status", "unknown"),
+            "has_data": result.get("data") is not None,
+        }
+
+    return summary
+
+
 def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") -> str:
     lines: list[str] = []
     lines.append(f"# {_t(lang, 'title')}  {today.isoformat()}")
@@ -370,6 +463,11 @@ def main() -> None:
     output_path = DASHBOARD_DIR / f"daily_dashboard_{today.isoformat()}.md"
     output_path.write_text(markdown, encoding="utf-8")
     logger.info("Dashboard saved to %s", output_path)
+
+    json_summary = generate_json_summary(results, today)
+    json_path = DASHBOARD_DIR / f"daily_dashboard_{today.isoformat()}.json"
+    json_path.write_text(json.dumps(json_summary, indent=2), encoding="utf-8")
+    logger.info("JSON summary saved to %s", json_path)
     cleanup_old_dashboards()
     logger.info("Done.")
 
