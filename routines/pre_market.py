@@ -1,89 +1,130 @@
-#!/usr/bin/env python3
 """
-Pre-Market Routine — 06:00 EST / 09:00 Riyadh
-Catalyst identification + deep research via Opus 4.8
-READ memory → RESEARCH → WRITE memory
+PRE-MARKET ROUTINE — 6:00 AM ET, Mon-Fri
+────────────────────────────────────────
+1. Market regime check (FMP breadth + Claude)
+2. Economic calendar scan (high-impact events today)
+3. VCP screener → AI scoring → build watchlist
+4. Account health check
+5. Log plan for day
 """
-import os, json, logging
-from pathlib import Path
-from datetime import datetime, date
-import anthropic
-import alpaca_trade_api as tradeapi
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+import json
+import datetime
+import pytz
 
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ALPACA_KEY    = os.environ.get("ALPACA_API_KEY", "")
-ALPACA_SECRET = os.environ.get("ALPACA_SECRET_KEY", "")
-ALPACA_URL    = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-MEMORY_DIR    = Path(__file__).parent.parent / "memory"
-DASHBOARD_DIR = Path(__file__).parent.parent / "examples/daily-market-dashboard/knowledge"
+from core import logger, config
+from core.broker  import BrokerClient
+from core.fmp     import get_market_breadth, get_economic_calendar, get_news
+from core.analyst import analyze_market_regime, score_vcp_candidates, detect_ftd
+from core.screener import screen
 
-def read_memory():
-    memory = {}
-    for f in MEMORY_DIR.glob("*.md"):
-        memory[f.stem] = f.read_text(encoding="utf-8")
-    return memory
+log  = logger.setup("pre_market")
+ET   = pytz.timezone("America/New_York")
 
-def write_memory(filename, content):
-    path = MEMORY_DIR / filename
-    path.write_text(content, encoding="utf-8")
-    logger.info("Memory updated: %s", filename)
-
-def get_dashboard():
-    files = sorted(DASHBOARD_DIR.glob("daily_dashboard_*.md"), reverse=True)
-    return files[0].read_text(encoding="utf-8") if files else ""
 
 def run():
-    logger.info("=== PRE-MARKET ROUTINE | %s ===", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    logger.banner(log, "PRE-MARKET — 6:00 AM ET")
 
-    # READ
-    memory = read_memory()
-    dashboard = get_dashboard()
-    logger.info("Memory loaded: %s", list(memory.keys()))
+    broker = BrokerClient()
 
-    # ACT — Opus 4.8 deep research
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    # ── 1. Account snapshot ───────────────────────────────────────────────────
+    acct = broker.get_account()
+    pv   = float(acct.portfolio_value)
+    cash = float(acct.cash)
+    bp   = float(acct.buying_power)
+    pos_count = broker.position_count()
 
-    prompt = f"""You are an autonomous trading agent. Read your memory and identify today's best opportunities.
+    log.info(f"Portfolio: ${pv:,.2f} | Cash: ${cash:,.2f} | BP: ${bp:,.2f}")
+    log.info(f"Open positions: {pos_count}/{config.MAX_OPEN_POSITIONS}")
 
-AGENT INSTRUCTIONS:
-{memory.get('agent_instructions', '')}
+    # ── 2. Economic calendar ──────────────────────────────────────────────────
+    log.info("── Economic calendar (next 3 days)")
+    calendar = get_economic_calendar(days_ahead=3)
+    high_impact = [e for e in calendar if e.get("impact", "") == "High"]
+    if high_impact:
+        for e in high_impact[:5]:
+            log.info(f"  ⚡ {e.get('date','')} | {e.get('event','')} | {e.get('country','')}")
+    else:
+        log.info("  No high-impact events found")
 
-TRADING STRATEGY:
-{memory.get('trading_strategy', '')}
+    # ── 3. Market breadth + regime ────────────────────────────────────────────
+    log.info("── Market breadth")
+    breadth = get_market_breadth()
+    log.info(f"  SPY: {breadth.get('spy_change_pct', 0):+.2f}%")
+    log.info(f"  QQQ: {breadth.get('qqq_change_pct', 0):+.2f}%")
+    log.info(f"  IWM: {breadth.get('iwm_change_pct', 0):+.2f}%")
 
-PREVIOUS RESEARCH LOG:
-{memory.get('research_log', '')}
+    # Top 3 sectors
+    sectors = breadth.get("sector_perf", {})
+    if sectors:
+        top = sorted(sectors.items(), key=lambda x: x[1], reverse=True)[:3]
+        bot = sorted(sectors.items(), key=lambda x: x[1])[:3]
+        log.info(f"  Top sectors: {top}")
+        log.info(f"  Weak sectors: {bot}")
 
-TODAY'S MARKET DASHBOARD:
-{dashboard[:2000]}
+    log.info("── Claude: regime analysis")
+    regime = analyze_market_regime({
+        **breadth,
+        "high_impact_events_today": len([e for e in high_impact
+                                         if datetime.date.today().isoformat() in e.get("date","")]),
+        "open_positions": pos_count,
+    })
+    log.info(f"  Regime: {regime['regime'].upper()} (confidence={regime['confidence']})")
+    log.info(f"  Bias: {regime['trade_bias']}")
+    log.info(f"  Rationale: {regime['rationale']}")
 
-TASK: Pre-market catalyst identification.
-1. Identify 2-3 best fundamental catalysts for today
-2. Which VCP candidates align with fundamental thesis?
-3. Any macro risks to watch?
-4. Rate market conditions: BULLISH / NEUTRAL / BEARISH
-5. Update the research log with today's findings
+    # ── 4. VCP screen ─────────────────────────────────────────────────────────
+    log.info("── VCP screen")
+    vcp_raw = screen()
+    top_vcps = vcp_raw[:15]   # send top 15 to Claude
 
-Return updated research_log.md content (full file, markdown format)."""
+    if top_vcps:
+        log.info(f"── Claude: scoring {len(top_vcps)} VCP candidates")
+        scored = score_vcp_candidates(top_vcps)
 
-    try:
-        response = client.messages.create(
-            model="claude-opus-4-8",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        updated_research = response.content[0].text.strip()
-        logger.info("Opus 4.8 research complete")
+        buy_list = [s for s in scored if s.get("action") == "BUY"]
+        log.info(f"  BUY candidates: {len(buy_list)}")
 
-        # WRITE
-        write_memory("research_log.md", updated_research)
-        logger.info("=== PRE-MARKET COMPLETE ===")
+        for s in buy_list[:5]:
+            log.info(f"  ★ {s['symbol']:6} score={s['score']:3} | {s['reason']}")
 
-    except Exception as e:
-        logger.error("Pre-market research failed: %s", e)
+        # Save watchlist for market-open routine
+        watchlist_path = "/tmp/pre_market_watchlist.json"
+        with open(watchlist_path, "w") as f:
+            json.dump({
+                "regime":    regime,
+                "buy_list":  buy_list,
+                "generated": datetime.datetime.now(ET).isoformat(),
+            }, f, indent=2)
+        log.info(f"  Watchlist saved → {watchlist_path}")
+    else:
+        log.info("  No VCP candidates found")
+
+    # ── 5. News headlines ─────────────────────────────────────────────────────
+    log.info("── Market news (top 5)")
+    news = get_news(limit=5)
+    for n in news[:5]:
+        log.info(f"  📰 [{n.get('symbol','')}] {n.get('title','')[:80]}")
+
+    # ── 6. Day plan summary ───────────────────────────────────────────────────
+    log.info("── Day plan")
+    if regime["trade_bias"] == "cash":
+        log.info("  ⚠️  CASH BIAS — no new entries today")
+    elif regime["trade_bias"] == "defensive":
+        log.info("  🛡️  DEFENSIVE — tight stops, reduced size")
+    elif regime["trade_bias"] == "aggressive":
+        log.info("  🚀  AGGRESSIVE — full size, high-confidence setups only")
+    else:
+        log.info("  ⚖️  MODERATE — standard size, quality setups")
+
+    slots_available = config.MAX_OPEN_POSITIONS - pos_count
+    log.info(f"  Position slots available: {slots_available}")
+    log.info(f"  Max deploy per trade: ${pv * config.MAX_POSITION_SIZE_PCT:,.0f}")
+
+    logger.banner(log, "PRE-MARKET COMPLETE")
+
 
 if __name__ == "__main__":
     run()
