@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -156,27 +157,55 @@ def run_chain(dry_run: bool = False, json_output: bool = False) -> int:
     if not json_output:
         print(f"[chain] env={env}  mode={client.mode_label}  key={key_preview}")
 
-    # Step 2: Verify connection
-    try:
-        snapshot = _snapshot(client)
-    except requests.HTTPError as exc:
-        code = exc.response.status_code if exc.response is not None else 0
-        reason = f"auth_failed_{code}" if code in (401, 403) else f"http_{code}"
+    # Step 2: Verify connection (retry transient failures with backoff)
+    max_attempts = 4
+    backoff_secs = [2, 4, 8, 16]
+    snapshot = None
+    last_error: Exception | None = None
+
+    for attempt in range(max_attempts):
+        try:
+            snapshot = _snapshot(client)
+            break
+        except requests.HTTPError as exc:
+            code = exc.response.status_code if exc.response is not None else 0
+            if code in (401, 403):
+                reason = f"auth_failed_{code}"
+                if not json_output:
+                    print(f"FAIL: HTTP {code}")
+                    if code == 401:
+                        print("  Bad credentials. Check ALPACA_API_KEY / ALPACA_SECRET_KEY.")
+                    elif code == 403:
+                        print("  Forbidden. Regenerate keys with full permissions.")
+                if not dry_run:
+                    write_state(_failure_state(reason, env))
+                if json_output:
+                    print(json.dumps(_failure_state(reason, env), indent=2))
+                return 1
+            last_error = exc
+            if attempt < max_attempts - 1:
+                wait = backoff_secs[attempt]
+                if not json_output:
+                    print(f"[chain] HTTP {code}, retrying in {wait}s "
+                          f"({attempt + 1}/{max_attempts})...")
+                time.sleep(wait)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_error = exc
+            if attempt < max_attempts - 1:
+                wait = backoff_secs[attempt]
+                if not json_output:
+                    print(f"[chain] Network error, retrying in {wait}s "
+                          f"({attempt + 1}/{max_attempts})...")
+                time.sleep(wait)
+
+    if snapshot is None:
+        if isinstance(last_error, requests.HTTPError):
+            code = last_error.response.status_code if last_error.response is not None else 0
+            reason = f"http_{code}"
+        else:
+            reason = "network_error"
         if not json_output:
-            print(f"FAIL: HTTP {code}")
-            if code == 401:
-                print("  Bad credentials. Check ALPACA_API_KEY / ALPACA_SECRET_KEY.")
-            elif code == 403:
-                print("  Forbidden. Regenerate keys with full permissions.")
-        if not dry_run:
-            write_state(_failure_state(reason, env))
-        if json_output:
-            print(json.dumps(_failure_state(reason, env), indent=2))
-        return 1
-    except requests.ConnectionError:
-        reason = "network_error"
-        if not json_output:
-            print("FAIL: Network error — check connectivity.")
+            print(f"FAIL after {max_attempts} attempts: {reason}")
         if not dry_run:
             write_state(_failure_state(reason, env))
         if json_output:

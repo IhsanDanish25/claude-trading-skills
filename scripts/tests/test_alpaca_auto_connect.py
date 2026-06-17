@@ -237,8 +237,11 @@ class TestRunChain:
         assert state["connected"] is False
         assert "401" in state["error"]
 
+    @patch("alpaca_auto_connect.time.sleep")
     @patch("alpaca_auto_connect.AlpacaClient")
-    def test_network_error_returns_2(self, MockClient, tmp_path, monkeypatch):
+    def test_network_error_retries_then_returns_2(
+        self, MockClient, mock_sleep, tmp_path, monkeypatch
+    ):
         import alpaca_auto_connect
         from requests import ConnectionError as ConnErr
 
@@ -253,6 +256,52 @@ class TestRunChain:
 
         result = run_chain(dry_run=False, json_output=False)
         assert result == 2
+        assert mock_sleep.call_count == 3  # 3 retries before final failure
 
         state = json.loads((tmp_path / "state" / "conn.json").read_text())
         assert state["error"] == "network_error"
+
+    @patch("alpaca_auto_connect.time.sleep")
+    @patch("alpaca_auto_connect.AlpacaClient")
+    def test_retry_succeeds_on_second_attempt(
+        self, MockClient, mock_sleep, tmp_path, monkeypatch
+    ):
+        import alpaca_auto_connect
+        from requests import ConnectionError as ConnErr
+
+        monkeypatch.setattr(alpaca_auto_connect, "STATE_DIR", tmp_path / "state")
+        monkeypatch.setattr(
+            alpaca_auto_connect, "STATE_FILE", tmp_path / "state" / "conn.json"
+        )
+
+        client = _mock_client()
+        client.get_account.side_effect = [
+            ConnErr("blip"),
+            FAKE_ACCOUNT,
+        ]
+        MockClient.return_value = client
+
+        result = run_chain(dry_run=False, json_output=False)
+        assert result == 0
+        assert mock_sleep.call_count == 1  # one retry, then success
+
+    @patch("alpaca_auto_connect.AlpacaClient")
+    def test_auth_failure_no_retry(self, MockClient, tmp_path, monkeypatch):
+        import alpaca_auto_connect
+        from requests import HTTPError
+
+        monkeypatch.setattr(alpaca_auto_connect, "STATE_DIR", tmp_path / "state")
+        monkeypatch.setattr(
+            alpaca_auto_connect, "STATE_FILE", tmp_path / "state" / "conn.json"
+        )
+
+        client = _mock_client()
+        resp = MagicMock()
+        resp.status_code = 401
+        client.get_account.side_effect = HTTPError(response=resp)
+        MockClient.return_value = client
+
+        result = run_chain(dry_run=False, json_output=False)
+        assert result == 1
+        # Auth failures should NOT retry — only called once
+        assert client.get_account.call_count == 1
