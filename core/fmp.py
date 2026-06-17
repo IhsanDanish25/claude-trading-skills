@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Financial Modeling Prep (FMP) data fetcher.
 """
