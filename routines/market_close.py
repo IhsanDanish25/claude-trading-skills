@@ -1,134 +1,172 @@
-#!/usr/bin/env python3
 """
-Market Close Routine — 15:00 EST / 18:00 Riyadh
-EOD journaling + performance summary + Telegram notification
-READ memory → JOURNAL → WRITE memory → NOTIFY
+MARKET CLOSE ROUTINE — 3:00 PM ET, Mon-Fri
+───────────────────────────────────────────
+1. Final position check — exit anything weak before close
+2. Cancel all open orders (no overnight limit orders)
+3. Log day's P&L
+4. Save daily trade log to /tmp/daily_log.json
+5. FTD detection on SPY (market health signal)
 """
-import os, json, logging
-from pathlib import Path
-from datetime import datetime, date
-import urllib.request
-import anthropic
-import alpaca_trade_api as tradeapi
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+import json
+import datetime
+import pytz
 
-ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
-ALPACA_KEY     = os.environ.get("ALPACA_API_KEY", "")
-ALPACA_SECRET  = os.environ.get("ALPACA_SECRET_KEY", "")
-ALPACA_URL     = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT  = os.environ.get("TELEGRAM_CHAT_ID", "")
-MEMORY_DIR     = Path(__file__).parent.parent / "memory"
+from core import logger, config
+from core.broker   import BrokerClient
+from core.fmp      import get_quotes, get_market_breadth, get_daily_bars
+from core.analyst  import review_open_positions, analyze_market_regime, detect_ftd
 
-def read_memory():
-    return {f.stem: f.read_text(encoding="utf-8") for f in MEMORY_DIR.glob("*.md")}
+log = logger.setup("market_close")
+ET  = pytz.timezone("America/New_York")
 
-def write_memory(filename, content):
-    (MEMORY_DIR / filename).write_text(content, encoding="utf-8")
+CLOSE_EXIT_THRESHOLD = -0.03   # Force exit if P&L < -3%
+MIN_HOLD_TO_KEEP     = -0.01   # Keep if P&L > -1% (let it breathe overnight)
 
-def send_telegram(message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
-        logger.warning("Telegram not configured"); return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = json.dumps({"chat_id": TELEGRAM_CHAT, "text": message, "parse_mode": "Markdown"}).encode()
-        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10)
-        logger.info("Telegram sent ✅")
-    except Exception as e:
-        logger.error("Telegram failed: %s", e)
 
 def run():
-    logger.info("=== MARKET CLOSE ROUTINE | %s ===", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    logger.banner(log, "MARKET CLOSE — 3:00 PM ET")
 
-    memory = read_memory()
-    api = tradeapi.REST(ALPACA_KEY, ALPACA_SECRET, ALPACA_URL)
-    acct = api.get_account()
-    equity = float(acct.equity)
-    last_equity = float(acct.last_equity)
-    day_pnl = equity - last_equity
-    day_pnl_pct = (day_pnl / last_equity) * 100 if last_equity > 0 else 0
+    broker = BrokerClient()
+    today  = datetime.date.today().isoformat()
 
+    # ── Cancel all open day orders ────────────────────────────────────────────
+    log.info("── Cancelling open orders")
     try:
-        positions = api.list_positions()
-        pos_summary = "\n".join([
-            f"- {p.symbol}: {p.qty}sh | Entry ${p.avg_entry_price} | P&L ${p.unrealized_pl} ({float(p.unrealized_plpc)*100:.1f}%)"
-            for p in positions
-        ]) or "No open positions"
-    except:
-        pos_summary = "Unable to fetch positions"
-
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-    prompt = f"""You are an autonomous trading agent completing the end-of-day journal.
-
-MEMORY FILES:
-{json.dumps({k: v[:500] for k, v in memory.items()}, indent=2)}
-
-TODAY'S PERFORMANCE:
-- Equity: ${equity:,.2f}
-- Day P&L: ${day_pnl:+.2f} ({day_pnl_pct:+.2f}%)
-- Open Positions: {pos_summary}
-
-TASK: Write today's journal entry.
-1. What happened today?
-2. Did trades follow the strategy rules?
-3. Lessons learned
-4. Grade today: A/B/C/D/F
-5. Plan for tomorrow
-
-Return JSON:
-{{
-  "summary": "2-3 sentence day summary",
-  "grade": "A",
-  "lessons": "key lesson",
-  "tomorrow_plan": "what to watch",
-  "telegram_message": "short message for Telegram notification"
-}}"""
-
-    try:
-        response = client.messages.create(
-            model="claude-opus-4-7",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        text = response.content[0].text.strip()
-        result = json.loads(text[text.find("{"):text.rfind("}")+1])
-
-        today = date.today().isoformat()
-
-        # Update weekly review
-        weekly = memory.get("weekly_review", "")
-        weekly += f"\n\n## {today}\n"
-        weekly += f"- Equity: ${equity:,.2f}\n"
-        weekly += f"- Day P&L: ${day_pnl:+.2f} ({day_pnl_pct:+.2f}%)\n"
-        weekly += f"- Grade: {result.get('grade','?')}\n"
-        weekly += f"- Summary: {result.get('summary','')}\n"
-        weekly += f"- Lessons: {result.get('lessons','')}\n"
-        write_memory("weekly_review.md", weekly)
-
-        # Telegram notification
-        msg = f"""📊 *Daily Trading Report — {today}*
-
-💰 Equity: ${equity:,.2f}
-📈 Day P&L: ${day_pnl:+.2f} ({day_pnl_pct:+.2f}%)
-🎯 Grade: {result.get('grade','?')}
-
-📝 {result.get('summary','')}
-
-🔮 Tomorrow: {result.get('tomorrow_plan','')}
-
-_Auto-generated by Trading AI_"""
-
-        send_telegram(msg)
-        logger.info("EOD complete | Grade: %s | P&L: $%.2f", result.get('grade'), day_pnl)
-
+        broker.cancel_all_orders()
     except Exception as e:
-        logger.error("Market close routine failed: %s", e)
+        log.warning(f"Cancel orders: {e}")
 
-    logger.info("=== MARKET CLOSE COMPLETE ===")
+    # ── Position final review ─────────────────────────────────────────────────
+    positions = broker.get_positions()
+    log.info(f"── Positions at close: {len(positions)}")
+
+    if not positions:
+        log.info("No positions to review")
+    else:
+        symbols = [p.symbol for p in positions]
+        quotes  = get_quotes(symbols)
+
+        # Market regime (close-of-day)
+        breadth = get_market_breadth()
+        regime  = analyze_market_regime(breadth)
+
+        pos_data = []
+        force_close = []
+
+        for p in positions:
+            sym      = p.symbol
+            entry    = float(p.avg_entry_price)
+            current  = float(quotes.get(sym, {}).get("price", entry))
+            qty      = int(p.qty)
+            pnl_pct  = (current - entry) / entry
+            unrealized = float(p.unrealized_pl)
+
+            log.info(f"  {sym:6} | ${entry:.2f} → ${current:.2f} | "
+                     f"{pnl_pct*100:+.2f}% | ${unrealized:+,.0f}")
+
+            # Force-close deep losers before market shuts
+            if pnl_pct <= CLOSE_EXIT_THRESHOLD:
+                log.warning(f"  ⚠️  {sym} below -3% threshold — force close")
+                force_close.append(sym)
+            else:
+                pos_data.append({
+                    "symbol":        sym,
+                    "entry_price":   entry,
+                    "current_price": current,
+                    "qty":           qty,
+                    "pnl_pct":       pnl_pct * 100,
+                    "unrealized_usd": unrealized,
+                    "days_held":     1,
+                    "stop":          round(entry * (1 - config.STOP_LOSS_PCT), 2),
+                    "target":        round(entry * (1 + config.TAKE_PROFIT_PCT), 2),
+                })
+
+        # Execute force closes
+        for sym in force_close:
+            try:
+                broker.close_position(sym)
+                log.info(f"  ✓ Force-closed {sym}")
+            except Exception as e:
+                log.error(f"  ✗ Close {sym} failed: {e}")
+
+        # Claude review on remaining
+        if pos_data and regime["trade_bias"] == "cash":
+            log.warning("Cash regime — closing ALL remaining positions")
+            for pd in pos_data:
+                try:
+                    broker.close_position(pd["symbol"])
+                    log.info(f"  ✓ Cash-regime close: {pd['symbol']}")
+                except Exception as e:
+                    log.error(f"  ✗ {e}")
+
+        elif pos_data:
+            log.info(f"── Claude: EOD position review ({len(pos_data)} positions)")
+            decisions = review_open_positions(pos_data, regime["regime"])
+            for d in decisions:
+                sym    = d.get("symbol", "")
+                action = d.get("action", "HOLD")
+                reason = d.get("reason", "")
+                log.info(f"  {sym:6} → {action} | {reason}")
+
+                if action == "SELL":
+                    try:
+                        broker.sell(sym)
+                        log.info(f"  ✓ EOD sold {sym}")
+                    except Exception as e:
+                        log.error(f"  ✗ {e}")
+
+    # ── FTD detection on SPY ──────────────────────────────────────────────────
+    log.info("── FTD detection (SPY)")
+    try:
+        spy_bars = get_daily_bars("SPY", days=20)
+        ftd_result = detect_ftd(spy_bars[:20])
+        log.info(f"  FTD detected: {ftd_result['ftd_detected']}")
+        log.info(f"  Confidence: {ftd_result['confidence']}")
+        log.info(f"  Details: {ftd_result['details']}")
+        if ftd_result.get("ftd_date"):
+            log.info(f"  FTD date: {ftd_result['ftd_date']}")
+    except Exception as e:
+        log.error(f"FTD detection fail: {e}")
+        ftd_result = {}
+
+    # ── Day P&L summary ───────────────────────────────────────────────────────
+    log.info("── End of day summary")
+    acct = broker.get_account()
+    pv   = float(acct.portfolio_value)
+    cash = float(acct.cash)
+
+    # Remaining positions
+    final_positions = broker.get_positions()
+    total_unrealized = sum(float(p.unrealized_pl) for p in final_positions)
+
+    log.info(f"  Portfolio value:   ${pv:,.2f}")
+    log.info(f"  Cash:              ${cash:,.2f}")
+    log.info(f"  Positions held:    {len(final_positions)}")
+    log.info(f"  Unrealized P&L:    ${total_unrealized:+,.2f}")
+
+    # Save daily log
+    daily_log = {
+        "date":             today,
+        "portfolio_value":  pv,
+        "cash":             cash,
+        "positions_held":   len(final_positions),
+        "unrealized_pnl":   total_unrealized,
+        "regime":           regime.get("regime", "unknown"),
+        "trade_bias":       regime.get("trade_bias", "unknown"),
+        "ftd":              ftd_result,
+        "spy_change_pct":   breadth.get("spy_change_pct", 0),
+    }
+
+    log_path = f"/tmp/daily_log_{today}.json"
+    with open(log_path, "w") as f:
+        json.dump(daily_log, f, indent=2)
+    log.info(f"  Daily log saved → {log_path}")
+
+    logger.banner(log, "MARKET CLOSE COMPLETE")
+
 
 if __name__ == "__main__":
     run()
