@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 MIDDAY REVIEW ROUTINE — 12:00 PM ET, Mon-Fri
 ─────────────────────────────────────────────
