@@ -11,6 +11,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
+from __future__ import annotations
 import glob
 import datetime
 import pytz
@@ -188,8 +189,10 @@ def run():
     log.info("── Claude: generating weekly summary")
     try:
         summary = generate_weekly_summary(week_stats)
-        log.info("\n" + "─" * 60)
-        for line in summary.split("\n"):
+        log.info("
+" + "─" * 60)
+        for line in summary.split("
+"):
             log.info(f"  {line}")
         log.info("─" * 60)
     except Exception as e:
