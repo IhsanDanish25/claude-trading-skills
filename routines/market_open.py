@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3.11
+#!/usr/bin/env python3
 """
 Market Open Routine — 08:30 EST / 11:30 Riyadh
 Execute planned trades from pre-market research
