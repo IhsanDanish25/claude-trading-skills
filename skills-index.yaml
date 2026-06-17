@@ -1005,6 +1005,32 @@ skills:
   - swing-opportunity-daily
   - trade-memory-loop
   - monthly-performance-review
+- id: tradingview-analyzer
+  display_name: TradingView Analyzer
+  category: trade-planning
+  status: production
+  summary: Fetch real-time TradingView technical indicators (RSI, MACD, EMA, oscillators),
+    run screener scans, and analyze TradingView chart screenshots. No API key required.
+  timeframe: event-driven
+  difficulty: beginner
+  integrations:
+  - id: tradingview_ta
+    type: market_data
+    requirement: not_required
+    note: Uses tradingview_ta Python library; no API key or account needed
+  - id: chart_image
+    type: image
+    requirement: optional
+    note: Optional TradingView chart screenshot for visual analysis
+  inputs:
+  - ticker_symbols
+  - optional_chart_images
+  outputs:
+  - indicator_report_json
+  - indicator_report_md
+  - screener_scan_results
+  workflows:
+  - swing-opportunity-daily
 - id: trading-skills-navigator
   display_name: Trading Skills Navigator
   category: meta

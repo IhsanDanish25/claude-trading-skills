@@ -16,6 +16,7 @@ dependencies = [
     "pyyaml>=6.0",
     "requests>=2.31.0",
     "scipy>=1.13.1",
+    "tradingview_ta>=3.3.0",
     "yfinance>=0.2.0",
     "streamlit>=1.28.0",
 ]
@@ -104,6 +105,7 @@ testpaths = [
     "skills/breakout-trade-planner/scripts/tests",
     "skills/ibd-distribution-day-monitor/scripts/tests",
     "skills/parabolic-short-trade-planner/scripts/tests",
+    "skills/tradingview-analyzer/scripts/tests",
     "skills/trading-skills-navigator/scripts/tests",
     "scripts/tests",
 ]
