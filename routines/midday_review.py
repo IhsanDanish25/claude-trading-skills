@@ -1,74 +1,150 @@
-#!/usr/bin/env python3
 """
-Midday Routine — 12:00 EST / 15:00 Riyadh
-Risk mitigation + portfolio rebalance
-READ memory → REVIEW → WRITE memory
+MIDDAY REVIEW ROUTINE — 12:00 PM ET, Mon-Fri
+─────────────────────────────────────────────
+1. Review all open positions (P&L, vs stop/target)
+2. Claude: HOLD / SELL / TIGHTEN_STOP decisions
+3. Execute any exits
+4. Check for new high-quality setups (post-open volume data)
+5. Cancel stale open orders
 """
-import os, logging
-from pathlib import Path
-from datetime import datetime
-import anthropic
-import alpaca_trade_api as tradeapi
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+import pytz
+from core import logger, config
+from core.broker   import BrokerClient
+from core.fmp      import get_quotes, get_market_breadth
+from core.analyst  import review_open_positions, analyze_market_regime, score_vcp_candidates
+from core.screener import screen
 
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ALPACA_KEY    = os.environ.get("ALPACA_API_KEY", "")
-ALPACA_SECRET = os.environ.get("ALPACA_SECRET_KEY", "")
-ALPACA_URL    = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-MEMORY_DIR    = Path(__file__).parent.parent / "memory"
-DRY_RUN       = os.environ.get("AUTO_TRADER_DRY_RUN", "0") == "1"
-HARD_STOP_PCT = -0.07
+log = logger.setup("midday")
+ET  = pytz.timezone("America/New_York")
 
-def read_memory():
-    return {f.stem: f.read_text(encoding="utf-8") for f in MEMORY_DIR.glob("*.md")}
-
-def write_memory(filename, content):
-    (MEMORY_DIR / filename).write_text(content, encoding="utf-8")
 
 def run():
-    logger.info("=== MIDDAY ROUTINE | %s ===", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    logger.banner(log, "MIDDAY REVIEW — 12:00 PM ET")
 
-    memory = read_memory()
-    api = tradeapi.REST(ALPACA_KEY, ALPACA_SECRET, ALPACA_URL)
+    broker = BrokerClient()
 
-    try:
-        positions = api.list_positions()
-    except Exception as e:
-        logger.error("Failed to get positions: %s", e); return
+    # ── Market regime pulse ───────────────────────────────────────────────────
+    breadth = get_market_breadth()
+    regime  = analyze_market_regime(breadth)
+    log.info(f"Midday regime: {regime['regime'].upper()} | Bias: {regime['trade_bias']}")
+
+    # ── Position review ───────────────────────────────────────────────────────
+    positions = broker.get_positions()
+    log.info(f"Open positions: {len(positions)}")
 
     if not positions:
-        logger.info("No positions to review"); return
+        log.info("No positions — skip position review")
+    else:
+        # Build position data for Claude
+        symbols  = [p.symbol for p in positions]
+        quotes   = get_quotes(symbols)
+        pos_data = []
 
-    exits = []
-    for pos in positions:
-        pnl_pct = float(pos.unrealized_plpc)
-        symbol = pos.symbol
-        logger.info("%s: P&L %.2f%%", symbol, pnl_pct * 100)
+        for p in positions:
+            sym          = p.symbol
+            entry        = float(p.avg_entry_price)
+            current      = float(quotes.get(sym, {}).get("price", entry))
+            qty          = int(p.qty)
+            pnl_pct      = round((current - entry) / entry * 100, 2)
+            unrealized   = float(p.unrealized_pl)
+            days_held    = 0  # Alpaca doesn't give open date directly
 
-        if pnl_pct <= HARD_STOP_PCT:
-            logger.warning("%s: HIT HARD STOP (%.2f%%) — EXITING", symbol, pnl_pct * 100)
-            if not DRY_RUN:
+            # Compute implied stop from config
+            stop   = round(entry * (1 - config.STOP_LOSS_PCT), 2)
+            target = round(entry * (1 + config.TAKE_PROFIT_PCT), 2)
+
+            log.info(f"  {sym:6} | entry=${entry:.2f} | now=${current:.2f} | "
+                     f"P&L={pnl_pct:+.2f}% (${unrealized:+,.0f})")
+
+            pos_data.append({
+                "symbol":       sym,
+                "entry_price":  entry,
+                "current_price": current,
+                "qty":          qty,
+                "pnl_pct":      pnl_pct,
+                "unrealized_usd": unrealized,
+                "days_held":    days_held,
+                "stop":         stop,
+                "target":       target,
+            })
+
+        # Claude review
+        log.info("── Claude: position review")
+        decisions = review_open_positions(pos_data, regime["regime"])
+
+        for d in decisions:
+            sym    = d.get("symbol", "")
+            action = d.get("action", "HOLD")
+            reason = d.get("reason", "")
+            new_stop = d.get("new_stop")
+
+            log.info(f"  {sym:6} → {action} | {reason}")
+
+            if action == "SELL":
                 try:
-                    api.submit_order(symbol=symbol, qty=pos.qty, side="sell",
-                                    type="market", time_in_force="day")
-                    logger.info("✅ EXITED %s", symbol)
-                    exits.append(symbol)
+                    broker.sell(sym)
+                    log.info(f"  ✓ Sold {sym}")
                 except Exception as e:
-                    logger.error("Exit failed for %s: %s", symbol, e)
-            else:
-                logger.info("[DRY-RUN] would EXIT %s", symbol)
-                exits.append(symbol)
+                    log.error(f"  ✗ Sell {sym} failed: {e}")
 
-    # Update research log with midday notes
-    research = memory.get("research_log", "")
-    midday_note = f"\n\n## Midday Review {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-    midday_note += f"- Positions reviewed: {len(positions)}\n"
-    midday_note += f"- Exits triggered: {exits if exits else 'None'}\n"
-    write_memory("research_log.md", research + midday_note)
+            elif action == "TIGHTEN_STOP" and new_stop:
+                # Alpaca doesn't support modifying bracket stops via simple API
+                # Best approach: cancel + resubmit — log for manual action
+                log.info(f"  📌 {sym}: Tighten stop to ${new_stop:.2f} [manual or via replace order]")
 
-    logger.info("=== MIDDAY COMPLETE | %d exits ===", len(exits))
+    # ── Cancel stale open orders ──────────────────────────────────────────────
+    open_orders = broker.get_open_orders()
+    if open_orders:
+        log.info(f"Open orders: {len(open_orders)} — cancelling stale")
+        # Only cancel orders older than 30 min
+        import datetime
+        now = datetime.datetime.now(pytz.utc)
+        for o in open_orders:
+            try:
+                submitted = o.submitted_at
+                if submitted and (now - submitted.replace(tzinfo=pytz.utc)).seconds > 1800:
+                    broker.trade.cancel_order_by_id(o.id)
+                    log.info(f"  Cancelled stale order: {o.symbol} {o.side}")
+            except Exception as e:
+                log.warning(f"  Cancel order fail: {e}")
+
+    # ── Midday opportunity scan ───────────────────────────────────────────────
+    slots = config.MAX_OPEN_POSITIONS - broker.position_count()
+
+    if slots > 0 and regime["trade_bias"] not in ["cash", "defensive"]:
+        log.info(f"── Midday scan ({slots} slots available)")
+        raw    = screen()
+        top    = raw[:10]
+
+        if top:
+            scored = score_vcp_candidates(top)
+            buys   = [s for s in scored if s.get("action") == "BUY" and s.get("score", 0) >= 75]
+            log.info(f"  High-confidence midday setups: {len(buys)}")
+            for s in buys[:3]:
+                log.info(f"  ⚡ {s['symbol']:6} score={s['score']} | {s['reason']}")
+                # Midday entries: only top-score setups, half size
+                try:
+                    pv     = broker.portfolio_value()
+                    amount = pv * config.MAX_POSITION_SIZE_PCT * 0.5
+                    result = broker.buy(s["symbol"], dollar_amount=amount)
+                    log.info(f"  ✓ Midday buy {s['symbol']}: {result['qty']} @ ~${result['price']:.2f}")
+                except Exception as e:
+                    log.error(f"  ✗ Midday buy {s['symbol']} failed: {e}")
+    else:
+        log.info(f"No midday scan (slots={slots}, bias={regime['trade_bias']})")
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    positions_after = broker.get_positions()
+    total_unrealized = sum(float(p.unrealized_pl) for p in positions_after)
+    log.info(f"── Midday summary")
+    log.info(f"  Positions: {len(positions_after)}")
+    log.info(f"  Total unrealized P&L: ${total_unrealized:+,.2f}")
+
+    logger.banner(log, "MIDDAY REVIEW COMPLETE")
+
 
 if __name__ == "__main__":
     run()
