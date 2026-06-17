@@ -1,7 +1,8 @@
 [server]
-address = "127.0.0.1"
+address = "0.0.0.0"
 enableXsrfProtection = true
-enableCORS = true
+enableCORS = false
+headless = true
 
 [browser]
-serverAddress = "127.0.0.1"
+gatherUsageStats = false
