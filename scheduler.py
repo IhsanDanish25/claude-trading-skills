@@ -36,7 +36,7 @@ SCHEDULE = [
 ]
 
 
-def get_routine(now: datetime.datetime) -> str | None:
+def get_routine(now: datetime.datetime):
     h, m, wd = now.hour, now.minute, now.weekday()
 
     for (sched_h, m_min, m_max, wd_min, wd_max, module) in SCHEDULE:
