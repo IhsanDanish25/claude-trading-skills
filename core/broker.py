@@ -1,19 +1,27 @@
 """
 Alpaca broker client — paper + live unified interface.
 """
+from __future__ import annotations
 import logging
+import datetime
+import pytz
+
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
-    MarketOrderRequest, LimitOrderRequest,
-    StopLossRequest, TakeProfitRequest,
-    GetOrdersRequest, GetAssetsRequest,
+    MarketOrderRequest,
+    GetOrdersRequest,
+    ClosePositionRequest,
 )
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus, AssetClass
+from alpaca.trading.enums import (
+    OrderSide, TimeInForce, QueryOrderStatus, OrderClass
+)
+from alpaca.trading.requests import (
+    StopLossRequest, TakeProfitRequest,
+    GetPortfolioHistoryRequest,
+)
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame
-import datetime
-import pytz
 
 from core.config import (
     ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL,
@@ -61,7 +69,8 @@ class BrokerClient:
 
     # ── Orders ────────────────────────────────────────────────────────────────
     def get_open_orders(self):
-        req = GetOrdersRequest(status=OrderStatus.OPEN)
+        # FIX: use QueryOrderStatus not OrderStatus for filtering
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN)
         return self.trade.get_orders(filter=req)
 
     def cancel_all_orders(self):
@@ -91,8 +100,8 @@ class BrokerClient:
 
     # ── Trade execution ───────────────────────────────────────────────────────
     def buy(self, symbol: str, dollar_amount: float = None, shares: int = None,
-             stop_loss_pct: float = STOP_LOSS_PCT,
-             take_profit_pct: float = TAKE_PROFIT_PCT) -> dict:
+            stop_loss_pct: float = STOP_LOSS_PCT,
+            take_profit_pct: float = TAKE_PROFIT_PCT) -> dict:
         """
         Market buy with bracket (stop + target).
         Pass either dollar_amount OR shares.
@@ -104,19 +113,19 @@ class BrokerClient:
         elif shares:
             qty = shares
         else:
-            # Default: MAX_POSITION_SIZE_PCT of portfolio
             pv  = self.portfolio_value()
             qty = max(1, int((pv * MAX_POSITION_SIZE_PCT) / price))
 
         stop   = round(price * (1 - stop_loss_pct), 2)
         target = round(price * (1 + take_profit_pct), 2)
 
+        # FIX: use OrderClass.BRACKET enum not string "bracket"
         req = MarketOrderRequest(
             symbol=symbol,
             qty=qty,
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
-            order_class="bracket",
+            order_class=OrderClass.BRACKET,
             stop_loss=StopLossRequest(stop_price=stop),
             take_profit=TakeProfitRequest(limit_price=target),
         )
@@ -151,8 +160,17 @@ class BrokerClient:
             log.error(f"Close {symbol} failed: {e}")
 
     def close_all_positions(self):
+        # FIX: correct alpaca-py signature
         self.trade.close_all_positions(cancel_orders=True)
         log.warning("ALL POSITIONS CLOSED")
+
+    def get_portfolio_history(self, period: str = "1W"):
+        try:
+            req = GetPortfolioHistoryRequest(period=period, timeframe="1D")
+            return self.trade.get_portfolio_history(filter=req)
+        except Exception as e:
+            log.error(f"Portfolio history fail: {e}")
+            return None
 
     # ── Market status ─────────────────────────────────────────────────────────
     def is_market_open(self) -> bool:
