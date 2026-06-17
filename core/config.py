@@ -7,13 +7,13 @@ import os
 ALPACA_API_KEY    = os.environ["ALPACA_API_KEY"]
 ALPACA_SECRET_KEY = os.environ["ALPACA_SECRET_KEY"]
 ALPACA_BASE_URL   = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-PAPER_TRADE       = os.environ.get("ALPACA_PAPER_TRADE", "true").lower() == "true"
+PAPER_TRADE       = os.environ.get("ALPACA_PAPER_TRADE", os.environ.get("ALPACA_PAPER", "true")).lower() == "true"
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
 # ── FMP ───────────────────────────────────────────────────────────────────────
-FMP_API_KEY = os.environ.get("FMP_API_KEY", "ZSYGfYsxXeVb2f8Ohz2wESvrDVcmdZRE")
+FMP_API_KEY = os.environ["FMP_API_KEY"]
 
 # ── Trading params ────────────────────────────────────────────────────────────
 MAX_POSITION_SIZE_PCT = float(os.environ.get("MAX_POSITION_PCT", "0.05"))   # 5% per trade
