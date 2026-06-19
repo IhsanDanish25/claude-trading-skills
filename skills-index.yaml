@@ -1136,10 +1136,10 @@ skills:
   timeframe: daily
   difficulty: intermediate
   integrations:
-  - id: fmp
+  - id: yfinance
     type: market_data
     requirement: required
-    note: FMP options chain API
+    note: Free options chain data via yfinance; no API key needed
   inputs:
   - symbol_list
   outputs:

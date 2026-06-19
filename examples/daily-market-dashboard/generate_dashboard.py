@@ -197,7 +197,6 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
             "name": "Options Flow",
             "script": str(skills_dir / "options-flow-scanner" / "scripts" / "scan_options_flow.py"),
             "args": [
-                "--api-key", fmp_key,
                 "--symbols", *_COMPACT_WATCHLIST,
                 "--top", "10",
                 "--output-dir", "{tmpdir}",

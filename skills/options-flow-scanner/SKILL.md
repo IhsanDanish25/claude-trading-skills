@@ -16,8 +16,7 @@ Identify unusual options activity — high volume/OI ratio, sweeps, and large bl
 
 ## Prerequisites
 
-- FMP API key (`FMP_API_KEY` environment variable or `--api-key`)
-- Free tier sufficient for single-symbol scans; paid tier for broad screening
+- `yfinance` Python package (`pip install yfinance`) — no API key required
 
 ## Workflow
 
