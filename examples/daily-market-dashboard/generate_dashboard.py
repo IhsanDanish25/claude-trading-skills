@@ -251,14 +251,17 @@ def generate_json_summary(results: dict[str, Any], today: date) -> dict[str, Any
     if vcp and isinstance(vcp, dict):
         for item in vcp.get("results", [])[:10]:
             if isinstance(item, dict):
-                # Support both screener formats (composite_score/score or contractions)
-                score = (item.get("composite_score") or item.get("score")
-                         or item.get("contractions") or "?")
-                score_out = round(float(score), 1) if isinstance(score, (int, float)) else score
+                # Score: new format uses composite_score; old format uses contractions (e.g. "3C")
+                raw_score = item.get("composite_score")
+                if raw_score is None:
+                    raw_score = item.get("score")
+                score_out: Any = round(float(raw_score), 1) if isinstance(raw_score, (int, float)) else (raw_score or "?")
 
-                # Support distance_from_pivot_pct (%) or pivot_price ($)
+                # Pivot: new format → distance_from_pivot_pct (%) then vcp_pattern.pivot_price ($)
+                #        old format → pivot_price ($) at top level
                 pct = item.get("distance_from_pivot_pct")
-                px  = item.get("pivot_price")
+                px  = (item.get("pivot_price")
+                       or item.get("vcp_pattern", {}).get("pivot_price"))
                 if isinstance(pct, (int, float)):
                     pivot_out: Any = round(float(pct), 1)
                 elif isinstance(px, (int, float)):

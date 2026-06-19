@@ -757,7 +757,11 @@ def main():
         "api_stats": api_stats,
     }
 
-    top_results = results[: args.top]
+    top_results = [
+        r for r in results[: args.top]
+        if r.get("composite_score") is not None
+        and r.get("vcp_pattern", {}).get("pivot_price") is not None
+    ]
 
     generate_json_report(top_results, metadata, json_file, all_results=results)
     generate_markdown_report(top_results, metadata, md_file, all_results=results)
