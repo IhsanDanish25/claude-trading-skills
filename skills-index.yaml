@@ -1128,3 +1128,166 @@ skills:
   - pivot_points
   workflows:
   - swing-opportunity-daily
+- id: options-flow-scanner
+  display_name: Options Flow Scanner
+  category: market-intelligence
+  status: production
+  summary: Scan options chains for unusual volume/OI ratios indicating smart money positioning.
+  timeframe: daily
+  difficulty: intermediate
+  integrations:
+  - id: fmp
+    type: market_data
+    requirement: required
+    note: FMP options chain API
+  inputs:
+  - symbol_list
+  outputs:
+  - unusual_options_flow
+- id: earnings-momentum-tracker
+  display_name: Earnings Momentum Tracker
+  category: earnings
+  status: production
+  summary: Track post-earnings price momentum and PEAD signals for recent reporters.
+  timeframe: daily
+  difficulty: intermediate
+  integrations:
+  - id: fmp
+    type: market_data
+    requirement: required
+    note: FMP earnings calendar + price data
+  inputs:
+  - earnings_calendar
+  outputs:
+  - pead_candidates
+- id: sector-rotation-detector
+  display_name: Sector Rotation Detector
+  category: market-intelligence
+  status: production
+  summary: Rank 11 SPDR sector ETFs by multi-timeframe momentum to identify rotation.
+  timeframe: weekly
+  difficulty: beginner
+  integrations:
+  - id: yfinance
+    type: market_data
+    requirement: required
+    note: Free ETF price data via yfinance
+  inputs:
+  - spdr_etfs
+  outputs:
+  - sector_rankings
+  - rotation_signal
+- id: technical-indicator-suite
+  display_name: Technical Indicator Suite
+  category: technical-analysis
+  status: production
+  summary: Calculate RSI, MACD, Bollinger Bands, ATR, and EMA for any stock symbol.
+  timeframe: daily
+  difficulty: beginner
+  integrations:
+  - id: yfinance
+    type: market_data
+    requirement: required
+    note: Free price data via yfinance
+  inputs:
+  - symbol_list
+  outputs:
+  - technical_indicators
+  - signal_summary
+- id: news-sentiment-analyzer
+  display_name: News Sentiment Analyzer
+  category: market-intelligence
+  status: production
+  summary: NLP-score recent news headlines bullish/bearish using FMP news feed.
+  timeframe: daily
+  difficulty: beginner
+  integrations:
+  - id: fmp
+    type: market_data
+    requirement: required
+    note: FMP stock news API
+  inputs:
+  - symbol_list
+  outputs:
+  - sentiment_scores
+- id: mean-reversion-screener
+  display_name: Mean Reversion Screener
+  category: swing-opportunity
+  status: production
+  summary: Screen for RSI+Bollinger Band oversold stocks in uptrends for mean reversion trades.
+  timeframe: daily
+  difficulty: intermediate
+  integrations:
+  - id: yfinance
+    type: market_data
+    requirement: required
+    note: Free price data via yfinance
+  inputs:
+  - symbol_list
+  outputs:
+  - reversion_candidates
+- id: breakout-scanner
+  display_name: Breakout Scanner
+  category: swing-opportunity
+  status: production
+  summary: Scan for price/volume breakouts above resistance levels and 52-week highs.
+  timeframe: daily
+  difficulty: intermediate
+  integrations:
+  - id: yfinance
+    type: market_data
+    requirement: required
+    note: Free price data via yfinance
+  inputs:
+  - symbol_list
+  outputs:
+  - breakout_candidates
+- id: insider-buying-detector
+  display_name: Insider Buying Detector
+  category: market-intelligence
+  status: production
+  summary: Detect corporate insider purchases and score conviction signals by role/value.
+  timeframe: weekly
+  difficulty: intermediate
+  integrations:
+  - id: fmp
+    type: market_data
+    requirement: required
+    note: FMP insider transactions API
+  inputs:
+  - symbol_list
+  outputs:
+  - insider_buying_signals
+- id: short-squeeze-scanner
+  display_name: Short Squeeze Scanner
+  category: market-intelligence
+  status: production
+  summary: Identify high short-interest stocks with momentum signals for squeeze setups.
+  timeframe: daily
+  difficulty: intermediate
+  integrations:
+  - id: fmp
+    type: market_data
+    requirement: required
+    note: FMP short interest + quote API
+  inputs:
+  - symbol_list
+  outputs:
+  - squeeze_candidates
+- id: macro-signal-monitor
+  display_name: Macro Signal Monitor
+  category: market-intelligence
+  status: production
+  summary: Monitor yield curve, credit spreads, VIX, DXY, and cross-asset signals for regime detection.
+  timeframe: daily
+  difficulty: intermediate
+  integrations:
+  - id: yfinance
+    type: market_data
+    requirement: required
+    note: Free macro data via yfinance
+  inputs:
+  - macro_tickers
+  outputs:
+  - regime_signal
+  - yield_curve_analysis
