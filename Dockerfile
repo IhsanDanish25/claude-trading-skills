@@ -12,6 +12,5 @@ COPY . .
 # Make routines importable
 RUN touch routines/__init__.py core/__init__.py
 
-EXPOSE 8501
-
-CMD ["streamlit", "run", "examples/daily-market-dashboard/app.py", "--server.port", "8501", "--server.address", "0.0.0.0", "--server.headless", "true"]
+# Web service: streamlit (Railway injects PORT)
+CMD ["sh", "-c", "streamlit run examples/daily-market-dashboard/app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true"]
