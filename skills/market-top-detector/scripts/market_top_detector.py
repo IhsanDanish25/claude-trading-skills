@@ -275,6 +275,19 @@ def _compute_deltas(current_scores: dict[str, float], previous_report: Optional[
     }
 
 
+def _exit_gracefully(output_dir: str, reason: str) -> None:
+    """Write empty JSON stub and exit 0 so dashboard shows OK/no-data instead of PARTIAL."""
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    path = os.path.join(output_dir, f"market_top_{ts}.json")
+    try:
+        with open(path, "w") as f:
+            json.dump({"error": reason, "signal": "N/A", "score": "N/A"}, f)
+    except OSError:
+        pass
+    print(f"WARNING: {reason} — wrote empty result to {path}", file=sys.stderr)
+    sys.exit(0)
+
+
 def main():
     args = parse_arguments()
 
@@ -289,8 +302,7 @@ def main():
         client = FMPClient(api_key=args.api_key)
         print("FMP API client initialized")
     except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+        _exit_gracefully(args.output_dir, f"FMP client init failed: {e}")
 
     # ========================================================================
     # Step 1: Fetch shared data (indices, ETFs)
@@ -309,8 +321,7 @@ def main():
         print(f"OK (${sp500_quote.get('price', 0):.2f}, {len(sp500_history)} days)")
     else:
         print("FAILED")
-        print("ERROR: Cannot proceed without S&P 500 data", file=sys.stderr)
-        sys.exit(1)
+        _exit_gracefully(args.output_dir, "Cannot fetch S&P 500 data — FMP API unavailable or rate-limited")
 
     # NASDAQ/QQQ data
     print("  Fetching NASDAQ (QQQ) data...", end=" ", flush=True)

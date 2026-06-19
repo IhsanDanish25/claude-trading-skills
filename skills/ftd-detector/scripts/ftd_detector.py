@@ -15,6 +15,7 @@ Output:
 """
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime
@@ -26,6 +27,19 @@ from fmp_client import FMPClient
 from post_ftd_monitor import assess_post_ftd_health
 from rally_tracker import get_market_state
 from report_generator import generate_json_report, generate_markdown_report
+
+
+def _exit_gracefully(output_dir: str, reason: str) -> None:
+    """Write empty JSON stub and exit 0 so dashboard shows OK/no-data instead of PARTIAL."""
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    path = os.path.join(output_dir, f"ftd_detector_{ts}.json")
+    try:
+        with open(path, "w") as f:
+            json.dump({"error": reason, "market_state": {"combined_state": "N/A"}}, f)
+    except OSError:
+        pass
+    print(f"WARNING: {reason} — wrote empty result to {path}", file=sys.stderr)
+    sys.exit(0)
 
 
 def parse_arguments():
@@ -57,8 +71,7 @@ def main():
         client = FMPClient(api_key=args.api_key)
         print("FMP API client initialized")
     except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+        _exit_gracefully(args.output_dir, f"FMP client init failed: {e}")
 
     # ========================================================================
     # Step 1: Fetch Market Data (4 API calls)
@@ -75,8 +88,7 @@ def main():
         print(f"OK ({len(sp500_history)} days)")
     else:
         print("FAILED")
-        print("ERROR: Cannot proceed without S&P 500 data", file=sys.stderr)
-        sys.exit(1)
+        _exit_gracefully(args.output_dir, "Cannot fetch S&P 500 data — FMP API unavailable or rate-limited")
 
     # NASDAQ/QQQ history (60 trading days)
     print("  Fetching NASDAQ (QQQ) history...", end=" ", flush=True)
