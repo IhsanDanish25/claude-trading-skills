@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from datetime import UTC, datetime
 from typing import Any
@@ -104,6 +105,7 @@ _TEXTS: dict[str, dict[str, str]] = {
         "dashboard_empty": "No dashboard yet. Click **Regenerate Dashboard** in the sidebar to generate one.",
         "dashboard_lang_label": "Language",
         "tab_chat": "Chat",
+        "tab_chart": "Chart",
     },
     "ja": {
         "sidebar_title": "プロジェクト設定",
@@ -135,6 +137,7 @@ _TEXTS: dict[str, dict[str, str]] = {
         "dashboard_empty": "ダッシュボードがまだありません。サイドバーの **ダッシュボード再生成** をクリックして生成してください。",
         "dashboard_lang_label": "言語",
         "tab_chat": "チャット",
+        "tab_chart": "チャート",
     },
 }
 
@@ -747,6 +750,121 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
         )
 
 
+_TV_INTERVALS = {"1D": "D", "1W": "W", "1M": "M", "3M": "3M", "1Y": "12M"}
+
+
+def _alpaca_quote(symbol: str) -> dict[str, Any] | None:
+    """Fetch latest quote + trade from Alpaca. Returns None if keys missing or error."""
+    api_key = os.environ.get("ALPACA_API_KEY", "")
+    secret  = os.environ.get("ALPACA_SECRET_KEY", "")
+    if not api_key or not secret:
+        return None
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockLatestQuoteRequest, StockLatestBarRequest
+        client = StockHistoricalDataClient(api_key, secret)
+        quote_req = StockLatestQuoteRequest(symbol_or_symbols=[symbol])
+        bar_req   = StockLatestBarRequest(symbol_or_symbols=[symbol])
+        quotes = client.get_stock_latest_quote(quote_req)
+        bars   = client.get_stock_latest_bar(bar_req)
+        q = quotes.get(symbol)
+        b = bars.get(symbol)
+        if q is None:
+            return None
+        return {
+            "bid":    float(q.bid_price or 0),
+            "ask":    float(q.ask_price or 0),
+            "mid":    float((q.bid_price + q.ask_price) / 2) if q.bid_price and q.ask_price else 0,
+            "open":   float(b.open  if b else 0),
+            "high":   float(b.high  if b else 0),
+            "low":    float(b.low   if b else 0),
+            "close":  float(b.close if b else 0),
+            "volume": int(b.volume  if b else 0),
+        }
+    except Exception:
+        return None
+
+
+def _tradingview_widget(symbol: str, interval: str, height: int = 520) -> str:
+    tv_symbol = symbol.upper()
+    return f"""
+<div class="tradingview-widget-container" style="width:100%;height:{height}px">
+  <div class="tradingview-widget-container__widget" style="width:100%;height:100%"></div>
+  <script type="text/javascript"
+    src="https://s3.tradingview.com/external-embedding/embed-uv.js" async>
+  {{
+    "autosize": true,
+    "symbol": "{tv_symbol}",
+    "interval": "{interval}",
+    "timezone": "America/New_York",
+    "theme": "dark",
+    "style": "1",
+    "locale": "en",
+    "toolbar_bg": "#1A1F2E",
+    "backgroundColor": "#0E1117",
+    "gridColor": "rgba(45,55,72,0.5)",
+    "enable_publishing": false,
+    "hide_top_toolbar": false,
+    "hide_legend": false,
+    "save_image": false,
+    "allow_symbol_change": false,
+    "studies": ["MASimple@tv-basicstudies", "Volume@tv-basicstudies"],
+    "container_id": "tv_{tv_symbol}_{interval}"
+  }}
+  </script>
+</div>"""
+
+
+def _render_chart_tab() -> None:
+    col_sym, col_tf = st.columns([3, 2])
+    with col_sym:
+        symbol = st.text_input(
+            "Symbol",
+            value=st.session_state.get("chart_symbol", "AAPL"),
+            placeholder="AAPL, NVDA, MSFT…",
+            key="chart_symbol_input",
+        ).strip().upper() or "AAPL"
+    with col_tf:
+        tf_label = st.selectbox(
+            "Timeframe",
+            options=list(_TV_INTERVALS.keys()),
+            index=0,
+            key="chart_timeframe",
+        )
+
+    st.session_state["chart_symbol"] = symbol
+    tv_interval = _TV_INTERVALS[tf_label]
+
+    # ── Alpaca live metrics ───────────────────────────────────────────────────
+    quote = _alpaca_quote(symbol)
+    if quote:
+        mid   = quote["mid"] or quote["close"]
+        c1, c2, c3, c4, c5 = st.columns(5)
+        with c1:
+            st.metric("Price (mid)", f"${mid:.2f}")
+        with c2:
+            st.metric("Bid", f"${quote['bid']:.2f}")
+        with c3:
+            st.metric("Ask", f"${quote['ask']:.2f}")
+        with c4:
+            day_chg = quote["close"] - quote["open"] if quote["open"] else 0
+            day_pct = day_chg / quote["open"] * 100 if quote["open"] else 0
+            st.metric("Day", f"{day_pct:+.2f}%", f"${day_chg:+.2f}")
+        with c5:
+            vol = quote["volume"]
+            vol_str = f"{vol/1_000_000:.1f}M" if vol >= 1_000_000 else f"{vol/1_000:.0f}K"
+            st.metric("Volume", vol_str)
+    else:
+        st.caption("Set ALPACA_API_KEY + ALPACA_SECRET_KEY to show live quotes.")
+
+    # ── TradingView chart ─────────────────────────────────────────────────────
+    st.components.v1.html(
+        _tradingview_widget(symbol, tv_interval),
+        height=540,
+        scrolling=False,
+    )
+
+
 def _resolve_project_root() -> str:
     """Resolve the parent trading-skills repository root."""
     candidate = PROJECT_ROOT.parent.parent
@@ -841,12 +959,16 @@ def render_app() -> None:
         for error in runtime_errors:
             st.caption(error)
 
-    tab_dashboard, tab_chat = st.tabs(
+    tab_dashboard, tab_chart, tab_chat = st.tabs(
         [
             _msg("dashboard_title"),
+            _msg("tab_chart"),
             _msg("tab_chat"),
         ]
     )
+
+    with tab_chart:
+        _render_chart_tab()
 
     with tab_dashboard:
         dashboard_json = _find_latest_dashboard_json()
@@ -886,7 +1008,7 @@ def render_app() -> None:
         """<script>
         (function() {
             var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
-            if (tabs.length >= 2) { tabs[1].click(); }
+            if (tabs.length >= 3) { tabs[2].click(); }
         })();
         </script>""",
         height=0,
