@@ -749,6 +749,364 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
             unsafe_allow_html=True,
         )
 
+    # ── 10 new skill sections ─────────────────────────────────────────────────
+
+    # Macro Signals
+    macro = data.get("macro_signals", {})
+    if macro:
+        regime = macro.get("regime", "N/A")
+        yc = macro.get("yield_curve", {})
+        vix_val = macro.get("vix")
+        yield_10y = macro.get("ten_year_yield")
+        dxy_val = macro.get("dxy")
+        gold_val = macro.get("gold")
+        spy_1m = macro.get("spy_1m")
+        yc_str = (
+            f"{yc.get('shape','?').upper()} | Spread {yc.get('spread','?')}% | {yc.get('signal','')}"
+            if yc else "N/A"
+        )
+        color_cls = "status-green" if "risk-on" in regime.lower() else (
+            "status-red" if "risk-off" in regime.lower() else "status-yellow"
+        )
+        st.markdown(
+            f"""<div class="section-card">
+                <h3>Macro Signal Monitor</h3>
+                <p><strong>Regime:</strong> <span class="{color_cls}">{regime}</span></p>
+                <p><strong>Yield Curve:</strong> {yc_str}</p>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+        with mc1:
+            st.metric("VIX", f"{vix_val:.2f}" if isinstance(vix_val, (int, float)) else "N/A")
+        with mc2:
+            st.metric("10Y Yield", f"{yield_10y:.2f}%" if isinstance(yield_10y, (int, float)) else "N/A")
+        with mc3:
+            st.metric("DXY", f"{dxy_val:.2f}" if isinstance(dxy_val, (int, float)) else "N/A")
+        with mc4:
+            st.metric("Gold", f"${gold_val:.2f}" if isinstance(gold_val, (int, float)) else "N/A")
+        with mc5:
+            spy_str = f"{spy_1m:+.1f}%" if isinstance(spy_1m, (int, float)) else "N/A"
+            st.metric("SPY 1M", spy_str)
+
+    # Sector Rotation
+    sector = data.get("sector_rotation", [])
+    sector_sig = data.get("sector_rotation_signal", "")
+    if sector:
+        rows_html = "".join(
+            f"<tr><td>{r.get('rank','?')}</td><td><strong>{r.get('ticker','?')}</strong></td>"
+            f"<td>{r.get('name','?')}</td>"
+            f"<td style='text-align:right'>{r.get('momentum_1m','N/A')}%</td>"
+            f"<td style='text-align:right'>{r.get('composite_score','N/A')}</td></tr>"
+            for r in sector[:11] if isinstance(r, dict)
+        )
+        signal_p = f"<p><strong>Signal:</strong> {sector_sig}</p>" if sector_sig else ""
+        st.markdown(
+            f"""<div class="section-card">
+                <h3>Sector Rotation</h3>
+                {signal_p}
+                <table style="width:100%; border-collapse:collapse; font-size:0.82rem;">
+                    <thead><tr>
+                        <th style="padding:0.3rem; color:#A0AEC0;">#</th>
+                        <th style="padding:0.3rem; color:#A0AEC0; text-align:left">ETF</th>
+                        <th style="padding:0.3rem; color:#A0AEC0; text-align:left">Sector</th>
+                        <th style="padding:0.3rem; color:#A0AEC0; text-align:right">1M%</th>
+                        <th style="padding:0.3rem; color:#A0AEC0; text-align:right">Score</th>
+                    </tr></thead>
+                    <tbody>{rows_html}</tbody>
+                </table>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+    # Two-column row: Technical Indicators + News Sentiment
+    col_tech, col_news = st.columns(2)
+
+    with col_tech:
+        tech_inds = data.get("technical_indicators", [])
+        if tech_inds:
+            rows_html = "".join(
+                f"<tr><td><strong>{r.get('symbol','?')}</strong></td>"
+                f"<td style='text-align:right'>${r.get('price','?')}</td>"
+                f"<td style='text-align:right'>{r.get('rsi_14','?')}</td>"
+                f"<td>{r.get('macd_crossover','?')}</td>"
+                f"<td style='font-size:0.75rem; color:#A0AEC0'>{r.get('signal_summary','')}</td></tr>"
+                for r in tech_inds if isinstance(r, dict)
+            )
+            st.markdown(
+                f"""<div class="section-card">
+                    <h3>Technical Indicators</h3>
+                    <table style="width:100%; border-collapse:collapse; font-size:0.8rem;">
+                        <thead><tr>
+                            <th style="color:#A0AEC0; text-align:left">Symbol</th>
+                            <th style="color:#A0AEC0; text-align:right">Price</th>
+                            <th style="color:#A0AEC0; text-align:right">RSI</th>
+                            <th style="color:#A0AEC0;">MACD</th>
+                            <th style="color:#A0AEC0;">Signal</th>
+                        </tr></thead>
+                        <tbody>{rows_html}</tbody>
+                    </table>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """<div class="section-card"><h3>Technical Indicators</h3>
+                <p class="status-gray">No data available.</p></div>""",
+                unsafe_allow_html=True,
+            )
+
+    with col_news:
+        news_sent = data.get("news_sentiment", [])
+        if news_sent:
+            rows_html = ""
+            for r in news_sent:
+                if not isinstance(r, dict):
+                    continue
+                sent = r.get("sentiment", 0)
+                sig = r.get("signal", "neutral")
+                color = "status-green" if "bullish" in sig else ("status-red" if "bearish" in sig else "status-gray")
+                sent_str = f"{sent:+.3f}" if isinstance(sent, (int, float)) else "N/A"
+                rows_html += (
+                    f"<tr><td><strong>{r.get('symbol','?')}</strong></td>"
+                    f"<td style='text-align:right'>{r.get('articles',0)}</td>"
+                    f"<td style='text-align:right'>{sent_str}</td>"
+                    f"<td><span class='{color}'>{sig}</span></td></tr>"
+                )
+            st.markdown(
+                f"""<div class="section-card">
+                    <h3>News Sentiment</h3>
+                    <table style="width:100%; border-collapse:collapse; font-size:0.8rem;">
+                        <thead><tr>
+                            <th style="color:#A0AEC0; text-align:left">Symbol</th>
+                            <th style="color:#A0AEC0; text-align:right">Articles</th>
+                            <th style="color:#A0AEC0; text-align:right">Sentiment</th>
+                            <th style="color:#A0AEC0;">Signal</th>
+                        </tr></thead>
+                        <tbody>{rows_html}</tbody>
+                    </table>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """<div class="section-card"><h3>News Sentiment</h3>
+                <p class="status-gray">No data available.</p></div>""",
+                unsafe_allow_html=True,
+            )
+
+    # Two-column row: Breakout Scanner + Mean Reversion
+    col_brk, col_mr = st.columns(2)
+
+    with col_brk:
+        breakouts = data.get("breakouts", [])
+        if breakouts:
+            rows_html = "".join(
+                f"<tr><td><strong>{r.get('symbol','?')}</strong></td>"
+                f"<td style='text-align:right'>${r.get('price','?')}</td>"
+                f"<td style='text-align:right'>{r.get('volume_ratio','?')}x</td>"
+                f"<td>{' + '.join(r.get('breakout_type', [])) or '?'}</td>"
+                f"<td style='text-align:right'>{r.get('score','?')}</td></tr>"
+                for r in breakouts if isinstance(r, dict)
+            )
+            st.markdown(
+                f"""<div class="section-card">
+                    <h3>Breakout Scanner</h3>
+                    <table style="width:100%; border-collapse:collapse; font-size:0.8rem;">
+                        <thead><tr>
+                            <th style="color:#A0AEC0; text-align:left">Symbol</th>
+                            <th style="color:#A0AEC0; text-align:right">Price</th>
+                            <th style="color:#A0AEC0; text-align:right">Vol Ratio</th>
+                            <th style="color:#A0AEC0;">Type</th>
+                            <th style="color:#A0AEC0; text-align:right">Score</th>
+                        </tr></thead>
+                        <tbody>{rows_html}</tbody>
+                    </table>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """<div class="section-card"><h3>Breakout Scanner</h3>
+                <p class="status-gray">No breakout candidates.</p></div>""",
+                unsafe_allow_html=True,
+            )
+
+    with col_mr:
+        mean_rev = data.get("mean_reversion", [])
+        if mean_rev:
+            rows_html = "".join(
+                f"<tr><td><strong>{r.get('symbol','?')}</strong></td>"
+                f"<td style='text-align:right'>{r.get('rsi_14','?')}</td>"
+                f"<td style='text-align:right'>{r.get('pullback_pct','?')}%</td>"
+                f"<td style='text-align:right'>${r.get('target','?')}</td>"
+                f"<td style='text-align:right'>{r.get('score','?')}</td></tr>"
+                for r in mean_rev if isinstance(r, dict)
+            )
+            st.markdown(
+                f"""<div class="section-card">
+                    <h3>Mean Reversion Setups</h3>
+                    <table style="width:100%; border-collapse:collapse; font-size:0.8rem;">
+                        <thead><tr>
+                            <th style="color:#A0AEC0; text-align:left">Symbol</th>
+                            <th style="color:#A0AEC0; text-align:right">RSI</th>
+                            <th style="color:#A0AEC0; text-align:right">Pullback%</th>
+                            <th style="color:#A0AEC0; text-align:right">Target</th>
+                            <th style="color:#A0AEC0; text-align:right">Score</th>
+                        </tr></thead>
+                        <tbody>{rows_html}</tbody>
+                    </table>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """<div class="section-card"><h3>Mean Reversion Setups</h3>
+                <p class="status-gray">No setups found.</p></div>""",
+                unsafe_allow_html=True,
+            )
+
+    # Two-column row: Options Flow + Earnings Momentum
+    col_opt, col_em = st.columns(2)
+
+    with col_opt:
+        opts = data.get("options_flow", [])
+        if opts:
+            rows_html = "".join(
+                f"<tr><td><strong>{r.get('symbol','?')}</strong></td>"
+                f"<td>{r.get('type','?')}</td>"
+                f"<td style='text-align:right'>{r.get('vol_oi_ratio','?')}x</td>"
+                f"<td style='text-align:right'>{r.get('score','?')}</td></tr>"
+                for r in opts if isinstance(r, dict)
+            )
+            st.markdown(
+                f"""<div class="section-card">
+                    <h3>Options Flow</h3>
+                    <table style="width:100%; border-collapse:collapse; font-size:0.8rem;">
+                        <thead><tr>
+                            <th style="color:#A0AEC0; text-align:left">Symbol</th>
+                            <th style="color:#A0AEC0;">Type</th>
+                            <th style="color:#A0AEC0; text-align:right">Vol/OI</th>
+                            <th style="color:#A0AEC0; text-align:right">Score</th>
+                        </tr></thead>
+                        <tbody>{rows_html}</tbody>
+                    </table>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """<div class="section-card"><h3>Options Flow</h3>
+                <p class="status-gray">No unusual options activity.</p></div>""",
+                unsafe_allow_html=True,
+            )
+
+    with col_em:
+        earn_mom = data.get("earnings_momentum", [])
+        if earn_mom:
+            rows_html = "".join(
+                f"<tr><td><strong>{r.get('symbol','?')}</strong></td>"
+                f"<td>{r.get('grade','?')}</td>"
+                f"<td style='text-align:right'>{r.get('gap_pct','?')}%</td>"
+                f"<td style='text-align:right'>{r.get('momentum_5d','?')}%</td></tr>"
+                for r in earn_mom if isinstance(r, dict)
+            )
+            st.markdown(
+                f"""<div class="section-card">
+                    <h3>Earnings Momentum (PEAD)</h3>
+                    <table style="width:100%; border-collapse:collapse; font-size:0.8rem;">
+                        <thead><tr>
+                            <th style="color:#A0AEC0; text-align:left">Symbol</th>
+                            <th style="color:#A0AEC0;">Grade</th>
+                            <th style="color:#A0AEC0; text-align:right">Gap%</th>
+                            <th style="color:#A0AEC0; text-align:right">5D Mom%</th>
+                        </tr></thead>
+                        <tbody>{rows_html}</tbody>
+                    </table>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """<div class="section-card"><h3>Earnings Momentum (PEAD)</h3>
+                <p class="status-gray">No PEAD candidates found.</p></div>""",
+                unsafe_allow_html=True,
+            )
+
+    # Two-column row: Insider Buying + Short Squeeze
+    col_ins, col_sq = st.columns(2)
+
+    with col_ins:
+        insider = data.get("insider_buying", [])
+        if insider:
+            rows_html = ""
+            for r in insider:
+                if not isinstance(r, dict):
+                    continue
+                val = r.get("total_value_usd", 0)
+                val_str = f"${val/1000:.0f}K" if isinstance(val, (int, float)) and val < 1_000_000 else (
+                    f"${val/1_000_000:.1f}M" if isinstance(val, (int, float)) else str(val)
+                )
+                rows_html += (
+                    f"<tr><td><strong>{r.get('symbol','?')}</strong></td>"
+                    f"<td>{r.get('grade','?')}</td>"
+                    f"<td style='text-align:right'>{r.get('unique_insiders','?')}</td>"
+                    f"<td style='text-align:right'>{val_str}</td></tr>"
+                )
+            st.markdown(
+                f"""<div class="section-card">
+                    <h3>Insider Buying</h3>
+                    <table style="width:100%; border-collapse:collapse; font-size:0.8rem;">
+                        <thead><tr>
+                            <th style="color:#A0AEC0; text-align:left">Symbol</th>
+                            <th style="color:#A0AEC0;">Grade</th>
+                            <th style="color:#A0AEC0; text-align:right">Insiders</th>
+                            <th style="color:#A0AEC0; text-align:right">Value</th>
+                        </tr></thead>
+                        <tbody>{rows_html}</tbody>
+                    </table>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """<div class="section-card"><h3>Insider Buying</h3>
+                <p class="status-gray">No significant insider buying detected.</p></div>""",
+                unsafe_allow_html=True,
+            )
+
+    with col_sq:
+        squeeze = data.get("short_squeeze", [])
+        if squeeze:
+            rows_html = "".join(
+                f"<tr><td><strong>{r.get('symbol','?')}</strong></td>"
+                f"<td style='text-align:right'>{r.get('short_float_pct','?')}%</td>"
+                f"<td style='text-align:right'>{r.get('days_to_cover','?')}</td>"
+                f"<td style='text-align:right'>{r.get('score','?')}</td></tr>"
+                for r in squeeze if isinstance(r, dict)
+            )
+            st.markdown(
+                f"""<div class="section-card">
+                    <h3>Short Squeeze Setups</h3>
+                    <table style="width:100%; border-collapse:collapse; font-size:0.8rem;">
+                        <thead><tr>
+                            <th style="color:#A0AEC0; text-align:left">Symbol</th>
+                            <th style="color:#A0AEC0; text-align:right">Short%</th>
+                            <th style="color:#A0AEC0; text-align:right">DTC</th>
+                            <th style="color:#A0AEC0; text-align:right">Score</th>
+                        </tr></thead>
+                        <tbody>{rows_html}</tbody>
+                    </table>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """<div class="section-card"><h3>Short Squeeze Setups</h3>
+                <p class="status-gray">No short squeeze setups found.</p></div>""",
+                unsafe_allow_html=True,
+            )
+
 
 _TV_INTERVALS = {"1D": "D", "1W": "W", "1M": "M", "3M": "3M", "1Y": "12M"}
 
