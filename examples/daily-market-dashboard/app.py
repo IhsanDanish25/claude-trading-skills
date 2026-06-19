@@ -1010,8 +1010,7 @@ def render_app() -> None:
             var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
             if (tabs.length >= 3) { tabs[2].click(); }
         })();
-        </script>""",
-        height=0,
+        </script>"""
     )
 
     uploaded_files: list[Any] = []
