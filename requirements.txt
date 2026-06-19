@@ -2,6 +2,7 @@
 streamlit>=1.42.0
 claude-agent-sdk>=0.2.102
 python-dotenv>=1.0.0
+nest-asyncio>=1.6.0
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 pyyaml>=6.0

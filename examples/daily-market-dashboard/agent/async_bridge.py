@@ -7,6 +7,12 @@ import logging
 from collections.abc import Coroutine
 from typing import Any, TypeVar
 
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -21,7 +27,7 @@ class AsyncBridge:
     def run(self, coro: Coroutine[Any, Any, T], timeout: float = 300) -> T:
         """Run a coroutine on the persistent loop with timeout protection."""
         if self._loop.is_closed():
-            raise RuntimeError("AsyncBridge loop is closed")
+            self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         return self._loop.run_until_complete(asyncio.wait_for(coro, timeout=timeout))
 
