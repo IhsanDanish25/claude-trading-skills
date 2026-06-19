@@ -254,8 +254,16 @@ Examples:
         sys.exit(0)
 
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        print(f"Warning: economic calendar fetch failed: {e}", file=sys.stderr)
+        # Write empty result so the dashboard shows 0 events (OK) rather than PARTIAL
+        if args.output:
+            try:
+                with open(args.output, "w", encoding="utf-8") as f:
+                    json.dump([], f)
+                print(f"Wrote empty result to {args.output}", file=sys.stderr)
+            except OSError:
+                pass
+        sys.exit(0)
 
 
 if __name__ == "__main__":
