@@ -251,13 +251,27 @@ def generate_json_summary(results: dict[str, Any], today: date) -> dict[str, Any
     if vcp and isinstance(vcp, dict):
         for item in vcp.get("results", [])[:10]:
             if isinstance(item, dict):
-                score = item.get("composite_score", item.get("score", "?"))
-                pivot = item.get("distance_from_pivot_pct", "?")
+                # Support both screener formats (composite_score/score or contractions)
+                score = (item.get("composite_score") or item.get("score")
+                         or item.get("contractions") or "?")
+                score_out = round(float(score), 1) if isinstance(score, (int, float)) else score
+
+                # Support distance_from_pivot_pct (%) or pivot_price ($)
+                pct = item.get("distance_from_pivot_pct")
+                px  = item.get("pivot_price")
+                if isinstance(pct, (int, float)):
+                    pivot_out: Any = round(float(pct), 1)
+                elif isinstance(px, (int, float)):
+                    pivot_out = f"${px:.2f}"
+                else:
+                    pivot_out = "?"
+
                 summary["vcp_candidates"].append({
-                    "ticker": item.get("symbol", item.get("ticker", "?")),
-                    "score": round(score, 1) if isinstance(score, float) else score,
-                    "rating": item.get("rating", item.get("stage", "?")),
-                    "pivot_dist": round(pivot, 1) if isinstance(pivot, float) else pivot,
+                    "ticker": item.get("symbol") or item.get("ticker") or "?",
+                    "score": score_out,
+                    "rating": (item.get("rating") or item.get("status")
+                               or str(item.get("stage", "?"))),
+                    "pivot_dist": pivot_out,
                 })
 
     if mktop and isinstance(mktop, dict):

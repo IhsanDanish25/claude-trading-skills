@@ -753,24 +753,22 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
 _TV_INTERVALS = {"1D": "D", "1W": "W", "1M": "M", "3M": "3M", "1Y": "12M"}
 
 
-def _alpaca_quote(symbol: str) -> dict[str, Any] | None:
-    """Fetch latest quote + trade from Alpaca. Returns None if keys missing or error."""
+def _alpaca_quote(symbol: str) -> tuple[dict[str, Any] | None, str]:
+    """Fetch latest quote from Alpaca. Returns (data, error_reason)."""
     api_key = os.environ.get("ALPACA_API_KEY", "")
     secret  = os.environ.get("ALPACA_SECRET_KEY", "")
     if not api_key or not secret:
-        return None
+        return None, "missing_keys"
     try:
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockLatestQuoteRequest, StockLatestBarRequest
-        client = StockHistoricalDataClient(api_key, secret)
-        quote_req = StockLatestQuoteRequest(symbol_or_symbols=[symbol])
-        bar_req   = StockLatestBarRequest(symbol_or_symbols=[symbol])
-        quotes = client.get_stock_latest_quote(quote_req)
-        bars   = client.get_stock_latest_bar(bar_req)
+        client    = StockHistoricalDataClient(api_key, secret)
+        quotes    = client.get_stock_latest_quote(StockLatestQuoteRequest(symbol_or_symbols=[symbol]))
+        bars      = client.get_stock_latest_bar(StockLatestBarRequest(symbol_or_symbols=[symbol]))
         q = quotes.get(symbol)
         b = bars.get(symbol)
         if q is None:
-            return None
+            return None, "no_data"
         return {
             "bid":    float(q.bid_price or 0),
             "ask":    float(q.ask_price or 0),
@@ -780,39 +778,11 @@ def _alpaca_quote(symbol: str) -> dict[str, Any] | None:
             "low":    float(b.low   if b else 0),
             "close":  float(b.close if b else 0),
             "volume": int(b.volume  if b else 0),
-        }
-    except Exception:
-        return None
-
-
-def _tradingview_widget(symbol: str, interval: str, height: int = 520) -> str:
-    tv_symbol = symbol.upper()
-    return f"""
-<div class="tradingview-widget-container" style="width:100%;height:{height}px">
-  <div class="tradingview-widget-container__widget" style="width:100%;height:100%"></div>
-  <script type="text/javascript"
-    src="https://s3.tradingview.com/external-embedding/embed-uv.js" async>
-  {{
-    "autosize": true,
-    "symbol": "{tv_symbol}",
-    "interval": "{interval}",
-    "timezone": "America/New_York",
-    "theme": "dark",
-    "style": "1",
-    "locale": "en",
-    "toolbar_bg": "#1A1F2E",
-    "backgroundColor": "#0E1117",
-    "gridColor": "rgba(45,55,72,0.5)",
-    "enable_publishing": false,
-    "hide_top_toolbar": false,
-    "hide_legend": false,
-    "save_image": false,
-    "allow_symbol_change": false,
-    "studies": ["MASimple@tv-basicstudies", "Volume@tv-basicstudies"],
-    "container_id": "tv_{tv_symbol}_{interval}"
-  }}
-  </script>
-</div>"""
+        }, ""
+    except ImportError:
+        return None, "import_error"
+    except Exception as exc:
+        return None, str(exc)[:80]
 
 
 def _render_chart_tab() -> None:
@@ -836,9 +806,9 @@ def _render_chart_tab() -> None:
     tv_interval = _TV_INTERVALS[tf_label]
 
     # ── Alpaca live metrics ───────────────────────────────────────────────────
-    quote = _alpaca_quote(symbol)
+    quote, err = _alpaca_quote(symbol)
     if quote:
-        mid   = quote["mid"] or quote["close"]
+        mid = quote["mid"] or quote["close"]
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
             st.metric("Price (mid)", f"${mid:.2f}")
@@ -854,15 +824,22 @@ def _render_chart_tab() -> None:
             vol = quote["volume"]
             vol_str = f"{vol/1_000_000:.1f}M" if vol >= 1_000_000 else f"{vol/1_000:.0f}K"
             st.metric("Volume", vol_str)
+    elif err == "missing_keys":
+        st.caption("ALPACA_API_KEY / ALPACA_SECRET_KEY not found in environment.")
+    elif err == "import_error":
+        st.caption("alpaca-py not installed — live quotes unavailable.")
     else:
-        st.caption("Set ALPACA_API_KEY + ALPACA_SECRET_KEY to show live quotes.")
+        st.caption(f"Alpaca quote unavailable: {err}")
 
-    # ── TradingView chart ─────────────────────────────────────────────────────
-    st.components.v1.html(
-        _tradingview_widget(symbol, tv_interval),
-        height=540,
-        scrolling=False,
+    # ── TradingView chart via direct iframe (no JS sandbox issues) ────────────
+    tv_url = (
+        f"https://s.tradingview.com/widgetembed/"
+        f"?frameElementId=tv1&symbol={symbol.upper()}&interval={tv_interval}"
+        f"&theme=dark&style=1&locale=en&toolbar_bg=%231A1F2E"
+        f"&hide_top_toolbar=0&hide_legend=0&saveimage=0"
+        f"&studies=MASimple%40tv-basicstudies%2CVolume%40tv-basicstudies"
     )
+    st.components.v1.iframe(tv_url, height=520, scrolling=False)
 
 
 def _resolve_project_root() -> str:
