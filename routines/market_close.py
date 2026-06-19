@@ -19,6 +19,7 @@ from core import logger, config
 from core.broker   import BrokerClient
 from core.fmp      import get_quotes, get_market_breadth, get_daily_bars
 from core.analyst  import review_open_positions, analyze_market_regime, detect_ftd
+from core.notifier import send_eod_summary, send_trade_alert
 
 log = logger.setup("market_close")
 ET  = pytz.timezone("America/New_York")
@@ -90,6 +91,9 @@ def run():
             try:
                 broker.close_position(sym)
                 log.info(f"  ✓ Force-closed {sym}")
+                q = quotes.get(sym, {})
+                price = float(q.get("price", 0))
+                send_trade_alert("SELL", sym, 0, price, 0, 0, reason="Force-closed: -3% threshold")
             except Exception as e:
                 log.error(f"  ✗ Close {sym} failed: {e}")
 
@@ -165,6 +169,19 @@ def run():
     with open(log_path, "w") as f:
         json.dump(daily_log, f, indent=2)
     log.info(f"  Daily log saved → {log_path}")
+
+    send_eod_summary(
+        date=today,
+        portfolio_value=pv,
+        cash=cash,
+        positions_held=len(final_positions),
+        unrealized_pnl=total_unrealized,
+        regime=daily_log["regime"],
+        bias=daily_log["trade_bias"],
+        spy_change_pct=daily_log["spy_change_pct"],
+        ftd_detected=ftd_result.get("ftd_detected", False),
+        force_closed=force_close,
+    )
 
     logger.banner(log, "MARKET CLOSE COMPLETE")
 

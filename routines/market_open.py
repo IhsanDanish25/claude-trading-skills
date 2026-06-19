@@ -21,6 +21,7 @@ from core.broker   import BrokerClient
 from core.fmp      import get_quotes, get_market_breadth
 from core.analyst  import analyze_market_regime, score_vcp_candidates
 from core.screener import screen
+from core.notifier import send_trade_alert
 
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
@@ -152,6 +153,15 @@ def run():
             result = broker.buy(sym, dollar_amount=amount)
             log.info(f"  ✓ Order placed: {result['qty']} shares @ ~${result['price']:.2f} | "
                      f"SL={result['stop']} TP={result['target']}")
+            send_trade_alert(
+                action="BUY",
+                ticker=sym,
+                shares=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                target=result["target"],
+                reason=reason,
+            )
             buys_taken += 1
         except Exception as e:
             log.error(f"  ✗ Buy {sym} failed: {e}")

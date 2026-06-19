@@ -16,10 +16,11 @@ import datetime
 import pytz
 
 from core import logger, config
-from core.broker  import BrokerClient
-from core.fmp     import get_market_breadth, get_economic_calendar, get_news
-from core.analyst import analyze_market_regime, score_vcp_candidates, detect_ftd
-from core.screener import screen
+from core.broker    import BrokerClient
+from core.fmp       import get_market_breadth, get_economic_calendar, get_news
+from core.analyst   import analyze_market_regime, score_vcp_candidates, detect_ftd
+from core.screener  import screen
+from core.notifier  import send_premarket_brief
 
 log  = logger.setup("pre_market")
 ET   = pytz.timezone("America/New_York")
@@ -123,6 +124,18 @@ def run():
     slots_available = config.MAX_OPEN_POSITIONS - pos_count
     log.info(f"  Position slots available: {slots_available}")
     log.info(f"  Max deploy per trade: ${pv * config.MAX_POSITION_SIZE_PCT:,.0f}")
+
+    send_premarket_brief(
+        date=datetime.date.today().isoformat(),
+        regime=regime["regime"],
+        bias=regime["trade_bias"],
+        rationale=regime.get("rationale", ""),
+        portfolio_value=pv,
+        cash=cash,
+        slots=slots_available,
+        buy_list=buy_list if top_vcps else [],
+        high_impact_events=high_impact,
+    )
 
     logger.banner(log, "PRE-MARKET COMPLETE")
 

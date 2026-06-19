@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import datetime
 import pytz
 import logging
+import traceback
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,6 +69,11 @@ def main():
         log.info(f"Routine complete: {routine}")
     except Exception as e:
         log.error(f"Routine FAILED: {routine} | {e}", exc_info=True)
+        try:
+            from core.notifier import send_error_alert
+            send_error_alert(routine, traceback.format_exc())
+        except Exception:
+            pass
         sys.exit(1)
 
 
