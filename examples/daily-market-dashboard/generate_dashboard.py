@@ -85,13 +85,21 @@ def _load_latest_vcp(project_root: Path) -> Any:
         logger.warning("Failed to load VCP JSON: %s", exc)
         return None
 
+_VCP_WATCHLIST = [
+    "AAPL","MSFT","NVDA","AMD","META","GOOGL","AMZN","TSLA","NFLX","CRM",
+    "ADBE","PANW","CRWD","SNOW","DDOG","MELI","SQ","SHOP","NET","ZS",
+    "CELH","ENPH","FSLR","ON","AEHR","SMCI","AXON","COCO","DUOL","PINS",
+]
+
+
 def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
     skills_dir = project_root / "skills"
+    fmp_key = os.environ.get("FMP_API_KEY", "")
     return [
         {
             "name": "FTD Detector",
             "script": str(skills_dir / "ftd-detector" / "scripts" / "ftd_detector.py"),
-            "args": ["--output-dir", "{tmpdir}", "--api-key", os.environ.get("FMP_API_KEY", "")],
+            "args": ["--output-dir", "{tmpdir}", "--api-key", fmp_key],
             "glob": "ftd_detector_*.json",
         },
         {
@@ -109,20 +117,31 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
         {
             "name": "Theme Detector",
             "script": str(skills_dir / "theme-detector" / "scripts" / "theme_detector.py"),
-            "args": ["--output-dir", "{tmpdir}", "--fmp-api-key", os.environ.get("FMP_API_KEY", "")],
+            "args": ["--output-dir", "{tmpdir}", "--fmp-api-key", fmp_key],
             "glob": "theme_detector_*.json",
         },
         {
             "name": "Market Top Detector",
             "script": str(skills_dir / "market-top-detector" / "scripts" / "market_top_detector.py"),
-            "args": ["--output-dir", "{tmpdir}", "--api-key", os.environ.get("FMP_API_KEY", "")],
+            "args": ["--output-dir", "{tmpdir}", "--api-key", fmp_key],
             "glob": "market_top_*.json",
         },
         {
             "name": "Economic Calendar",
             "script": str(skills_dir / "economic-calendar-fetcher" / "scripts" / "get_economic_calendar.py"),
-            "args": ["--output", "{tmpdir}/economic_calendar_latest.json", "--api-key", os.environ.get("FMP_API_KEY", "")],
+            "args": ["--output", "{tmpdir}/economic_calendar_latest.json", "--api-key", fmp_key],
             "glob": "economic_calendar_latest.json",
+        },
+        {
+            "name": "VCP Screener",
+            "script": str(skills_dir / "vcp-screener" / "scripts" / "screen_vcp.py"),
+            "args": [
+                "--output-dir", "{tmpdir}",
+                "--api-key", fmp_key,
+                "--universe", *_VCP_WATCHLIST,
+                "--top", "10",
+            ],
+            "glob": "vcp_screener_*.json",
         },
     ]
 
@@ -158,10 +177,6 @@ def run_all_skills(project_root: Path) -> dict[str, Any]:
     defs = _skill_defs(project_root)
     results: dict[str, Any] = {}
 
-    # VCP: reuse saved JSON, no API calls
-    vcp_data = _load_latest_vcp(project_root)
-    results["VCP Screener"] = {"name": "VCP Screener", "status": "cached", "data": vcp_data}
-
     with tempfile.TemporaryDirectory(prefix="dashboard_") as tmpdir:
         futures = {}
         with ProcessPoolExecutor(max_workers=6) as executor:
@@ -181,6 +196,17 @@ def run_all_skills(project_root: Path) -> dict[str, Any]:
                 data = _collect_json(tmpdir, skill_def["glob"])
                 run_result["data"] = data
                 results[skill_def["name"]] = run_result
+
+    # VCP fallback: if live run failed, use the most recent cached JSON
+    vcp = results.get("VCP Screener", {})
+    if not vcp.get("data"):
+        cached = _load_latest_vcp(project_root)
+        results["VCP Screener"] = {
+            "name": "VCP Screener",
+            "status": "cached" if cached else vcp.get("status", "error"),
+            "data": cached,
+        }
+
     return results
 
 def _safe_get(data: Any, *keys: str, default: Any = "N/A") -> Any:
