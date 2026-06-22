@@ -17,11 +17,11 @@ import pytz
 import time
 
 from core import logger, config
-from core.broker   import BrokerClient
-from core.fmp      import get_quotes, get_market_breadth
-from core.analyst  import analyze_market_regime, score_vcp_candidates
-from core.screener import screen
-from core.notifier import send_trade_alert
+from core.broker       import BrokerClient
+from core.auto_trader  import AutoTrader
+from core.fmp          import get_quotes, get_market_breadth
+from core.analyst      import analyze_market_regime, score_vcp_candidates
+from core.screener     import screen
 
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
@@ -130,43 +130,23 @@ def run():
 
     log.info(f"Confirmed after live filter: {len(confirmed)}")
 
-    # ── Execute buys ──────────────────────────────────────────────────────────
-    buys_taken = 0
-    max_buys   = min(MAX_BUYS, slots)
-
+    # ── Execute buys via AutoTrader ──────────────────────────────────────────
     if trade_bias == "defensive":
-        max_buys = min(1, max_buys)   # defensive: max 1 new entry
-        size_pct = config.MAX_POSITION_SIZE_PCT * 0.5
+        max_buys = min(1, min(MAX_BUYS, slots))
+        size_factor = 0.5
     elif trade_bias == "aggressive":
-        size_pct = config.MAX_POSITION_SIZE_PCT * 1.0
+        max_buys = min(MAX_BUYS, slots)
+        size_factor = 1.0
     else:
-        size_pct = config.MAX_POSITION_SIZE_PCT * 0.75
+        max_buys = min(MAX_BUYS, slots)
+        size_factor = 0.75
 
-    for c in confirmed[:max_buys]:
-        sym    = c["symbol"]
-        score  = c.get("score", 0)
-        reason = c.get("reason", "")
-        amount = pv * size_pct
+    trader  = AutoTrader(broker)
+    results = trader.execute_signals(
+        confirmed, max_buys=max_buys, size_factor=size_factor,
+    )
 
-        log.info(f"  Buying {sym} | score={score} | ${amount:,.0f} | {reason}")
-
-        try:
-            result = broker.buy(sym, dollar_amount=amount)
-            log.info(f"  ✓ Order placed: {result['qty']} shares @ ~${result['price']:.2f} | "
-                     f"SL={result['stop']} TP={result['target']}")
-            send_trade_alert(
-                action="BUY",
-                ticker=sym,
-                shares=result["qty"],
-                price=result["price"],
-                stop=result["stop"],
-                target=result["target"],
-                reason=reason,
-            )
-            buys_taken += 1
-        except Exception as e:
-            log.error(f"  ✗ Buy {sym} failed: {e}")
-
+    buys_taken = sum(1 for r in results if r.success)
     log.info(f"Market open complete | Buys taken: {buys_taken}")
     logger.banner(log, "MARKET OPEN COMPLETE")
 
