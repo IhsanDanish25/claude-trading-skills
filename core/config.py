@@ -1,19 +1,43 @@
 """
 Central config — reads from env vars (Railway secrets).
+
+All API keys use os.environ.get() so the module can be imported safely.
+Call validate() at the start of any routine to get a clear error listing
+every missing key, instead of a raw KeyError on the first one.
 """
 import os
+import sys
 
 # ── Alpaca ────────────────────────────────────────────────────────────────────
-ALPACA_API_KEY    = os.environ["ALPACA_API_KEY"]
-ALPACA_SECRET_KEY = os.environ["ALPACA_SECRET_KEY"]
+ALPACA_API_KEY    = os.environ.get("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL   = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 PAPER_TRADE       = os.environ.get("ALPACA_PAPER_TRADE", os.environ.get("ALPACA_PAPER", "true")).lower() == "true"
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 # ── FMP ───────────────────────────────────────────────────────────────────────
-FMP_API_KEY = os.environ["FMP_API_KEY"]
+FMP_API_KEY = os.environ.get("FMP_API_KEY", "")
+
+_REQUIRED = {
+    "ALPACA_API_KEY":    ALPACA_API_KEY,
+    "ALPACA_SECRET_KEY": ALPACA_SECRET_KEY,
+    "ANTHROPIC_API_KEY": ANTHROPIC_API_KEY,
+    "FMP_API_KEY":       FMP_API_KEY,
+}
+
+
+def validate() -> None:
+    """Raise RuntimeError listing every missing required env var."""
+    missing = [name for name, val in _REQUIRED.items() if not val]
+    if missing:
+        msg = (
+            "Missing required environment variables (set them in Railway secrets):\n  "
+            + "\n  ".join(missing)
+        )
+        print(msg, file=sys.stderr)
+        raise RuntimeError(msg)
 
 # ── Trading params ────────────────────────────────────────────────────────────
 MAX_POSITION_SIZE_PCT = float(os.environ.get("MAX_POSITION_PCT", "0.05"))   # 5% per trade

@@ -9,11 +9,18 @@ import logging
 from core.config import ANTHROPIC_API_KEY
 
 log = logging.getLogger(__name__)
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+_client: anthropic.Anthropic | None = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    global _client
+    if _client is None:
+        _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    return _client
 
 
 def _ask(system: str, user: str, max_tokens: int = 1024) -> str:
-    msg = client.messages.create(
+    msg = _get_client().messages.create(
         model="claude-sonnet-4-6",
         max_tokens=max_tokens,
         system=system,
