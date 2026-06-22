@@ -2,12 +2,17 @@ from __future__ import annotations
 """
 Financial Modeling Prep (FMP) data fetcher.
 """
+import time
 import requests
 import logging
 from core.config import FMP_API_KEY
 
 log = logging.getLogger(__name__)
 BASE = "https://financialmodelingprep.com/api"
+
+_cache: dict = {}
+_CACHE_TTL = 300
+_CACHE_MAX = 500
 
 
 def _get(endpoint: str, params: dict = None) -> dict | list:
@@ -17,9 +22,22 @@ def _get(endpoint: str, params: dict = None) -> dict | list:
     params = params or {}
     params["apikey"] = FMP_API_KEY
     url = f"{BASE}{endpoint}"
+
+    cache_key = (url, frozenset(params.items()))
+    now = time.time()
+    entry = _cache.get(cache_key)
+    if entry and now - entry["ts"] < _CACHE_TTL:
+        return entry["data"]
+
     r = requests.get(url, params=params, timeout=15)
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+
+    if len(_cache) >= _CACHE_MAX:
+        del _cache[min(_cache, key=lambda k: _cache[k]["ts"])]
+
+    _cache[cache_key] = {"data": data, "ts": now}
+    return data
 
 
 def get_market_breadth() -> dict:
