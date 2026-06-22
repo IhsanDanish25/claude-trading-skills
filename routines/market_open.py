@@ -48,6 +48,7 @@ def load_watchlist() -> dict:
 
 
 def run():
+    config.validate()
     logger.banner(log, "MARKET OPEN — 8:30 AM ET")
 
     broker = BrokerClient()

@@ -29,6 +29,7 @@ MIN_HOLD_TO_KEEP     = -0.01   # Keep if P&L > -1% (let it breathe overnight)
 
 
 def run():
+    config.validate()
     logger.banner(log, "MARKET CLOSE — 3:00 PM ET")
 
     broker = BrokerClient()

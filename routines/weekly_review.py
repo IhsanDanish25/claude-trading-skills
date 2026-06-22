@@ -110,6 +110,7 @@ def calc_week_stats(trades: list) -> dict:
 
 
 def run():
+    config.validate()
     logger.banner(log, "WEEKLY REVIEW — FRIDAY 4:00 PM ET")
 
     broker     = BrokerClient()

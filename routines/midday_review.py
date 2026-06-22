@@ -23,6 +23,7 @@ ET  = pytz.timezone("America/New_York")
 
 
 def run():
+    config.validate()
     logger.banner(log, "MIDDAY REVIEW — 12:00 PM ET")
 
     broker = BrokerClient()
