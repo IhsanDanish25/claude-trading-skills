@@ -181,7 +181,7 @@ def run():
         log.error(f"Summary generation fail: {e}")
         summary = "Summary unavailable"
 
-    report_path = f"/tmp/weekly_report_{today.isoformat()}.json"
+    report_path = os.path.join(config.STATE_DIR, f"weekly_report_{today.isoformat()}.json")
     report = {"date": today.isoformat(), "stats": week_stats, "summary": summary}
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)

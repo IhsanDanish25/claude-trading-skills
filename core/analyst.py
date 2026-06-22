@@ -11,7 +11,7 @@ from core.config import ANTHROPIC_API_KEY
 log = logging.getLogger(__name__)
 _client: anthropic.Anthropic | None = None
 
-_MODELS = ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"]
+_MODELS = ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
 
 
 def _get_client() -> anthropic.Anthropic:
