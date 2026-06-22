@@ -13,15 +13,18 @@ import datetime
 import time
 import requests
 import logging
-from core.config import FMP_API_KEY
+import pytz
+from core.config import FMP_API_KEY, ALPACA_API_KEY, ALPACA_SECRET_KEY
 
 log = logging.getLogger(__name__)
 _STABLE = "https://financialmodelingprep.com/stable"
+_ET = pytz.timezone("America/New_York")
 
 _cache: dict = {}
 _CACHE_TTL = 300
 _CACHE_MAX = 500
 _warned_unavailable: set = set()
+_alpaca_data_client = None
 
 
 def _get(url: str, params: dict = None) -> dict | list:
@@ -84,20 +87,42 @@ def _safe_quote(symbol: str) -> dict:
         raise
 
 
-def get_market_breadth() -> dict:
-    """SPY + QQQ + IWM trend. QQQ/IWM require ETF plan; values default to 0
-    if unavailable. Sector breakdown not available on current plan."""
+def _alpaca_change_pct(symbol: str) -> float:
+    """Daily change % via Alpaca IEX feed — for ETFs blocked on the FMP plan."""
+    global _alpaca_data_client
     try:
-        spy = _safe_quote("SPY")
-        qqq = _safe_quote("QQQ")
-        iwm = _safe_quote("IWM")
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from alpaca.data.enums import DataFeed
+        if _alpaca_data_client is None:
+            _alpaca_data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        now   = datetime.datetime.now(pytz.utc)
+        start = now - datetime.timedelta(days=5)   # buffer covers weekends
+        bars  = _alpaca_data_client.get_stock_bars(
+            StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
+                             start=start, end=now, feed=DataFeed.IEX)
+        )[symbol]
+        if len(bars) >= 2:
+            return round((bars[-1].close - bars[-2].close) / bars[-2].close * 100, 4)
+    except Exception as e:
+        log.warning("Alpaca change_pct %s: %s", symbol, e)
+    return 0.0
+
+
+def get_market_breadth() -> dict:
+    """SPY (FMP stable) + QQQ/IWM (Alpaca, ETF-restricted on current FMP plan)."""
+    try:
+        spy     = _safe_quote("SPY")
+        qqq_chg = _alpaca_change_pct("QQQ")
+        iwm_chg = _alpaca_change_pct("IWM")
         return {
             "spy_change_pct": spy.get("changesPercentage", 0),
-            "qqq_change_pct": qqq.get("changesPercentage", 0),
-            "iwm_change_pct": iwm.get("changesPercentage", 0),
+            "qqq_change_pct": qqq_chg,
+            "iwm_change_pct": iwm_chg,
             "spy_price":      spy.get("price", 0),
             "spy_trend":      "up" if spy.get("changesPercentage", 0) > 0 else "down",
-            "qqq_trend":      "up" if qqq.get("changesPercentage", 0) > 0 else "down",
+            "qqq_trend":      "up" if qqq_chg > 0 else "down",
             "sector_perf":    {},
         }
     except Exception as e:
