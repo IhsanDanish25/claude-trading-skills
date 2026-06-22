@@ -138,8 +138,11 @@ def run():
     week_return_pct = 0
     try:
         hist = broker.get_portfolio_history(period="1W")
-        if hist and hist.profit_loss_pct:
-            week_return_pct = round(float(hist.profit_loss_pct[-1]) * 100, 2)
+        if hist and hist.equity and len(hist.equity) >= 2:
+            start_eq = float(hist.equity[0])
+            end_eq   = float(hist.equity[-1])
+            if start_eq > 0:
+                week_return_pct = round((end_eq - start_eq) / start_eq * 100, 2)
         log.info(f"  Week return: {week_return_pct:+.2f}%")
     except Exception as e:
         log.warning(f"Portfolio history fail: {e}")

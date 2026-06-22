@@ -210,9 +210,12 @@ class BrokerClient:
                 log.warning("GetPortfolioHistoryRequest not available in this alpaca-py version")
                 return None
             req = GetPortfolioHistoryRequest(period=period, timeframe="1D")
-            return self.trade.get_portfolio_history(history_filter=req)
+            try:
+                return self.trade.get_portfolio_history(history_filter=req)
+            except TypeError:
+                return self.trade.get_portfolio_history(req)
         except Exception as e:
-            log.error(f"Portfolio history fail: {e}")
+            log.error("Portfolio history fail: %s", e)
             return None
 
     # ── Market status ─────────────────────────────────────────────────────────
