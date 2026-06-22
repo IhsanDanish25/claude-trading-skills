@@ -27,65 +27,75 @@ def analyze_market_regime(breadth_data: dict) -> dict:
     Input: {advancing, declining, new_highs, new_lows, spy_trend, qqq_trend}
     Output: {regime: 'bull'|'bear'|'neutral', confidence: 0-100, rationale: str, trade_bias: str}
     """
-    system = """You are a systematic market regime classifier.
-Respond ONLY with valid JSON. No markdown, no explanation outside JSON.
-Schema: {"regime":"bull|bear|neutral","confidence":0-100,"rationale":"<1 sentence>","trade_bias":"aggressive|moderate|defensive|cash"}"""
+    system = (
+        "You are a systematic market regime classifier. "
+        "Respond ONLY with valid JSON. No markdown, no explanation outside JSON. "
+        'Schema: {"regime":"bull|bear|neutral","confidence":0-100,'
+        '"rationale":"<1 sentence>","trade_bias":"aggressive|moderate|defensive|cash"}'
+    )
 
-    user = f"Market breadth data: {json.dumps(breadth_data)}"
+    user = "Market breadth data: " + json.dumps(breadth_data)
     raw  = _ask(system, user)
 
     try:
         return json.loads(raw)
     except Exception:
-        log.error(f"Regime parse fail: {raw}")
-        return {"regime": "neutral", "confidence": 50, "rationale": "parse error", "trade_bias": "defensive"}
+        log.error("Regime parse fail: %s", raw)
+        return {
+            "regime": "neutral",
+            "confidence": 50,
+            "rationale": "parse error",
+            "trade_bias": "defensive",
+        }
 
 
 def score_vcp_candidates(candidates: list[dict]) -> list[dict]:
     """
-    Input: list of {symbol, price, rel_volume, adr_pct, contraction_weeks, tight_closes, near_52w_high}
+    Input: list of {symbol, price, rel_volume, adr_pct, contraction_weeks,
+                    tight_closes, near_52w_high}
     Output: list of {symbol, score:0-100, action:'BUY'|'WATCH'|'SKIP', reason: str}
     Sorted by score desc.
     """
-    system = """You are a VCP (Volatility Contraction Pattern) momentum trader.
-Score each candidate 0-100 for swing trade entry quality.
-Respond ONLY with valid JSON array. Schema per element:
-{"symbol":"","score":0-100,"action":"BUY|WATCH|SKIP","reason":"<1 sentence>"}
-Sort by score descending."""
+    system = (
+        "You are a VCP (Volatility Contraction Pattern) momentum trader. "
+        "Score each candidate 0-100 for swing trade entry quality. "
+        "Respond ONLY with valid JSON array. Schema per element: "
+        '{"symbol":"","score":0-100,"action":"BUY|WATCH|SKIP","reason":"<1 sentence>"} '
+        "Sort by score descending."
+    )
 
-    user = f"""VCP candidates:
-{json.dumps(candidates, indent=2)}"""
+    user = "VCP candidates:\n" + json.dumps(candidates, indent=2)
     raw  = _ask(system, user, max_tokens=2048)
 
     try:
-        # Strip possible markdown fences
         clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
         return json.loads(clean)
     except Exception:
-        log.error(f"VCP score parse fail: {raw[:300]}")
+        log.error("VCP score parse fail: %s", raw[:300])
         return []
 
 
 def review_open_positions(positions: list[dict], market_regime: str) -> list[dict]:
     """
-    Input: positions = [{symbol, entry_price, current_price, pnl_pct, days_held, stop, target}]
+    Input: positions = [{symbol, entry_price, current_price, pnl_pct,
+                         days_held, stop, target}]
     Output: [{symbol, action:'HOLD'|'SELL'|'TIGHTEN_STOP', reason:str}]
     """
-    system = """You are a position management expert for swing trades.
-For each position decide: HOLD, SELL (exit now), or TIGHTEN_STOP (move stop up).
-Respond ONLY with valid JSON array. Schema per element:
-{"symbol":"","action":"HOLD|SELL|TIGHTEN_STOP","reason":"<1 sentence>","new_stop":null_or_price}"""
+    system = (
+        "You are a position management expert for swing trades. "
+        "For each position decide: HOLD, SELL (exit now), or TIGHTEN_STOP (move stop up). "
+        "Respond ONLY with valid JSON array. Schema per element: "
+        '{"symbol":"","action":"HOLD|SELL|TIGHTEN_STOP","reason":"<1 sentence>","new_stop":null}'
+    )
 
-    user = f"""Market regime: {market_regime}
-Positions:
-{json.dumps(positions, indent=2)}"""
+    user = "Market regime: " + market_regime + "\nPositions:\n" + json.dumps(positions, indent=2)
     raw  = _ask(system, user, max_tokens=1024)
 
     try:
         clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
         return json.loads(clean)
     except Exception:
-        log.error(f"Position review parse fail: {raw[:300]}")
+        log.error("Position review parse fail: %s", raw[:300])
         return []
 
 
@@ -95,15 +105,16 @@ def generate_weekly_summary(stats: dict) -> str:
             regime_changes, lessons: [str]}
     Output: plain text weekly summary + next week plan
     """
-    system = """You are a professional trading journal writer.
-Write a concise weekly review (max 300 words):
-1. Performance summary
-2. What worked / what didn't
-3. Next week plan (max 3 action items)
-Be specific, data-driven, no fluff."""
+    system = (
+        "You are a professional trading journal writer. "
+        "Write a concise weekly review (max 300 words): "
+        "1. Performance summary "
+        "2. What worked / what did not "
+        "3. Next week plan (max 3 action items) "
+        "Be specific, data-driven, no fluff."
+    )
 
-    user = f"""Week stats:
-{json.dumps(stats, indent=2)}"""
+    user = "Week stats:\n" + json.dumps(stats, indent=2)
     return _ask(system, user, max_tokens=600)
 
 
@@ -112,16 +123,23 @@ def detect_ftd(price_data: list[dict]) -> dict:
     Input: recent daily bars [{date, open, high, low, close, volume}] last 20 days
     Output: {ftd_detected: bool, ftd_date: str|null, confidence: 0-100, details: str}
     """
-    system = """You are an IBD Follow-Through Day (FTD) detector.
-FTD = 4th+ day of rally attempt, index up 1.7%+ on higher volume than prior day.
-Respond ONLY with valid JSON:
-{"ftd_detected":bool,"ftd_date":"YYYY-MM-DD or null","confidence":0-100,"details":"<1 sentence>"}"""
+    system = (
+        "You are an IBD Follow-Through Day (FTD) detector. "
+        "FTD = 4th+ day of rally attempt, index up 1.7%+ on higher volume than prior day. "
+        "Respond ONLY with valid JSON: "
+        '{"ftd_detected":true/false,"ftd_date":"YYYY-MM-DD or null",'
+        '"confidence":0-100,"details":"<1 sentence>"}'
+    )
 
-    user = f"""Price/volume data (last 20 days):
-{json.dumps(price_data, indent=2)}"""
+    user = "Price/volume data (last 20 days):\n" + json.dumps(price_data, indent=2)
     raw  = _ask(system, user)
 
     try:
         return json.loads(raw)
     except Exception:
-        return {"ftd_detected": False, "ftd_date": None, "confidence": 0, "details": "parse error"}
+        return {
+            "ftd_detected": False,
+            "ftd_date": None,
+            "confidence": 0,
+            "details": "parse error",
+        }
