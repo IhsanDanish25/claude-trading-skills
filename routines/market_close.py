@@ -166,7 +166,7 @@ def run():
         "spy_change_pct":   breadth.get("spy_change_pct", 0),
     }
 
-    log_path = f"/tmp/daily_log_{today}.json"
+    log_path = os.path.join(config.STATE_DIR, f"daily_log_{today}.json")
     with open(log_path, "w") as f:
         json.dump(daily_log, f, indent=2)
     log.info(f"  Daily log saved → {log_path}")

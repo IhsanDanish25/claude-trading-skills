@@ -38,7 +38,7 @@ def load_week_logs() -> list:
     today = datetime.date.today()
     for i in range(5):
         d    = today - datetime.timedelta(days=i)
-        path = f"/tmp/daily_log_{d.isoformat()}.json"
+        path = os.path.join(config.STATE_DIR, f"daily_log_{d.isoformat()}.json")
         if os.path.exists(path):
             try:
                 with open(path) as f:

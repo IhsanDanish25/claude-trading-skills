@@ -57,3 +57,8 @@ WATCHLIST = [
 
 # ── Timezone ──────────────────────────────────────────────────────────────────
 TIMEZONE = "America/New_York"
+
+# ── Persistent state directory (survives across routine ticks) ────────────────
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATE_DIR = os.path.join(_PROJECT_ROOT, "state")
+os.makedirs(STATE_DIR, exist_ok=True)
