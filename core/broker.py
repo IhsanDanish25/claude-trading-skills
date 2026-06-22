@@ -11,7 +11,13 @@ from alpaca.trading.requests import (
     MarketOrderRequest,
     GetOrdersRequest,
     ClosePositionRequest,
+    StopLossRequest,
+    TakeProfitRequest,
 )
+try:
+    from alpaca.trading.requests import GetPortfolioHistoryRequest
+except ImportError:
+    GetPortfolioHistoryRequest = None
 from alpaca.trading.enums import (
     OrderSide, TimeInForce, QueryOrderStatus, OrderClass
 )
@@ -162,6 +168,9 @@ class BrokerClient:
 
     def get_portfolio_history(self, period: str = "1W"):
         try:
+            if GetPortfolioHistoryRequest is None:
+                log.warning("GetPortfolioHistoryRequest not available in this alpaca-py version")
+                return None
             req = GetPortfolioHistoryRequest(period=period, timeframe="1D")
             return self.trade.get_portfolio_history(filter=req)
         except Exception as e:
