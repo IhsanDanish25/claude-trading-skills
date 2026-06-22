@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-MARKET-OPEN ROUTINE — 8:30 AM ET, Mon-Fri
+MARKET-OPEN ROUTINE — 9:30 AM ET, Mon-Fri
 ──────────────────────────────────────────
 1. Load pre-market watchlist (or re-screen if missing)
 2. Confirm market is open
@@ -49,7 +49,7 @@ def load_watchlist() -> dict:
 
 def run():
     config.validate()
-    logger.banner(log, "MARKET OPEN — 8:30 AM ET")
+    logger.banner(log, "MARKET OPEN — 9:30 AM ET")
 
     broker = BrokerClient()
 

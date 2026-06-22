@@ -22,6 +22,7 @@ def _get_client() -> anthropic.Anthropic:
 
 
 def _ask(system: str, user: str, max_tokens: int = 1024) -> str:
+    import time as _time
     client = _get_client()
     for model in _MODELS:
         try:
@@ -34,6 +35,10 @@ def _ask(system: str, user: str, max_tokens: int = 1024) -> str:
             return msg.content[0].text
         except anthropic.NotFoundError:
             log.warning("Model %s not available, trying next", model)
+            continue
+        except anthropic.RateLimitError:
+            log.warning("Rate limited on %s — sleeping 10s then trying next model", model)
+            _time.sleep(10)
             continue
         except anthropic.AuthenticationError:
             log.error("Anthropic API key invalid")

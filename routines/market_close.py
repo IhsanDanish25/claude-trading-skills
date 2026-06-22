@@ -25,7 +25,6 @@ log = logger.setup("market_close")
 ET  = pytz.timezone("America/New_York")
 
 CLOSE_EXIT_THRESHOLD = -0.03   # Force exit if P&L < -3%
-MIN_HOLD_TO_KEEP     = -0.01   # Keep if P&L > -1% (let it breathe overnight)
 
 
 def run():

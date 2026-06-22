@@ -144,7 +144,9 @@ class BrokerClient:
                 time_in_force=TimeInForce.DAY,
             )
             order = self.trade.submit_order(req)
-            log.info(f"BUY {symbol} x{qty} @ ~{price:.2f} [simple — no bracket]")
+            log.warning(f"BUY {symbol} x{qty} @ ~{price:.2f} [NO STOP — bracket rejected, simple order used]")
+            stop   = 0.0
+            target = 0.0
 
         return {"order": order, "qty": qty, "price": price, "stop": stop, "target": target}
 

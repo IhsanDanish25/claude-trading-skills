@@ -2,6 +2,7 @@ from __future__ import annotations
 """
 Financial Modeling Prep (FMP) data fetcher.
 """
+import datetime
 import time
 import requests
 import logging
@@ -105,7 +106,6 @@ def get_news(tickers: list[str] = None, limit: int = 20) -> list[dict]:
 
 
 def get_economic_calendar(days_ahead: int = 3) -> list[dict]:
-    import datetime
     today = datetime.date.today()
     end   = today + datetime.timedelta(days=days_ahead)
     try:
