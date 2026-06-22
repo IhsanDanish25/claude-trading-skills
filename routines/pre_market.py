@@ -94,7 +94,7 @@ def run():
             log.info(f"  ★ {s['symbol']:6} score={s['score']:3} | {s['reason']}")
 
         # Save watchlist for market-open routine
-        watchlist_path = "/tmp/pre_market_watchlist.json"
+        watchlist_path = os.path.join(config.STATE_DIR, "pre_market_watchlist.json")
         with open(watchlist_path, "w") as f:
             json.dump({
                 "regime":    regime,

@@ -26,7 +26,7 @@ from core.notifier import send_trade_alert
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
 
-WATCHLIST_PATH = "/tmp/pre_market_watchlist.json"
+WATCHLIST_PATH = os.path.join(config.STATE_DIR, "pre_market_watchlist.json")
 MAX_BUYS       = 3   # max new entries at open
 
 
@@ -105,6 +105,13 @@ def run():
     symbols     = [c["symbol"] for c in buy_list[:10]]
     live_quotes = get_quotes(symbols)
 
+    # Normalize volume for time of day — raw volume at 9:31 AM is ~0.3% of
+    # daily avg, so comparing it directly would reject every candidate.
+    now_et = datetime.datetime.now(ET)
+    market_open_t = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    mins_since_open = max(1, (now_et - market_open_t).total_seconds() / 60)
+    day_fraction = mins_since_open / 390  # 390 trading minutes per day
+
     confirmed = []
     for candidate in buy_list:
         sym = candidate["symbol"]
@@ -115,19 +122,19 @@ def run():
         live_price  = float(q.get("price", 0))
         live_vol    = float(q.get("volume", 0))
         avg_vol     = float(q.get("avgVolume", 1))
-        live_rel_v  = live_vol / avg_vol if avg_vol > 0 else 0
 
-        # At open: rel volume will be low — normalize for time-of-day
-        # 8:30 AM = ~10 min in. Expect ~(10/390) of daily vol ≈ 2.5%
-        # So actual rel vol check loosened
-        passes_vol   = live_rel_v >= 0.3 or live_vol > 100_000
+        # Project current volume to a full-day estimate, then compare to avg
+        estimated_daily_vol = live_vol / day_fraction if day_fraction > 0 else live_vol
+        adj_rel_v = estimated_daily_vol / avg_vol if avg_vol > 0 else 0
+
+        passes_vol   = adj_rel_v >= config.MIN_RELATIVE_VOLUME or live_vol > 10_000
         passes_price = config.MIN_PRICE <= live_price <= config.MAX_PRICE
 
-        log.info(f"  {sym}: ${live_price:.2f} | rel_vol={live_rel_v:.2f} | "
-                 f"vol={passes_vol} price={passes_price}")
+        log.info(f"  {sym}: ${live_price:.2f} | adj_rel_vol={adj_rel_v:.2f} "
+                 f"({mins_since_open:.0f}min in) | vol={passes_vol} price={passes_price}")
 
         if passes_vol and passes_price:
-            confirmed.append({**candidate, "live_price": live_price, "live_rel_vol": live_rel_v})
+            confirmed.append({**candidate, "live_price": live_price, "adj_rel_vol": adj_rel_v})
 
     log.info(f"Confirmed after live filter: {len(confirmed)}")
 
