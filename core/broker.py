@@ -13,6 +13,7 @@ from alpaca.trading.requests import (
     ClosePositionRequest,
     StopLossRequest,
     TakeProfitRequest,
+    ReplaceOrderRequest,
 )
 try:
     from alpaca.trading.requests import GetPortfolioHistoryRequest
@@ -177,6 +178,31 @@ class BrokerClient:
         # FIX: correct alpaca-py signature
         self.trade.close_all_positions(cancel_orders=True)
         log.warning("ALL POSITIONS CLOSED")
+
+    def tighten_stop(self, symbol: str, new_stop: float) -> bool:
+        """Replace the open stop-loss child order for symbol with a tighter stop price."""
+        try:
+            open_orders = self.get_open_orders()
+            stop_orders = [
+                o for o in open_orders
+                if o.symbol == symbol
+                and "stop" in str(o.type).lower()
+                and "sell" in str(o.side).lower()
+            ]
+            if not stop_orders:
+                log.warning("tighten_stop: no open stop order for %s", symbol)
+                return False
+            order = stop_orders[0]
+            old_stop = getattr(order, "stop_price", "?")
+            self.trade.replace_order_by_id(
+                str(order.id),
+                ReplaceOrderRequest(stop_price=new_stop),
+            )
+            log.info("Stop tightened %s: %s → $%.2f", symbol, old_stop, new_stop)
+            return True
+        except Exception as e:
+            log.error("tighten_stop %s failed: %s", symbol, e)
+            return False
 
     def get_portfolio_history(self, period: str = "1W"):
         try:

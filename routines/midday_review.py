@@ -93,9 +93,9 @@ def run():
                     log.error(f"  ✗ Sell {sym} failed: {e}")
 
             elif action == "TIGHTEN_STOP" and new_stop:
-                # Alpaca doesn't support modifying bracket stops via simple API
-                # Best approach: cancel + resubmit — log for manual action
-                log.info(f"  📌 {sym}: Tighten stop to ${new_stop:.2f} [manual or via replace order]")
+                ok = broker.tighten_stop(sym, float(new_stop))
+                if not ok:
+                    log.warning("  %s: tighten_stop failed — no open stop order found", sym)
 
     # ── Cancel stale open orders ──────────────────────────────────────────────
     open_orders = broker.get_open_orders()
