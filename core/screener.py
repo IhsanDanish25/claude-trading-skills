@@ -70,33 +70,37 @@ def screen(symbols: list[str] = None) -> list[dict]:
     symbols = symbols or WATCHLIST
     log.info(f"VCP screen: {len(symbols)} symbols")
 
-    # Batch quote
+    # Batch quote (1 API call for all symbols)
     quotes = get_quotes(symbols)
-    candidates = []
 
+    # Pre-filter with quote data before fetching bars (saves API calls)
+    passed_quote_filter = []
     for sym in symbols:
-        try:
-            q = quotes.get(sym, {})
-            if not q:
-                continue
+        q = quotes.get(sym, {})
+        if not q:
+            continue
+        price   = float(q.get("price", 0))
+        avg_vol = float(q.get("avgVolume", 1))
+        if not (MIN_PRICE <= price <= MAX_PRICE):
+            continue
+        if avg_vol < 500_000:
+            continue
+        passed_quote_filter.append(sym)
 
+    log.info(f"VCP quote filter: {len(passed_quote_filter)}/{len(symbols)} passed — fetching bars")
+
+    candidates = []
+    for sym in passed_quote_filter:
+        try:
+            q = quotes[sym]
             price      = float(q.get("price", 0))
             avg_vol    = float(q.get("avgVolume", 1))
             volume     = float(q.get("volume", 0))
             year_high  = float(q.get("yearHigh", 1))
-            year_low   = float(q.get("yearLow", 0))
-            change_pct = float(q.get("changesPercentage", 0))
-
-            # Basic filters
-            if not (MIN_PRICE <= price <= MAX_PRICE):
-                continue
-            if avg_vol < 500_000:
-                continue
 
             rel_volume = round(volume / avg_vol, 2) if avg_vol > 0 else 0
             pct_from_high = round((price - year_high) / year_high * 100, 2)
 
-            # Get daily bars for pattern analysis
             bars = get_daily_bars(sym, days=60)
             if len(bars) < 20:
                 continue
