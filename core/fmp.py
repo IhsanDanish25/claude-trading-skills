@@ -71,15 +71,18 @@ def get_quote(symbol: str) -> dict:
         return {}
 
 
-def get_quotes(symbols: list[str]) -> dict:
-    """Batch quote — returns {symbol: quote_dict}."""
+def get_quotes(symbols: list[str], _chunk: int = 100) -> dict:
+    """Batch quote — returns {symbol: quote_dict}. Chunks lists > 100 to avoid URL limits."""
+    result: dict = {}
     try:
-        joined = ",".join(symbols)
-        data   = _get(f"/v3/quote/{joined}")
-        return {d["symbol"]: d for d in data} if data else {}
+        for i in range(0, len(symbols), _chunk):
+            chunk = symbols[i : i + _chunk]
+            data  = _get(f"/v3/quote/{','.join(chunk)}")
+            if data:
+                result.update({d["symbol"]: d for d in data})
     except Exception as e:
         log.error(f"Batch quote fail: {e}")
-        return {}
+    return result
 
 
 def get_daily_bars(symbol: str, days: int = 60) -> list[dict]:
@@ -158,3 +161,31 @@ def get_52w_stats(symbol: str) -> dict:
     except Exception as e:
         log.error(f"52w stats {symbol} fail: {e}")
         return {}
+
+
+def get_screener_universe(
+    min_market_cap: int = 2_000_000_000,
+    min_volume: int = 500_000,
+    limit: int = 500,
+) -> list[str]:
+    """
+    Fetch liquid US mid/large-cap tickers from FMP stock screener.
+    Used by the VCP screener when no explicit symbol list is provided.
+    Result is cached for 5 min via _get's TTL cache.
+    """
+    try:
+        data = _get("/v3/stock-screener", {
+            "marketCapMoreThan": min_market_cap,
+            "volumeMoreThan":    min_volume,
+            "exchange":          "NYSE,NASDAQ",
+            "country":           "US",
+            "isActivelyTrading": "true",
+            "limit":             limit,
+        })
+        symbols = [d["symbol"] for d in data if d.get("symbol")]
+        log.info("Screener universe: %d symbols (cap>$%dB, vol>%d)",
+                 len(symbols), min_market_cap // 1_000_000_000, min_volume)
+        return symbols
+    except Exception as e:
+        log.error("Screener universe fail: %s", e)
+        return []

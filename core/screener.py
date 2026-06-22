@@ -5,7 +5,7 @@ Scores stocks for tight-base breakout setups.
 from __future__ import annotations
 import logging
 import statistics
-from core.fmp import get_quotes, get_daily_bars, get_52w_stats
+from core.fmp import get_quotes, get_daily_bars, get_52w_stats, get_screener_universe
 from core.config import WATCHLIST, MIN_PRICE, MAX_PRICE, MIN_RELATIVE_VOLUME
 
 log = logging.getLogger(__name__)
@@ -66,8 +66,12 @@ def screen(symbols: list[str] = None) -> list[dict]:
     """
     Screen symbols for VCP setups.
     Returns list sorted by score (best first).
+    When no symbols provided, pulls a live universe from the FMP screener
+    (500 liquid US stocks, $2B+ cap, 500K+ avg vol). Falls back to the
+    static WATCHLIST if the screener call fails.
     """
-    symbols = symbols or WATCHLIST
+    if symbols is None:
+        symbols = get_screener_universe() or WATCHLIST
     log.info(f"VCP screen: {len(symbols)} symbols")
 
     # Batch quote (1 API call for all symbols)
