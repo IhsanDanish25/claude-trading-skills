@@ -106,6 +106,7 @@ class BrokerClient:
             take_profit_pct: float = TAKE_PROFIT_PCT) -> dict:
         """
         Market buy with bracket (stop + target).
+        Falls back to simple market order if bracket is rejected.
         Pass either dollar_amount OR shares.
         """
         price = self.get_price(symbol)
@@ -121,18 +122,29 @@ class BrokerClient:
         stop   = round(price * (1 - stop_loss_pct), 2)
         target = round(price * (1 + take_profit_pct), 2)
 
-        # FIX: use OrderClass.BRACKET enum not string "bracket"
-        req = MarketOrderRequest(
-            symbol=symbol,
-            qty=qty,
-            side=OrderSide.BUY,
-            time_in_force=TimeInForce.DAY,
-            order_class=OrderClass.BRACKET,
-            stop_loss=StopLossRequest(stop_price=stop),
-            take_profit=TakeProfitRequest(limit_price=target),
-        )
-        order = self.trade.submit_order(req)
-        log.info(f"BUY {symbol} x{qty} @ ~{price:.2f} | SL={stop} TP={target}")
+        try:
+            req = MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+                order_class=OrderClass.BRACKET,
+                stop_loss=StopLossRequest(stop_price=stop),
+                take_profit=TakeProfitRequest(limit_price=target),
+            )
+            order = self.trade.submit_order(req)
+            log.info(f"BUY {symbol} x{qty} @ ~{price:.2f} | SL={stop} TP={target} [bracket]")
+        except Exception as e:
+            log.warning(f"Bracket order rejected for {symbol}: {e} — falling back to simple market order")
+            req = MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+            )
+            order = self.trade.submit_order(req)
+            log.info(f"BUY {symbol} x{qty} @ ~{price:.2f} [simple — no bracket]")
+
         return {"order": order, "qty": qty, "price": price, "stop": stop, "target": target}
 
     def sell(self, symbol: str, qty: int = None) -> dict:

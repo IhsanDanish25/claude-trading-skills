@@ -11,6 +11,8 @@ from core.config import ANTHROPIC_API_KEY
 log = logging.getLogger(__name__)
 _client: anthropic.Anthropic | None = None
 
+_MODELS = ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"]
+
 
 def _get_client() -> anthropic.Anthropic:
     global _client
@@ -20,19 +22,53 @@ def _get_client() -> anthropic.Anthropic:
 
 
 def _ask(system: str, user: str, max_tokens: int = 1024) -> str:
-    msg = _get_client().messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    return msg.content[0].text
+    client = _get_client()
+    for model in _MODELS:
+        try:
+            msg = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+            return msg.content[0].text
+        except anthropic.NotFoundError:
+            log.warning("Model %s not available, trying next", model)
+            continue
+        except anthropic.AuthenticationError:
+            log.error("Anthropic API key invalid")
+            raise
+    raise RuntimeError(f"No available model — tried {_MODELS}")
+
+
+def _data_driven_regime(breadth_data: dict) -> dict:
+    """Deterministic regime fallback from raw market data — no AI needed."""
+    spy = breadth_data.get("spy_change_pct", 0)
+    qqq = breadth_data.get("qqq_change_pct", 0)
+    avg = (spy + qqq) / 2
+
+    if avg > 0.5:
+        regime, bias = "bull", "aggressive"
+    elif avg > -0.3:
+        regime, bias = "neutral", "moderate"
+    elif avg > -1.0:
+        regime, bias = "bear", "defensive"
+    else:
+        regime, bias = "bear", "cash"
+
+    return {
+        "regime": regime,
+        "confidence": 60,
+        "rationale": f"data-driven: SPY {spy:+.2f}% QQQ {qqq:+.2f}%",
+        "trade_bias": bias,
+    }
 
 
 def analyze_market_regime(breadth_data: dict) -> dict:
     """
     Input: {advancing, declining, new_highs, new_lows, spy_trend, qqq_trend}
     Output: {regime: 'bull'|'bear'|'neutral', confidence: 0-100, rationale: str, trade_bias: str}
+    Falls back to deterministic regime if Claude API fails.
     """
     system = (
         "You are a systematic market regime classifier. "
@@ -42,18 +78,24 @@ def analyze_market_regime(breadth_data: dict) -> dict:
     )
 
     user = "Market breadth data: " + json.dumps(breadth_data)
-    raw  = _ask(system, user)
 
     try:
-        return json.loads(raw)
-    except Exception:
-        log.error("Regime parse fail: %s", raw)
-        return {
-            "regime": "neutral",
-            "confidence": 50,
-            "rationale": "parse error",
-            "trade_bias": "defensive",
-        }
+        raw = _ask(system, user)
+        result = json.loads(raw)
+    except Exception as e:
+        log.error("Regime AI call/parse fail: %s — using data-driven fallback", e)
+        return _data_driven_regime(breadth_data)
+
+    # Override: if Claude says "cash" but indices are flat/up, downgrade to defensive
+    if result.get("trade_bias") == "cash":
+        spy = breadth_data.get("spy_change_pct", 0)
+        qqq = breadth_data.get("qqq_change_pct", 0)
+        if (spy + qqq) / 2 > -0.5:
+            log.warning("Claude said 'cash' but indices are flat/up — overriding to 'defensive'")
+            result["trade_bias"] = "defensive"
+            result["rationale"] += " [overridden: indices not bearish enough for cash]"
+
+    return result
 
 
 def score_vcp_candidates(candidates: list[dict]) -> list[dict]:

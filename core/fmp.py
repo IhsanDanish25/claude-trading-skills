@@ -11,6 +11,9 @@ BASE = "https://financialmodelingprep.com/api"
 
 
 def _get(endpoint: str, params: dict = None) -> dict | list:
+    if not FMP_API_KEY:
+        log.error("FMP_API_KEY is empty — skipping API call to %s", endpoint)
+        return []
     params = params or {}
     params["apikey"] = FMP_API_KEY
     url = f"{BASE}{endpoint}"
