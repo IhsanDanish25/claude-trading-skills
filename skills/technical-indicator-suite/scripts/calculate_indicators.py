@@ -161,7 +161,7 @@ def analyze(symbol: str, rsi_oversold: float, rsi_overbought: float) -> dict | N
         "symbol": symbol,
         "price": round(current, 2),
         "rsi_14": rsi,
-        "rsi_signal": "oversold" if rsi and rsi < rsi_oversold else ("overbought" if rsi and rsi > rsi_overbought else "neutral"),
+        "rsi_signal": "oversold" if rsi is not None and rsi < rsi_oversold else ("overbought" if rsi is not None and rsi > rsi_overbought else "neutral"),
         "macd": macd,
         "bollinger_bands": bb,
         "atr_14": atr,
