@@ -14,7 +14,7 @@ from typing import Any
 import requests
 
 
-FMP_BASE = "https://financialmodelingprep.com/stable"
+FMP_BASE = "https://financialmodelingprep.com/api"
 
 BULLISH_WORDS = {
     "surge", "soar", "rally", "beat", "strong", "upgrade", "outperform", "buy",
@@ -52,7 +52,7 @@ def score_headline(text: str) -> float:
 
 def fetch_news_fmp(symbol: str, api_key: str, limit: int = 50) -> list[dict]:
     try:
-        r = requests.get(f"{FMP_BASE}/stock-news", params={
+        r = requests.get(f"{FMP_BASE}/v3/stock_news", params={
             "tickers": symbol,
             "limit": limit,
             "apikey": api_key,
@@ -66,7 +66,7 @@ def fetch_news_fmp(symbol: str, api_key: str, limit: int = 50) -> list[dict]:
 
 def fetch_news_general(api_key: str, limit: int = 100) -> list[dict]:
     try:
-        r = requests.get(f"{FMP_BASE}/stock-news", params={
+        r = requests.get(f"{FMP_BASE}/v3/stock_news", params={
             "limit": limit,
             "apikey": api_key,
         }, timeout=15)
