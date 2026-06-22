@@ -109,6 +109,12 @@ def screen(symbols: list[str] = None) -> list[dict]:
             if len(bars) < 20:
                 continue
 
+            # Recompute avg_vol from bars — stable/quote has no avgVolume field
+            bar_vols = [b["volume"] for b in bars[:20] if b.get("volume")]
+            if bar_vols:
+                avg_vol = sum(bar_vols) / len(bar_vols)
+            rel_volume = round(volume / avg_vol, 2) if avg_vol > 0 else 0
+
             adr               = _adr(bars)
             contraction_weeks = _contraction_weeks(bars)
             tight_closes_n    = _tight_closes(bars)
