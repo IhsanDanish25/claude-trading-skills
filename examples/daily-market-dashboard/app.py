@@ -634,10 +634,11 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
                 unsafe_allow_html=True,
             )
         else:
+            fmp_hint = " Set FMP_API_KEY to enable." if not os.environ.get("FMP_API_KEY") else " Check skill logs for errors."
             st.markdown(
-                """<div class="section-card">
+                f"""<div class="section-card">
                     <h3>FTD Detector</h3>
-                    <p class="status-gray">No FTD data available. Set FMP_API_KEY to enable.</p>
+                    <p class="status-gray">No FTD data available.{fmp_hint}</p>
                 </div>""",
                 unsafe_allow_html=True,
             )
@@ -1202,9 +1203,11 @@ def _render_chart_tab() -> None:
 
 def _resolve_project_root() -> str:
     """Resolve the parent trading-skills repository root."""
-    candidate = PROJECT_ROOT.parent.parent
-    if (candidate / "skills").is_dir():
-        return str(candidate)
+    if os.environ.get("SKILLS_PROJECT_ROOT"):
+        return os.environ["SKILLS_PROJECT_ROOT"]
+    for ancestor in [PROJECT_ROOT.parent.parent, PROJECT_ROOT.parent, PROJECT_ROOT]:
+        if (ancestor / "skills").is_dir():
+            return str(ancestor)
     return str(PROJECT_ROOT)
 
 

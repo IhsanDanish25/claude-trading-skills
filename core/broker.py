@@ -142,7 +142,7 @@ class BrokerClient:
             if not pos:
                 log.warning(f"No position in {symbol}")
                 return {}
-            qty = int(pos.qty)
+            qty = int(float(pos.qty))
 
         req = MarketOrderRequest(
             symbol=symbol,
@@ -172,7 +172,7 @@ class BrokerClient:
                 log.warning("GetPortfolioHistoryRequest not available in this alpaca-py version")
                 return None
             req = GetPortfolioHistoryRequest(period=period, timeframe="1D")
-            return self.trade.get_portfolio_history(filter=req)
+            return self.trade.get_portfolio_history(history_filter=req)
         except Exception as e:
             log.error(f"Portfolio history fail: {e}")
             return None

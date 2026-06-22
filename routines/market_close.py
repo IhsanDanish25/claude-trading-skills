@@ -62,9 +62,9 @@ def run():
             sym      = p.symbol
             entry    = float(p.avg_entry_price)
             current  = float(quotes.get(sym, {}).get("price", entry))
-            qty      = int(p.qty)
+            qty      = int(float(p.qty))
             pnl_pct  = (current - entry) / entry
-            unrealized = float(p.unrealized_pl)
+            unrealized = float(p.unrealized_pl or 0)
 
             log.info(f"  {sym:6} | ${entry:.2f} → ${current:.2f} | "
                      f"{pnl_pct*100:+.2f}% | ${unrealized:+,.0f}")
@@ -145,7 +145,7 @@ def run():
 
     # Remaining positions
     final_positions = broker.get_positions()
-    total_unrealized = sum(float(p.unrealized_pl) for p in final_positions)
+    total_unrealized = sum(float(p.unrealized_pl or 0) for p in final_positions)
 
     log.info(f"  Portfolio value:   ${pv:,.2f}")
     log.info(f"  Cash:              ${cash:,.2f}")

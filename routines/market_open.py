@@ -36,7 +36,7 @@ def load_watchlist() -> dict:
             data = json.load(f)
         age_mins = (datetime.datetime.now(ET) -
                     datetime.datetime.fromisoformat(data["generated"])
-                    .astimezone(ET)).seconds / 60
+                    .astimezone(ET)).total_seconds() / 60
         if age_mins > 180:
             log.warning(f"Watchlist stale ({age_mins:.0f} min old) — rescreening")
             raise FileNotFoundError

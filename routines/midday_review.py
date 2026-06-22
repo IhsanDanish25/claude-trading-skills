@@ -48,9 +48,9 @@ def run():
             sym          = p.symbol
             entry        = float(p.avg_entry_price)
             current      = float(quotes.get(sym, {}).get("price", entry))
-            qty          = int(p.qty)
+            qty          = int(float(p.qty))
             pnl_pct      = round((current - entry) / entry * 100, 2)
-            unrealized   = float(p.unrealized_pl)
+            unrealized   = float(p.unrealized_pl or 0)
             days_held    = 0  # Alpaca doesn't give open date directly
 
             # Compute implied stop from config
@@ -139,7 +139,7 @@ def run():
 
     # ── Summary ───────────────────────────────────────────────────────────────
     positions_after = broker.get_positions()
-    total_unrealized = sum(float(p.unrealized_pl) for p in positions_after)
+    total_unrealized = sum(float(p.unrealized_pl or 0) for p in positions_after)
     log.info(f"── Midday summary")
     log.info(f"  Positions: {len(positions_after)}")
     log.info(f"  Total unrealized P&L: ${total_unrealized:+,.2f}")

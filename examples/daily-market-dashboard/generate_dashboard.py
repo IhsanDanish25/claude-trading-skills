@@ -140,15 +140,20 @@ _COMPACT_WATCHLIST = [
 ]
 
 
+def _fmp_args(flag: str, key: str) -> list[str]:
+    """Only include API key flag when key is non-empty (avoids passing empty string)."""
+    return [flag, key] if key else []
+
+
 def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
     skills_dir = project_root / "skills"
-    fmp_key = os.environ.get("FMP_API_KEY", "")
+    fmp_key = os.environ.get("FMP_API_KEY") or ""
     return [
         # ── Original 7 skills ──────────────────────────────────────────────
         {
             "name": "FTD Detector",
             "script": str(skills_dir / "ftd-detector" / "scripts" / "ftd_detector.py"),
-            "args": ["--output-dir", "{tmpdir}", "--api-key", fmp_key],
+            "args": ["--output-dir", "{tmpdir}", *_fmp_args("--api-key", fmp_key)],
             "glob": "ftd_detector_*.json",
         },
         {
@@ -166,19 +171,19 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
         {
             "name": "Theme Detector",
             "script": str(skills_dir / "theme-detector" / "scripts" / "theme_detector.py"),
-            "args": ["--output-dir", "{tmpdir}", "--fmp-api-key", fmp_key],
+            "args": ["--output-dir", "{tmpdir}", *_fmp_args("--fmp-api-key", fmp_key)],
             "glob": "theme_detector_*.json",
         },
         {
             "name": "Market Top Detector",
             "script": str(skills_dir / "market-top-detector" / "scripts" / "market_top_detector.py"),
-            "args": ["--output-dir", "{tmpdir}", "--api-key", fmp_key],
+            "args": ["--output-dir", "{tmpdir}", *_fmp_args("--api-key", fmp_key)],
             "glob": "market_top_*.json",
         },
         {
             "name": "Economic Calendar",
             "script": str(skills_dir / "economic-calendar-fetcher" / "scripts" / "get_economic_calendar.py"),
-            "args": ["--output", "{tmpdir}/economic_calendar_latest.json", "--api-key", fmp_key],
+            "args": ["--output", "{tmpdir}/economic_calendar_latest.json", *_fmp_args("--api-key", fmp_key)],
             "glob": "economic_calendar_latest.json",
         },
         {
@@ -186,7 +191,7 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
             "script": str(skills_dir / "vcp-screener" / "scripts" / "screen_vcp.py"),
             "args": [
                 "--output-dir", "{tmpdir}",
-                "--api-key", fmp_key,
+                *_fmp_args("--api-key", fmp_key),
                 "--universe", *_VCP_WATCHLIST,
                 "--top", "10",
             ],
@@ -206,7 +211,7 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
         {
             "name": "Earnings Momentum",
             "script": str(skills_dir / "earnings-momentum-tracker" / "scripts" / "track_earnings_momentum.py"),
-            "args": ["--api-key", fmp_key, "--output-dir", "{tmpdir}"],
+            "args": [*_fmp_args("--api-key", fmp_key), "--output-dir", "{tmpdir}"],
             "glob": "earnings_momentum_*.json",
         },
         {
@@ -228,7 +233,7 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
             "name": "News Sentiment",
             "script": str(skills_dir / "news-sentiment-analyzer" / "scripts" / "analyze_sentiment.py"),
             "args": [
-                "--api-key", fmp_key,
+                *_fmp_args("--api-key", fmp_key),
                 "--symbols", "AAPL", "MSFT", "NVDA", "TSLA", "META", "GOOGL", "AMZN",
                 "--days", "3",
                 "--output-dir", "{tmpdir}",
@@ -259,7 +264,7 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
             "name": "Insider Buying",
             "script": str(skills_dir / "insider-buying-detector" / "scripts" / "detect_insider_buying.py"),
             "args": [
-                "--api-key", fmp_key,
+                *_fmp_args("--api-key", fmp_key),
                 "--symbols", *_COMPACT_WATCHLIST,
                 "--days", "30",
                 "--min-grade", "C",
@@ -271,7 +276,7 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
             "name": "Short Squeeze",
             "script": str(skills_dir / "short-squeeze-scanner" / "scripts" / "scan_short_squeeze.py"),
             "args": [
-                "--api-key", fmp_key,
+                *_fmp_args("--api-key", fmp_key),
                 "--symbols", *_COMPACT_WATCHLIST,
                 "--top", "10",
                 "--output-dir", "{tmpdir}",
@@ -945,13 +950,15 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
 
 def cleanup_old_dashboards(retention_days: int = RETENTION_DAYS) -> None:
     cutoff = date.today() - timedelta(days=retention_days)
-    for path in DASHBOARD_DIR.glob("daily_dashboard_*.md"):
-        try:
-            file_date = date.fromisoformat(path.stem.replace("daily_dashboard_", ""))
-            if file_date < cutoff:
-                path.unlink()
-        except ValueError:
-            continue
+    for pattern in ["daily_dashboard_*.md", "daily_dashboard_*.json"]:
+        for path in DASHBOARD_DIR.glob(pattern):
+            try:
+                stem = path.stem.replace("daily_dashboard_", "").split("_")[0]
+                file_date = date.fromisoformat(stem)
+                if file_date < cutoff:
+                    path.unlink()
+            except ValueError:
+                continue
 
 def main() -> None:
     parser = argparse.ArgumentParser()
