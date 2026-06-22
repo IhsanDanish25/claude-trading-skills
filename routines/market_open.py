@@ -52,15 +52,16 @@ def run():
 
     broker = BrokerClient()
 
-    # ── Wait for market open ──────────────────────────────────────────────────
-    for attempt in range(12):   # wait up to 2 min
+    # ── Wait for market open (up to 5 min — routine now fires at 9:30 ET) ───
+    for attempt in range(30):  # wait up to 5 min
         if broker.is_market_open():
             log.info("Market is OPEN ✓")
             break
-        log.info(f"Market not yet open, waiting... ({attempt+1}/12)")
+        if attempt % 6 == 0:
+            log.info(f"Market not yet open, waiting... ({attempt * 10 // 60} min elapsed)")
         time.sleep(10)
     else:
-        log.error("Market still closed after 2 min wait — aborting")
+        log.error("Market still closed after 5 min wait — aborting")
         return
 
     # ── Load watchlist ────────────────────────────────────────────────────────

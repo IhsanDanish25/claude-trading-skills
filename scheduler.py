@@ -26,8 +26,8 @@ ET  = pytz.timezone("America/New_York")
 SCHEDULE = [
     # pre_market:   6:00 AM Mon-Fri (window 6:00-6:09)
     (6,   0,  9, 0, 4, "routines.pre_market"),
-    # market_open:  8:30 AM Mon-Fri (window 8:30-8:39)
-    (8,  30, 39, 0, 4, "routines.market_open"),
+    # market_open:  9:30 AM Mon-Fri (window 9:30-9:39)
+    (9,  30, 39, 0, 4, "routines.market_open"),
     # midday:      12:00 PM Mon-Fri (window 12:00-12:09)
     (12,  0,  9, 0, 4, "routines.midday_review"),
     # market_close: 3:00 PM Mon-Fri (window 15:00-15:09)

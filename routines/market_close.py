@@ -45,15 +45,15 @@ def run():
     positions = broker.get_positions()
     log.info(f"── Positions at close: {len(positions)}")
 
+    breadth = get_market_breadth()
+    regime = analyze_market_regime(breadth)
+    log.info(f"EOD regime: {regime['regime'].upper()} | Bias: {regime['trade_bias']}")
+
     if not positions:
         log.info("No positions to review")
     else:
         symbols = [p.symbol for p in positions]
         quotes  = get_quotes(symbols)
-
-        # Market regime (close-of-day)
-        breadth = get_market_breadth()
-        regime  = analyze_market_regime(breadth)
 
         pos_data = []
         force_close = []

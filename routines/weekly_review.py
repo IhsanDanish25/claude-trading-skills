@@ -16,8 +16,13 @@ import datetime
 import pytz
 import statistics
 
-from alpaca.trading.requests import GetOrdersRequest, GetPortfolioHistoryRequest
+from alpaca.trading.requests import GetOrdersRequest
 from alpaca.trading.enums import QueryOrderStatus
+
+try:
+    from alpaca.trading.requests import GetPortfolioHistoryRequest
+except ImportError:
+    GetPortfolioHistoryRequest = None
 
 from core import logger, config
 from core.broker   import BrokerClient

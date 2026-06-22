@@ -106,7 +106,7 @@ def run():
         for o in open_orders:
             try:
                 submitted = o.submitted_at
-                if submitted and (now - submitted.replace(tzinfo=pytz.utc)).seconds > 1800:
+                if submitted and (now - submitted.replace(tzinfo=pytz.utc)).total_seconds() > 1800:
                     broker.trade.cancel_order_by_id(o.id)
                     log.info(f"  Cancelled stale order: {o.symbol} {o.side}")
             except Exception as e:
