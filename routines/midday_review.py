@@ -28,19 +28,16 @@ def run():
 
     broker = BrokerClient()
 
-    # ── Market regime pulse ───────────────────────────────────────────────────
     breadth = get_market_breadth()
     regime  = analyze_market_regime(breadth)
     log.info(f"Midday regime: {regime['regime'].upper()} | Bias: {regime['trade_bias']}")
 
-    # ── Position review ───────────────────────────────────────────────────────
     positions = broker.get_positions()
     log.info(f"Open positions: {len(positions)}")
 
     if not positions:
         log.info("No positions — skip position review")
     else:
-        # Build position data for Claude
         symbols  = [p.symbol for p in positions]
         quotes   = get_quotes(symbols)
         pos_data = []
@@ -52,14 +49,26 @@ def run():
             qty          = int(float(p.qty))
             pnl_pct      = round((current - entry) / entry * 100, 2)
             unrealized   = float(p.unrealized_pl or 0)
-            days_held    = 0  # Alpaca doesn't give open date directly
+            days_held    = 0
 
-            # Compute implied stop from config
             stop   = round(entry * (1 - config.STOP_LOSS_PCT), 2)
             target = round(entry * (1 + config.TAKE_PROFIT_PCT), 2)
 
             log.info(f"  {sym:6} | entry=${entry:.2f} | now=${current:.2f} | "
                      f"P&L={pnl_pct:+.2f}% (${unrealized:+,.0f})")
+
+            # ── Partial profit (#6): take 50% off at +PARTIAL_PROFIT_PCT ──────
+            if pnl_pct >= config.PARTIAL_PROFIT_PCT * 100 and qty >= 2:
+                trim_qty = max(1, int(qty * config.PARTIAL_PROFIT_SIZE))
+                try:
+                    broker.sell(sym, qty=trim_qty)
+                    log.info(f"  💰 {sym}: partial profit — sold {trim_qty}/{qty} at +{pnl_pct:.1f}%")
+                    new_trail_stop = round(current * (1 - config.TRAIL_STOP_PCT), 2)
+                    broker.tighten_stop(sym, new_trail_stop)
+                    log.info(f"  🔒 {sym}: trailing stop → ${new_trail_stop} on remaining {qty - trim_qty}")
+                    qty -= trim_qty
+                except Exception as e:
+                    log.error(f"  ✗ Partial profit {sym} failed: {e}")
 
             pos_data.append({
                 "symbol":       sym,
@@ -73,7 +82,6 @@ def run():
                 "target":       target,
             })
 
-        # Claude review
         log.info("── Claude: position review")
         decisions = review_open_positions(pos_data, regime["regime"])
 
@@ -97,11 +105,9 @@ def run():
                 if not ok:
                     log.warning("  %s: tighten_stop failed — no open stop order found", sym)
 
-    # ── Cancel stale open orders ──────────────────────────────────────────────
     open_orders = broker.get_open_orders()
     if open_orders:
         log.info(f"Open orders: {len(open_orders)} — cancelling stale")
-        # Only cancel orders older than 30 min
         import datetime
         now = datetime.datetime.now(pytz.utc)
         for o in open_orders:
@@ -113,7 +119,6 @@ def run():
             except Exception as e:
                 log.warning(f"  Cancel order fail: {e}")
 
-    # ── Midday opportunity scan ───────────────────────────────────────────────
     slots = config.MAX_OPEN_POSITIONS - broker.position_count()
 
     if slots > 0 and regime["trade_bias"] not in ["cash", "defensive"]:
@@ -127,7 +132,6 @@ def run():
             log.info(f"  High-confidence midday setups: {len(buys)}")
             for s in buys[:3]:
                 log.info(f"  ⚡ {s['symbol']:6} score={s['score']} | {s['reason']}")
-                # Midday entries: only top-score setups, half size
                 try:
                     pv     = broker.portfolio_value()
                     amount = pv * config.MAX_POSITION_SIZE_PCT * 0.5
@@ -138,7 +142,6 @@ def run():
     else:
         log.info(f"No midday scan (slots={slots}, bias={regime['trade_bias']})")
 
-    # ── Summary ───────────────────────────────────────────────────────────────
     positions_after = broker.get_positions()
     total_unrealized = sum(float(p.unrealized_pl or 0) for p in positions_after)
     log.info(f"── Midday summary")
