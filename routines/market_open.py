@@ -22,6 +22,10 @@ from core.fmp      import get_quotes, get_market_breadth
 from core.analyst  import analyze_market_regime, score_vcp_candidates
 from core.screener import screen
 from core.notifier import send_trade_alert
+from core.edge     import (is_entry_window, apply_edge_filters,
+                           strong_sectors, rs_rating, _return_pct)
+from core.analyst  import detect_ftd
+from core.fmp      import get_daily_bars
 
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
@@ -53,8 +57,7 @@ def run():
 
     broker = BrokerClient()
 
-    # ── Wait for market open (up to 5 min — routine now fires at 9:30 ET) ───
-    for attempt in range(30):  # wait up to 5 min
+    for attempt in range(30):
         if broker.is_market_open():
             log.info("Market is OPEN ✓")
             break
@@ -65,14 +68,19 @@ def run():
         log.error("Market still closed after 5 min wait — aborting")
         return
 
-    # ── Load watchlist ────────────────────────────────────────────────────────
+    # ── Entry timing gate (upgrade #1) ────────────────────────────────────────
+    allowed, why = is_entry_window()
+    if not allowed:
+        log.warning(f"Entry blocked: {why}")
+        return
+    log.info(f"Entry timing: {why}")
+
     watchlist_data = load_watchlist()
 
     if watchlist_data:
         regime   = watchlist_data.get("regime", {})
         buy_list = watchlist_data.get("buy_list", [])
     else:
-        # Fresh screen + regime
         breadth = get_market_breadth()
         regime  = analyze_market_regime(breadth)
         raw     = screen()
@@ -82,11 +90,22 @@ def run():
     trade_bias = regime.get("trade_bias", "moderate")
     log.info(f"Regime: {regime.get('regime','?').upper()} | Bias: {trade_bias}")
 
-    if trade_bias == "cash":
-        log.warning("Cash bias — NO new entries")
+    # ── FTD bottom-catch check (upgrade #2) ───────────────────────────────────
+    ftd_detected = False
+    if trade_bias == "cash" and config.ALLOW_FTD_BOTTOM_BUY:
+        try:
+            spy_bars = get_daily_bars("SPY", days=20)
+            ftd = detect_ftd(spy_bars)
+            ftd_detected = ftd.get("ftd_detected", False)
+            if ftd_detected:
+                log.info(f"FTD DETECTED ({ftd.get('ftd_date')}) — defensive bottom-catch enabled")
+        except Exception as e:
+            log.warning(f"FTD check failed: {e}")
+
+    if trade_bias == "cash" and not ftd_detected:
+        log.warning("Cash bias, no FTD — NO new entries")
         return
 
-    # ── Account check ─────────────────────────────────────────────────────────
     pv        = broker.portfolio_value()
     pos_count = broker.position_count()
     slots     = config.MAX_OPEN_POSITIONS - pos_count
@@ -101,16 +120,13 @@ def run():
         log.info("No BUY candidates — nothing to execute")
         return
 
-    # ── Live quote filter: confirm volume + price ─────────────────────────────
     symbols     = [c["symbol"] for c in buy_list[:10]]
     live_quotes = get_quotes(symbols)
 
-    # Normalize volume for time of day — raw volume at 9:31 AM is ~0.3% of
-    # daily avg, so comparing it directly would reject every candidate.
     now_et = datetime.datetime.now(ET)
     market_open_t = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
     mins_since_open = max(1, (now_et - market_open_t).total_seconds() / 60)
-    day_fraction = mins_since_open / 390  # 390 trading minutes per day
+    day_fraction = mins_since_open / 390
 
     confirmed = []
     for candidate in buy_list:
@@ -123,7 +139,6 @@ def run():
         live_vol    = float(q.get("volume", 0))
         avg_vol     = float(q.get("avgVolume", 1))
 
-        # Project current volume to a full-day estimate, then compare to avg
         estimated_daily_vol = live_vol / day_fraction if day_fraction > 0 else live_vol
         adj_rel_v = estimated_daily_vol / avg_vol if avg_vol > 0 else 0
 
@@ -138,25 +153,43 @@ def run():
 
     log.info(f"Confirmed after live filter: {len(confirmed)}")
 
-    # ── Execute buys ──────────────────────────────────────────────────────────
+    # ── Edge filters: RS (#3) + sector (#4) + volume (#5) + sizing (#2) ───────
+    spy_return = _return_pct("SPY")
+    sector_list = strong_sectors(top_n=4) if config.STRONG_SECTORS_ONLY else []
+    log.info(f"SPY 1mo return: {spy_return}% | Strong sectors: {sector_list}")
+
+    edge_passed = []
+    for c in confirmed:
+        verdict = apply_edge_filters(
+            candidate=c,
+            regime_bias=trade_bias,
+            ftd_detected=ftd_detected,
+            spy_return=spy_return,
+            strong_sector_list=sector_list,
+        )
+        if verdict["pass"]:
+            edge_passed.append({**c, "_edge": verdict})
+            log.info(f"  ✓ {c['symbol']} PASS edge | {', '.join(verdict['reasons'])}")
+        else:
+            log.info(f"  ✗ {c['symbol']} REJECT | {', '.join(verdict['reasons'])}")
+
+    log.info(f"Passed all edge filters: {len(edge_passed)}/{len(confirmed)}")
+
     buys_taken = 0
     max_buys   = min(MAX_BUYS, slots)
+    if trade_bias == "defensive" or ftd_detected:
+        max_buys = min(1, max_buys)
 
-    if trade_bias == "defensive":
-        max_buys = min(1, max_buys)   # defensive: max 1 new entry
-        size_pct = config.MAX_POSITION_SIZE_PCT * 0.5
-    elif trade_bias == "aggressive":
-        size_pct = config.MAX_POSITION_SIZE_PCT * 1.0
-    else:
-        size_pct = config.MAX_POSITION_SIZE_PCT * 0.75
+    for c in edge_passed[:max_buys]:
+        sym      = c["symbol"]
+        score    = c.get("score", 0)
+        reason   = c.get("reason", "")
+        size_pct = c["_edge"]["size_pct"]
+        rs       = c["_edge"]["rs"]
+        amount   = pv * size_pct
 
-    for c in confirmed[:max_buys]:
-        sym    = c["symbol"]
-        score  = c.get("score", 0)
-        reason = c.get("reason", "")
-        amount = pv * size_pct
-
-        log.info(f"  Buying {sym} | score={score} | ${amount:,.0f} | {reason}")
+        log.info(f"  Buying {sym} | score={score} | RS={rs} | "
+                 f"size={size_pct*100:.1f}% | ${amount:,.0f} | {reason}")
 
         try:
             result = broker.buy(sym, dollar_amount=amount)
@@ -169,7 +202,7 @@ def run():
                 price=result["price"],
                 stop=result["stop"],
                 target=result["target"],
-                reason=reason,
+                reason=f"{reason} | RS{rs:+.0f} | {', '.join(c['_edge']['reasons'])}" if rs else reason,
             )
             buys_taken += 1
         except Exception as e:
