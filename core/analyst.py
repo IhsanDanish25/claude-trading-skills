@@ -11,7 +11,7 @@ from core.config import ANTHROPIC_API_KEY
 log = logging.getLogger(__name__)
 _client: anthropic.Anthropic | None = None
 
-_MODELS = ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+_MODELS = ["claude-opus-4-7", "claude-sonnet-4-6"]
 
 
 def _get_client() -> anthropic.Anthropic:
@@ -91,7 +91,6 @@ def analyze_market_regime(breadth_data: dict) -> dict:
         log.error("Regime AI call/parse fail: %s — using data-driven fallback", e)
         return _data_driven_regime(breadth_data)
 
-    # Override: if Claude says "cash" but indices are flat/up, downgrade to defensive
     if result.get("trade_bias") == "cash":
         spy = breadth_data.get("spy_change_pct", 0)
         qqq = breadth_data.get("qqq_change_pct", 0)
