@@ -37,6 +37,10 @@ SCHEDULE = [
 ]
 
 
+STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
+CATCHUP_FILE = os.path.join(STATE_DIR, ".scheduler_ran_today.json")
+
+
 def get_routine(now: datetime.datetime):
     h, m, wd = now.hour, now.minute, now.weekday()
 
@@ -44,6 +48,55 @@ def get_routine(now: datetime.datetime):
         if h == sched_h and m_min <= m <= m_max and wd_min <= wd <= wd_max:
             return module
     return None
+
+
+def get_catchup_routine(now: datetime.datetime):
+    """If we're past a routine's window and it hasn't run today, catch up.
+    Only catches up market_open and midday_review (the buy routines)."""
+    h, m, wd = now.hour, now.minute, now.weekday()
+    if wd > 4:
+        return None
+
+    ran_today = _load_ran_today(now)
+
+    catchup_targets = [
+        (9, 30, 39, "routines.market_open"),
+        (12, 0, 9, "routines.midday_review"),
+    ]
+
+    for (sched_h, m_min, m_max, module) in catchup_targets:
+        past_window = (h > sched_h) or (h == sched_h and m > m_max)
+        if past_window and module not in ran_today:
+            return module
+
+    return None
+
+
+def _load_ran_today(now: datetime.datetime) -> set:
+    try:
+        import json
+        os.makedirs(STATE_DIR, exist_ok=True)
+        if not os.path.exists(CATCHUP_FILE):
+            return set()
+        with open(CATCHUP_FILE) as f:
+            data = json.load(f)
+        if data.get("date") != now.strftime("%Y-%m-%d"):
+            return set()
+        return set(data.get("ran", []))
+    except Exception:
+        return set()
+
+
+def _mark_ran(now: datetime.datetime, module: str):
+    try:
+        import json
+        os.makedirs(STATE_DIR, exist_ok=True)
+        ran = _load_ran_today(now)
+        ran.add(module)
+        with open(CATCHUP_FILE, "w") as f:
+            json.dump({"date": now.strftime("%Y-%m-%d"), "ran": sorted(ran)}, f)
+    except Exception:
+        pass
 
 
 def run_routine(module: str):
@@ -59,6 +112,13 @@ def main():
 
     routine = get_routine(now)
 
+    # Catch-up: if we missed a window (e.g. redeploy), run it now
+    if routine is None:
+        catchup = get_catchup_routine(now)
+        if catchup:
+            log.info(f"CATCH-UP: {catchup} was missed — running now")
+            routine = catchup
+
     if routine is None:
         log.info(f"No routine scheduled for {now.strftime('%H:%M')} — exiting")
         return
@@ -66,6 +126,7 @@ def main():
     log.info(f"Dispatching → {routine}")
     try:
         run_routine(routine)
+        _mark_ran(now, routine)
         log.info(f"Routine complete: {routine}")
     except Exception as e:
         log.error(f"Routine FAILED: {routine} | {e}", exc_info=True)
