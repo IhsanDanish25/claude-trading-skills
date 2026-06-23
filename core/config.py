@@ -1,9 +1,5 @@
 """
 Central config — reads from env vars (Railway secrets).
-
-All API keys use os.environ.get() so the module can be imported safely.
-Call validate() at the start of any routine to get a clear error listing
-every missing key, instead of a raw KeyError on the first one.
 """
 import os
 import sys
@@ -29,7 +25,6 @@ _REQUIRED = {
 
 
 def validate() -> None:
-    """Raise RuntimeError listing every missing required env var."""
     missing = [name for name, val in _REQUIRED.items() if not val]
     if missing:
         msg = (
@@ -40,13 +35,28 @@ def validate() -> None:
         raise RuntimeError(msg)
 
 # ── Trading params ────────────────────────────────────────────────────────────
-MAX_POSITION_SIZE_PCT = float(os.environ.get("MAX_POSITION_PCT", "0.05"))   # 5% per trade
+MAX_POSITION_SIZE_PCT = float(os.environ.get("MAX_POSITION_PCT", "0.05"))
 MAX_OPEN_POSITIONS    = int(os.environ.get("MAX_POSITIONS", "10"))
-STOP_LOSS_PCT         = float(os.environ.get("STOP_LOSS_PCT", "0.02"))      # 2% stop
-TAKE_PROFIT_PCT       = float(os.environ.get("TAKE_PROFIT_PCT", "0.06"))    # 6% target
+STOP_LOSS_PCT         = float(os.environ.get("STOP_LOSS_PCT", "0.02"))
+TAKE_PROFIT_PCT       = float(os.environ.get("TAKE_PROFIT_PCT", "0.06"))
 MIN_RELATIVE_VOLUME   = float(os.environ.get("MIN_REL_VOL", "1.5"))
 MIN_PRICE             = float(os.environ.get("MIN_PRICE", "5.0"))
 MAX_PRICE             = float(os.environ.get("MAX_PRICE", "500.0"))
+
+# ── Edge upgrades ─────────────────────────────────────────────────────────────
+ENTRY_DELAY_MIN       = int(os.environ.get("ENTRY_DELAY_MIN", "20"))
+MIN_RS_RATING         = float(os.environ.get("MIN_RS_RATING", "0.0"))
+BREAKOUT_VOL_MULT     = float(os.environ.get("BREAKOUT_VOL_MULT", "1.5"))
+PARTIAL_PROFIT_PCT    = float(os.environ.get("PARTIAL_PROFIT_PCT", "0.06"))
+PARTIAL_PROFIT_SIZE   = float(os.environ.get("PARTIAL_PROFIT_SIZE", "0.5"))
+TRAIL_STOP_PCT        = float(os.environ.get("TRAIL_STOP_PCT", "0.04"))
+FTD_DEFENSIVE_SIZE    = float(os.environ.get("FTD_DEFENSIVE_SIZE", "0.025"))
+ALLOW_FTD_BOTTOM_BUY  = os.environ.get("ALLOW_FTD_BOTTOM_BUY", "true").lower() == "true"
+STRONG_SECTORS_ONLY   = os.environ.get("STRONG_SECTORS_ONLY", "true").lower() == "true"
+
+# ── State dir ─────────────────────────────────────────────────────────────────
+STATE_DIR = os.environ.get("STATE_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state"))
+os.makedirs(STATE_DIR, exist_ok=True)
 
 # ── Watchlist (VCP universe) ──────────────────────────────────────────────────
 WATCHLIST = [
@@ -57,8 +67,3 @@ WATCHLIST = [
 
 # ── Timezone ──────────────────────────────────────────────────────────────────
 TIMEZONE = "America/New_York"
-
-# ── Persistent state directory (survives across routine ticks) ────────────────
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STATE_DIR = os.path.join(_PROJECT_ROOT, "state")
-os.makedirs(STATE_DIR, exist_ok=True)
