@@ -1,13 +1,21 @@
 """
 Edge module — alpha-boosting filters layered on top of the VCP screen.
 
-Six upgrades:
+Six upgrades (pack 1):
   1. Entry timing      — is_entry_window(): block first N min after open
   2. FTD bottom catch  — defensive sizing on follow-through day
   3. Relative strength — rs_rating(): stock 1-month return vs SPY
   4. Sector rotation   — strong_sectors(): only trade leading sectors
   5. Volume confirm    — breakout_confirmed(): require 1.5x avg volume
   6. Partial profit    — handled in market_close/position review (config-driven)
+
+Pack 2:
+  7.  Gap guard         — gap_ok(): reject stocks gapping > MAX_GAP_PCT vs prior close
+  8.  Earnings blackout — earnings_clear(): block entries within EARNINGS_BLACKOUT_DAYS
+  9.  Sector cap        — sector_concentration_ok(): cap entries per sector
+  10. Pyramiding        — should_pyramid(): add to winners past PYRAMID_TRIGGER_PCT
+  11. Circuit breaker   — circuit_breaker_tripped(): halt buys on a bad day
+  12. Intraday trail    — compute_trail_stop(): ratchet stop up, never down
 """
 from __future__ import annotations
 
@@ -17,7 +25,7 @@ import logging
 import pytz
 
 from core import config
-from core.fmp import get_daily_bars, get_market_breadth
+from core.fmp import get_daily_bars, get_market_breadth, get_next_earnings
 
 log = logging.getLogger(__name__)
 ET = pytz.timezone("America/New_York")
@@ -134,3 +142,76 @@ def apply_edge_filters(
     reasons.append(f"vol {rel_vol}x confirmed")
 
     return {"pass": True, "size_pct": size_pct, "rs": rs, "rel_vol": rel_vol, "reasons": reasons}
+
+
+# ── Edge pack 2 ───────────────────────────────────────────────────────────────
+
+def gap_ok(symbol: str, live_price: float, max_gap_pct: float | None = None) -> tuple[bool, float | None]:
+    """Reject names that have gapped more than MAX_GAP_PCT off the prior close —
+    chasing an extended gap is poor risk/reward. Returns (ok, gap_pct)."""
+    max_gap_pct = config.MAX_GAP_PCT if max_gap_pct is None else max_gap_pct
+    bars = get_daily_bars(symbol, days=5)
+    if not bars or not live_price:
+        return True, None
+    prior_close = bars[0].get("close", 0)
+    if prior_close <= 0:
+        return True, None
+    gap = round((live_price - prior_close) / prior_close * 100, 2)
+    return abs(gap) <= max_gap_pct, gap
+
+
+def earnings_clear(symbol: str, days_buffer: int | None = None) -> tuple[bool, str | None]:
+    """Block new entries when earnings fall within EARNINGS_BLACKOUT_DAYS —
+    avoid holding a fresh breakout into a binary event. Returns (clear, date)."""
+    days_buffer = config.EARNINGS_BLACKOUT_DAYS if days_buffer is None else days_buffer
+    next_date = get_next_earnings(symbol)
+    if not next_date:
+        return True, None
+    try:
+        ed = datetime.datetime.strptime(next_date, "%Y-%m-%d").date()
+    except ValueError:
+        return True, next_date
+    days_out = (ed - datetime.date.today()).days
+    return days_out > days_buffer, next_date
+
+
+def sector_concentration_ok(
+    candidate_sector: str,
+    open_positions: list[dict],
+    max_per_sector: int | None = None,
+) -> tuple[bool, int]:
+    """Cap how many positions share one sector to keep the book diversified.
+    open_positions is a list of dicts each carrying a 'sector' key.
+    Returns (ok, current_count_in_sector)."""
+    max_per_sector = config.MAX_PER_SECTOR if max_per_sector is None else max_per_sector
+    if not candidate_sector:
+        return True, 0
+    count = sum(1 for p in open_positions if p.get("sector") == candidate_sector)
+    return count < max_per_sector, count
+
+
+def should_pyramid(position: dict) -> bool:
+    """Add to a winner once it clears PYRAMID_TRIGGER_PCT, but only once.
+    position carries 'pnl_pct' and a 'pyramided' flag."""
+    if not config.ALLOW_PYRAMIDING:
+        return False
+    if position.get("pyramided"):
+        return False
+    return position.get("pnl_pct", 0) >= config.PYRAMID_TRIGGER_PCT * 100
+
+
+def circuit_breaker_tripped(portfolio_value: float, day_start_value: float) -> bool:
+    """Halt new buys when the day's drawdown breaches CIRCUIT_BREAKER_PCT."""
+    if not day_start_value or day_start_value <= 0:
+        return False
+    day_pnl_pct = (portfolio_value - day_start_value) / day_start_value * 100
+    return day_pnl_pct <= -config.CIRCUIT_BREAKER_PCT * 100
+
+
+def compute_trail_stop(current_price: float, entry_price: float, current_stop: float) -> float:
+    """Ratchet the stop up by TRAIL_STOP_PCT below price once in profit.
+    Never returns a stop lower than the current one."""
+    if current_price <= entry_price:
+        return current_stop
+    candidate = round(current_price * (1 - config.TRAIL_STOP_PCT), 2)
+    return max(current_stop, candidate)

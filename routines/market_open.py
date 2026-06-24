@@ -23,15 +23,35 @@ from core.analyst  import analyze_market_regime, score_vcp_candidates
 from core.screener import screen
 from core.notifier import send_trade_alert
 from core.edge     import (is_entry_window, apply_edge_filters,
-                           strong_sectors, rs_rating, _return_pct)
+                           strong_sectors, rs_rating, _return_pct,
+                           gap_ok, earnings_clear, sector_concentration_ok,
+                           circuit_breaker_tripped)
 from core.analyst  import detect_ftd
 from core.fmp      import get_daily_bars
 
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
 
-WATCHLIST_PATH = os.path.join(config.STATE_DIR, "pre_market_watchlist.json")
-MAX_BUYS       = 3   # max new entries at open
+WATCHLIST_PATH    = os.path.join(config.STATE_DIR, "pre_market_watchlist.json")
+DAY_START_PATH    = os.path.join(config.STATE_DIR, "day_start_value.json")
+MAX_BUYS          = 3   # max new entries at open
+
+
+def load_day_start_value(current_pv: float) -> float:
+    """Return today's starting portfolio value, recording it on first run of the
+    day. Used by the circuit breaker to measure intraday drawdown."""
+    today = datetime.datetime.now(ET).date().isoformat()
+    try:
+        with open(DAY_START_PATH) as f:
+            data = json.load(f)
+        if data.get("date") == today and data.get("value"):
+            return float(data["value"])
+    except (FileNotFoundError, ValueError, KeyError):
+        pass
+    with open(DAY_START_PATH, "w") as f:
+        json.dump({"date": today, "value": current_pv}, f)
+    log.info(f"Recorded day-start portfolio value: ${current_pv:,.2f}")
+    return current_pv
 
 
 def load_watchlist() -> dict:
@@ -112,6 +132,14 @@ def run():
 
     log.info(f"Portfolio: ${pv:,.2f} | Positions: {pos_count} | Slots: {slots}")
 
+    # ── Circuit breaker (#11) ─────────────────────────────────────────────────
+    day_start = load_day_start_value(pv)
+    if circuit_breaker_tripped(pv, day_start):
+        day_pnl = (pv - day_start) / day_start * 100
+        log.warning(f"CIRCUIT BREAKER tripped: day P&L {day_pnl:+.2f}% ≤ "
+                    f"-{config.CIRCUIT_BREAKER_PCT*100:.1f}% — NO new entries")
+        return
+
     if slots <= 0:
         log.info("No slots available — no buys")
         return
@@ -160,6 +188,7 @@ def run():
 
     edge_passed = []
     for c in confirmed:
+        sym     = c["symbol"]
         verdict = apply_edge_filters(
             candidate=c,
             regime_bias=trade_bias,
@@ -167,11 +196,35 @@ def run():
             spy_return=spy_return,
             strong_sector_list=sector_list,
         )
-        if verdict["pass"]:
-            edge_passed.append({**c, "_edge": verdict})
-            log.info(f"  ✓ {c['symbol']} PASS edge | {', '.join(verdict['reasons'])}")
-        else:
-            log.info(f"  ✗ {c['symbol']} REJECT | {', '.join(verdict['reasons'])}")
+        if not verdict["pass"]:
+            log.info(f"  ✗ {sym} REJECT | {', '.join(verdict['reasons'])}")
+            continue
+
+        # ── Gap guard (#7) ────────────────────────────────────────────────────
+        g_ok, gap = gap_ok(sym, c.get("live_price", 0))
+        if not g_ok:
+            log.info(f"  ✗ {sym} REJECT | gap {gap:+.1f}% > {config.MAX_GAP_PCT}% vs prior close")
+            continue
+
+        # ── Earnings blackout (#8) ────────────────────────────────────────────
+        e_ok, edate = earnings_clear(sym)
+        if not e_ok:
+            log.info(f"  ✗ {sym} REJECT | earnings {edate} within {config.EARNINGS_BLACKOUT_DAYS}d blackout")
+            continue
+
+        # ── Sector concentration cap (#9) ─────────────────────────────────────
+        s_ok, scount = sector_concentration_ok(c.get("sector", ""), edge_passed)
+        if not s_ok:
+            log.info(f"  ✗ {sym} REJECT | sector '{c.get('sector','')}' at cap "
+                     f"({scount}/{config.MAX_PER_SECTOR})")
+            continue
+
+        if gap is not None:
+            verdict["reasons"].append(f"gap {gap:+.1f}%")
+        if edate:
+            verdict["reasons"].append(f"earnings {edate} clear")
+        edge_passed.append({**c, "_edge": verdict})
+        log.info(f"  ✓ {sym} PASS edge | {', '.join(verdict['reasons'])}")
 
     log.info(f"Passed all edge filters: {len(edge_passed)}/{len(confirmed)}")
 

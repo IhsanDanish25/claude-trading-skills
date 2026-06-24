@@ -54,6 +54,15 @@ FTD_DEFENSIVE_SIZE    = float(os.environ.get("FTD_DEFENSIVE_SIZE", "0.025"))
 ALLOW_FTD_BOTTOM_BUY  = os.environ.get("ALLOW_FTD_BOTTOM_BUY", "true").lower() == "true"
 STRONG_SECTORS_ONLY   = os.environ.get("STRONG_SECTORS_ONLY", "true").lower() == "true"
 
+# ── Edge pack 2 ───────────────────────────────────────────────────────────────
+MAX_GAP_PCT           = float(os.environ.get("MAX_GAP_PCT", "5.0"))
+EARNINGS_BLACKOUT_DAYS = int(os.environ.get("EARNINGS_BLACKOUT_DAYS", "3"))
+MAX_PER_SECTOR        = int(os.environ.get("MAX_PER_SECTOR", "2"))
+ALLOW_PYRAMIDING      = os.environ.get("ALLOW_PYRAMIDING", "true").lower() == "true"
+PYRAMID_TRIGGER_PCT   = float(os.environ.get("PYRAMID_TRIGGER_PCT", "0.03"))
+CIRCUIT_BREAKER_PCT   = float(os.environ.get("CIRCUIT_BREAKER_PCT", "0.05"))
+TRAIL_INTRADAY        = os.environ.get("TRAIL_INTRADAY", "true").lower() == "true"
+
 # ── State dir ─────────────────────────────────────────────────────────────────
 STATE_DIR = os.environ.get("STATE_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state"))
 os.makedirs(STATE_DIR, exist_ok=True)

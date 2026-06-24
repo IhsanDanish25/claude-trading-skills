@@ -171,6 +171,25 @@ def get_daily_bars(symbol: str, days: int = 60) -> list[dict]:
         return []
 
 
+def get_next_earnings(symbol: str) -> str | None:
+    """Next scheduled earnings date (YYYY-MM-DD) on/after today, or None.
+    Uses the /stable/earnings endpoint, which returns a flat list of past and
+    future earnings rows with a 'date' field, most-recent first."""
+    try:
+        data = _get(f"{_STABLE}/earnings", {"symbol": symbol})
+        if not isinstance(data, list) or not data:
+            return None
+        today = datetime.date.today().isoformat()
+        future = sorted(
+            row["date"] for row in data
+            if isinstance(row, dict) and row.get("date") and row["date"] >= today
+        )
+        return future[0] if future else None
+    except Exception as e:
+        log.error("Earnings %s fail: %s", symbol, e)
+        return None
+
+
 def get_news(tickers: list[str] = None, limit: int = 20) -> list[dict]:
     return _unavailable("stock-news")
 

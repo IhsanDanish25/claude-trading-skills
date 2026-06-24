@@ -11,15 +11,33 @@ MIDDAY REVIEW ROUTINE — 12:00 PM ET, Mon-Fri
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import json
 import pytz
 from core import logger, config
 from core.broker   import BrokerClient
 from core.fmp      import get_quotes, get_market_breadth
 from core.analyst  import review_open_positions, analyze_market_regime, score_vcp_candidates
 from core.screener import screen
+from core.edge     import should_pyramid, compute_trail_stop
 
 log = logger.setup("midday")
 ET  = pytz.timezone("America/New_York")
+
+PYRAMID_STATE_PATH = os.path.join(config.STATE_DIR, "pyramided.json")
+
+
+def _load_pyramided() -> set:
+    """Symbols already pyramided this cycle — prevents stacking adds."""
+    try:
+        with open(PYRAMID_STATE_PATH) as f:
+            return set(json.load(f))
+    except (FileNotFoundError, ValueError):
+        return set()
+
+
+def _save_pyramided(symbols: set) -> None:
+    with open(PYRAMID_STATE_PATH, "w") as f:
+        json.dump(sorted(symbols), f)
 
 
 def run():
@@ -38,9 +56,12 @@ def run():
     if not positions:
         log.info("No positions — skip position review")
     else:
-        symbols  = [p.symbol for p in positions]
-        quotes   = get_quotes(symbols)
-        pos_data = []
+        symbols    = [p.symbol for p in positions]
+        quotes     = get_quotes(symbols)
+        pos_data   = []
+        pyramided  = _load_pyramided()
+        pv         = broker.portfolio_value()
+        trade_bias = regime.get("trade_bias", "moderate")
 
         for p in positions:
             sym          = p.symbol
@@ -70,6 +91,27 @@ def run():
                 except Exception as e:
                     log.error(f"  ✗ Partial profit {sym} failed: {e}")
 
+            # ── Intraday trail (#12): ratchet stop up on winners ─────────────
+            if config.TRAIL_INTRADAY and current > entry:
+                new_stop = compute_trail_stop(current, entry, stop)
+                if new_stop > stop:
+                    if broker.tighten_stop(sym, new_stop):
+                        log.info(f"  🔒 {sym}: intraday trail stop ${stop} → ${new_stop}")
+                        stop = new_stop
+
+            # ── Pyramiding (#10): add to winners once past trigger ───────────
+            if (trade_bias not in ("cash", "defensive")
+                    and should_pyramid({"pnl_pct": pnl_pct, "pyramided": sym in pyramided})):
+                add_amount = pv * config.MAX_POSITION_SIZE_PCT * 0.5
+                try:
+                    result = broker.buy(sym, dollar_amount=add_amount)
+                    pyramided.add(sym)
+                    qty += result["qty"]
+                    log.info(f"  ➕ {sym}: pyramided +{result['qty']} shares "
+                             f"@ ~${result['price']:.2f} (P&L +{pnl_pct:.1f}%)")
+                except Exception as e:
+                    log.error(f"  ✗ Pyramid {sym} failed: {e}")
+
             pos_data.append({
                 "symbol":       sym,
                 "entry_price":  entry,
@@ -81,6 +123,8 @@ def run():
                 "stop":         stop,
                 "target":       target,
             })
+
+        _save_pyramided(pyramided)
 
         log.info("── Claude: position review")
         decisions = review_open_positions(pos_data, regime["regime"])
