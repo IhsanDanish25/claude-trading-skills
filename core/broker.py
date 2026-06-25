@@ -11,7 +11,8 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest,
     LimitOrderRequest,
-    StopOrderRequest,
+    StopLossRequest,
+    TakeProfitRequest,
     GetOrdersRequest,
     ClosePositionRequest,
     ReplaceOrderRequest,
@@ -21,7 +22,7 @@ try:
 except ImportError:
     GetPortfolioHistoryRequest = None
 from alpaca.trading.enums import (
-    OrderSide, TimeInForce, QueryOrderStatus
+    OrderSide, TimeInForce, QueryOrderStatus, OrderClass
 )
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import (
@@ -100,72 +101,73 @@ class BrokerClient:
         return self.data.get_stock_latest_quote(req)
 
     def get_price(self, symbol: str) -> float:
-        """Mid-quote price, robust to one-sided/empty quotes.
+        """Best-effort current price, robust to one-sided / crossed / stale quotes.
 
-        When the market is closed (or pre/post-market) one side of the quote is
-        often 0; ``(ask + bid) / 2`` would then return half the real price,
-        which corrupts position sizing and bracket stop/target levels. Use the
-        midpoint only when both sides are valid, otherwise fall back to the live
-        side, then to the last trade price.
+        Anchors on the last trade price, and uses the quote midpoint only when
+        both sides are valid (bid > 0, ask >= bid) AND the midpoint is within
+        10% of the last trade. This rejects after-hours quotes such as
+        bid=275/ask=0 or bid=275/ask=0.5, where ``(bid + ask) / 2`` would halve
+        the price and corrupt sizing and stop/target levels. Falls back to the
+        last trade otherwise.
         """
+        last = None
+        try:
+            t = self.data.get_stock_latest_trade(
+                StockLatestTradeRequest(symbol_or_symbols=symbol)
+            )[symbol]
+            last = float(t.price)
+        except Exception as e:
+            log.warning("get_price last-trade failed for %s: %s", symbol, e)
         try:
             q = self.get_latest_quotes([symbol])[symbol]
             bid = float(getattr(q, "bid_price", 0) or 0)
             ask = float(getattr(q, "ask_price", 0) or 0)
-            if bid > 0 and ask > 0:
-                return (bid + ask) / 2
-            if ask > 0:
-                return ask
-            if bid > 0:
-                return bid
+            if bid > 0 and ask >= bid:
+                mid = (bid + ask) / 2
+                if last is None or abs(mid - last) <= 0.10 * last:
+                    return mid
         except Exception as e:
-            log.warning("get_price quote failed for %s: %s — falling back to last trade", symbol, e)
-        # Both sides unusable (or quote error) → last trade price
-        t = self.data.get_stock_latest_trade(
-            StockLatestTradeRequest(symbol_or_symbols=symbol)
-        )[symbol]
-        return float(t.price)
+            log.warning("get_price quote failed for %s: %s", symbol, e)
+        if last is not None:
+            return last
+        raise RuntimeError(f"no usable price for {symbol}")
 
     # ── Trade execution ───────────────────────────────────────────────────────
     def attach_stop_target(self, symbol: str, qty: int,
                            stop: float, target: float) -> tuple[bool, bool]:
-        """Attach a protective stop-loss and take-profit as two separate GTC
-        SELL orders. The stop is submitted first so the position is protected
-        even if the take-profit is rejected. Each leg is independently guarded.
-        Returns (stop_attached, target_attached)."""
-        stop_attached = False
-        target_attached = False
-        try:
-            self.trade.submit_order(StopOrderRequest(
-                symbol=symbol, qty=qty, side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC, stop_price=stop,
-            ))
-            stop_attached = True
-            log.info(f"  ↳ stop-loss GTC @ ${stop:.2f} x{qty} [{symbol}]")
-        except Exception as e:
-            log.error(f"  ↳ stop-loss attach FAILED [{symbol}]: {e}")
+        """Attach a protective exit as a single OCO (one-cancels-other) order:
+        a take-profit limit and a stop-loss that share the same shares. When
+        either leg fills, Alpaca cancels the other — so both can coexist on one
+        position (unlike two independent full-qty SELL orders, where the first
+        reserves the shares and the second is rejected).
+
+        OCO is atomic, so both legs attach together or neither does. Returns
+        (stop_attached, target_attached) — both the same bool — to preserve the
+        caller contract."""
         try:
             self.trade.submit_order(LimitOrderRequest(
                 symbol=symbol, qty=qty, side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC, limit_price=target,
+                time_in_force=TimeInForce.GTC, order_class=OrderClass.OCO,
+                take_profit=TakeProfitRequest(limit_price=target),
+                stop_loss=StopLossRequest(stop_price=stop),
             ))
-            target_attached = True
-            log.info(f"  ↳ take-profit GTC @ ${target:.2f} x{qty} [{symbol}]")
+            log.info(f"  ↳ OCO attached: stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]")
+            return True, True
         except Exception as e:
-            log.error(f"  ↳ take-profit attach FAILED [{symbol}]: {e}")
-        return stop_attached, target_attached
+            log.error(f"  ↳ OCO attach FAILED [{symbol}]: {e}")
+            return False, False
 
     def buy(self, symbol: str, dollar_amount: float = None, shares: int = None,
             stop_loss_pct: float = STOP_LOSS_PCT,
             take_profit_pct: float = TAKE_PROFIT_PCT) -> dict:
         """
-        Simple market BUY, then attach protective stop + target as two separate
-        GTC orders priced off the REAL fill price.
+        Simple market BUY, then attach a protective OCO exit (stop + target)
+        priced off the REAL fill price.
 
-        Bracket orders were rejected on price drift (the take-profit limit
-        falling below base_price), which left positions with no stop. This
-        approach instead fills first, reads the actual fill, then attaches
-        protection so the levels are always valid.
+        Bracket-on-entry orders were rejected on price drift (the take-profit
+        limit falling below base_price), which left positions with no stop.
+        This fills first, reads the actual fill, then attaches an OCO exit so
+        the levels are always valid and both stop and target coexist.
 
         Pass either dollar_amount OR shares. Returns qty, price (fill basis),
         stop, target, and stop_attached / target_attached bools.
