@@ -80,8 +80,19 @@ def run():
                 qty    = int(float(p.qty))
                 if qty < 1:
                     continue
-                stop   = round(entry * (1 - config.STOP_LOSS_PCT), 2)
-                target = round(entry * (1 + config.TAKE_PROFIT_PCT), 2)
+                # Anchor the stop on min(entry, current price): if the position
+                # has already fallen past entry*(1-STOP_LOSS_PCT), a sell-stop
+                # can't sit above market, so anchor on the current price instead
+                # (otherwise Alpaca rejects "stop price must be < current price").
+                anchor = entry
+                try:
+                    cur = broker.get_price(p.symbol)
+                    if cur > 0:
+                        anchor = min(entry, cur)
+                except Exception as e:
+                    log.warning(f"  {p.symbol}: price check failed ({e}) — anchoring on entry")
+                stop   = round(anchor * (1 - config.STOP_LOSS_PCT), 2)
+                target = round(entry  * (1 + config.TAKE_PROFIT_PCT), 2)
                 log.info(f"  🛠️  {p.symbol}: naked position — attaching protection "
                          f"(entry=${entry:.2f} stop=${stop} target=${target})")
                 broker.attach_stop_target(p.symbol, qty, stop, target)
