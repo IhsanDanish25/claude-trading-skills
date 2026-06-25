@@ -1,11 +1,12 @@
 from __future__ import annotations
 """
 MARKET-OPEN ROUTINE — 9:30 AM ET, Mon-Fri
-ALPACA-ONLY. No FMP = no rate limits.
+FULL SKILLS, ALPACA-ONLY (no FMP = no rate limits).
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import json
 import datetime
 import pytz
 import time
@@ -14,11 +15,40 @@ from core import logger, config
 from core.broker import BrokerClient
 from core.screener import screen
 from core.notifier import send_trade_alert
+from core.edge import circuit_breaker_tripped
 
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
 
-MAX_BUYS = 3
+DAY_START_PATH = os.path.join(config.STATE_DIR, "day_start_value.json")
+MAX_BUYS       = 3
+
+
+def load_day_start_value(current_pv: float) -> float:
+    today = datetime.datetime.now(ET).date().isoformat()
+    try:
+        with open(DAY_START_PATH) as f:
+            data = json.load(f)
+        if data.get("date") == today and data.get("value"):
+            return float(data["value"])
+    except (FileNotFoundError, ValueError, KeyError):
+        pass
+    with open(DAY_START_PATH, "w") as f:
+        json.dump({"date": today, "value": current_pv}, f)
+    log.info(f"Recorded day-start portfolio value: ${current_pv:,.2f}")
+    return current_pv
+
+
+def is_entry_window():
+    now = datetime.datetime.now(ET)
+    open_t   = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    earliest = open_t + datetime.timedelta(minutes=config.ENTRY_DELAY_MIN)
+    close_t  = now.replace(hour=15, minute=45, second=0, microsecond=0)
+    if now < earliest:
+        return False, f"too early — wait until {earliest.strftime('%H:%M')} ET"
+    if now > close_t:
+        return False, "too late — within 15min of close"
+    return True, "entry window open"
 
 
 def run():
@@ -36,15 +66,34 @@ def run():
         log.error("Market closed — aborting")
         return
 
+    allowed, why = is_entry_window()
+    if not allowed:
+        log.warning(f"Entry blocked: {why}")
+        return
+    log.info(f"Entry timing: {why}")
+
     pv        = broker.portfolio_value()
     pos_count = broker.position_count()
     slots     = min(MAX_BUYS, config.MAX_OPEN_POSITIONS - pos_count)
 
     log.info(f"Portfolio: ${pv:,.2f} | Positions: {pos_count} | Slots: {slots}")
 
+    day_start = load_day_start_value(pv)
+    if circuit_breaker_tripped(pv, day_start):
+        day_pnl = (pv - day_start) / day_start * 100
+        log.warning(f"CIRCUIT BREAKER: day P&L {day_pnl:+.2f}% — NO new entries")
+        return
+
     if slots <= 0:
         log.info("No slots — done")
         return
+
+    held = set()
+    try:
+        held = {p.symbol for p in broker.get_positions()}
+        log.info(f"Currently holding: {sorted(held) or 'none'}")
+    except Exception as e:
+        log.warning(f"Could not fetch holdings (non-blocking): {e}")
 
     log.info("Screening...")
     candidates = screen()
@@ -54,28 +103,57 @@ def run():
         log.info("No candidates — done")
         return
 
-    confirmed = []
+    passed = []
     for c in candidates:
+        sym   = c["symbol"]
         price = c.get("price", 0)
-        if 5.0 <= price <= 500.0:
-            confirmed.append(c)
-            log.info(f"  ✓ {c['symbol']} ${price:.2f} score={c.get('score',0)} relvol={c.get('rel_volume',0)}")
+        rs    = c.get("rs_vs_spy")
+        gap   = c.get("gap_pct", 0)
+        relv  = c.get("rel_volume", 0)
+        score = c.get("score", 0)
 
-    log.info(f"Confirmed: {len(confirmed)}")
+        if sym in held:
+            log.info(f"  ✗ {sym} SKIP — already holding")
+            continue
 
-    if not confirmed:
-        log.info("Nothing passed price band — done")
+        if not (5.0 <= price <= 500.0):
+            log.info(f"  ✗ {sym} SKIP — price ${price:.2f} out of band")
+            continue
+
+        if rs is not None and rs < config.MIN_RS_RATING:
+            log.info(f"  ✗ {sym} REJECT — RS {rs:+.1f}% < SPY+{config.MIN_RS_RATING}")
+            continue
+
+        if abs(gap) > config.MAX_GAP_PCT:
+            log.info(f"  ✗ {sym} REJECT — gap {gap:+.1f}% > {config.MAX_GAP_PCT}%")
+            continue
+
+        if score < 20:
+            log.info(f"  ✗ {sym} REJECT — score {score} below 20 floor")
+            continue
+
+        rs_str  = f"RS{rs:+.1f}%" if rs is not None else "RS n/a"
+        log.info(f"  ✓ {sym} PASS — ${price:.2f} score={score} {rs_str} gap={gap:+.1f}% relvol={relv}")
+        passed.append(c)
+
+    log.info(f"Passed all skills: {len(passed)}/{len(candidates)}")
+
+    if not passed:
+        log.info("Nothing passed skills — done")
         return
 
     buys_taken = 0
-    for c in confirmed[:slots]:
+    for c in passed[:slots]:
         sym    = c["symbol"]
-        amount = pv * config.MAX_POSITION_SIZE_PCT
+        score  = c.get("score", 0)
+        rs     = c.get("rs_vs_spy")
+        size_pct = config.MAX_POSITION_SIZE_PCT
+        amount   = pv * size_pct
 
-        log.info(f"BUYING {sym} ${amount:,.0f}")
+        log.info(f"BUYING {sym} | score={score} | size={size_pct*100:.0f}% | ${amount:,.0f}")
         try:
             result = broker.buy(sym, dollar_amount=amount)
-            log.info(f"✓ {sym} {result['qty']} shares @ ${result['price']:.2f} "
+            log.info(f"✓ {sym} {result['qty']} sh @ ${result['price']:.2f} "
                      f"SL={result['stop']} TP={result['target']}")
             send_trade_alert(
                 action="BUY",
@@ -84,7 +162,7 @@ def run():
                 price=result["price"],
                 stop=result["stop"],
                 target=result["target"],
-                reason=f"VCP score={c.get('score',0)}",
+                reason=f"VCP score={score}" + (f" RS{rs:+.0f}%" if rs is not None else ""),
             )
             buys_taken += 1
         except Exception as e:
