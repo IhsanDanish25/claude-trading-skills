@@ -84,7 +84,11 @@ def send(subject: str, plain: str, html: str | None = None) -> bool:
             json=payload,
             timeout=15,
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            # Surface the exact Resend error body (e.g. 403 free-tier recipient
+            # restriction) instead of a bare HTTPError with no detail.
+            log.error("Resend %s for '%s': %s", resp.status_code, subject, resp.text)
+            return False
         log.info("Email sent: %s", subject)
         return True
     except Exception as exc:
