@@ -209,7 +209,11 @@ class TestAPIMethods:
 
 
 class TestVerifyConnection:
-    def test_raises_when_not_configured(self):
+    def test_raises_when_not_configured(self, monkeypatch):
+        # Clear any creds from the developer's shell/profile so the
+        # "not configured" path is exercised deterministically (no network).
+        monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+        monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
         c = AlpacaClient()
         with pytest.raises(RuntimeError, match="credentials not found"):
             c.verify_connection()

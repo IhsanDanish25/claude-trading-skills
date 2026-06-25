@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trading Bot System Architecture</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0D1117;
+    color: #C9D1D9;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 13px;
+    padding: 32px;
+    min-width: 1300px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 22px;
+    font-weight: 700;
+    color: #F0F6FC;
+    letter-spacing: 2px;
+    margin-bottom: 6px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #6E7681;
+    font-size: 12px;
+    margin-bottom: 36px;
+    letter-spacing: 1px;
+  }
+
+  /* ─── layout ─────────────────────────────────────── */
+  .arch {
+    display: grid;
+    grid-template-columns: 200px 40px 320px 40px 260px 40px 300px;
+    grid-template-rows: auto;
+    gap: 0;
+    align-items: start;
+  }
+
+  /* ─── column headers ────────────────────────────── */
+  .col-header {
+    text-align: center;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 6px 0 14px;
+    color: #6E7681;
+    border-bottom: 1px solid #21262D;
+    margin-bottom: 18px;
+    grid-row: 1;
+  }
+  .arrow-col { grid-row: 1; border-bottom: 1px solid #21262D; margin-bottom: 18px; }
+
+  /* ─── boxes ─────────────────────────────────────── */
+  .box {
+    border-radius: 8px;
+    padding: 10px 13px;
+    margin-bottom: 10px;
+    border: 1px solid;
+    position: relative;
+  }
+  .box-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .box-item {
+    font-size: 11.5px;
+    padding: 2px 0;
+    color: #C9D1D9;
+  }
+  .box-item::before { content: '▸ '; color: #58A6FF; }
+  .box-note {
+    font-size: 10px;
+    color: #6E7681;
+    margin-top: 4px;
+    font-style: italic;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-left: 4px;
+    vertical-align: middle;
+    letter-spacing: 0.5px;
+  }
+
+  /* ─── colour themes ──────────────────────────────── */
+  /* data sources = blue */
+  .blue { background: #0D1F38; border-color: #1F6FEB; }
+  .blue .box-title { color: #58A6FF; }
+  /* skills = purple */
+  .purple { background: #1A0D3A; border-color: #6E40C9; }
+  .purple .box-title { color: #A371F7; }
+  /* railway = green */
+  .green { background: #0D2F1F; border-color: #238636; }
+  .green .box-title { color: #3FB950; }
+  /* outputs = orange */
+  .orange { background: #2D1500; border-color: #D29922; }
+  .orange .box-title { color: #E3B341; }
+  /* red = alerts */
+  .red { background: #2D0F0F; border-color: #F85149; }
+  .red .box-title { color: #FF7B72; }
+  /* teal = alpaca */
+  .teal { background: #0D2D2D; border-color: #2EA44F; }
+  .teal .box-title { color: #56D364; }
+  /* grey = scheduler */
+  .grey { background: #161B22; border-color: #30363D; }
+  .grey .box-title { color: #8B949E; }
+
+  .badge-free  { background: #1F6FEB22; color: #58A6FF; border: 1px solid #1F6FEB; }
+  .badge-paid  { background: #D2992222; color: #E3B341; border: 1px solid #D29922; }
+  .badge-fmp   { background: #6E40C922; color: #A371F7; border: 1px solid #6E40C9; }
+  .badge-yf    { background: #23863622; color: #3FB950; border: 1px solid #238636; }
+  .badge-csv   { background: #30363D44; color: #8B949E; border: 1px solid #30363D; }
+
+  /* ─── arrows ─────────────────────────────────────── */
+  .arrow-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding-top: 18px;
+  }
+  .arrow {
+    color: #30363D;
+    font-size: 22px;
+    line-height: 1;
+    margin: auto;
+    margin-top: 80px;
+  }
+  .arrow.top  { margin-top: 30px; }
+  .arrow.mid  { margin-top: 115px; }
+  .arrow.bot  { margin-top: 115px; }
+
+  /* ─── skill grid ─────────────────────────────────── */
+  .skill-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    margin-top: 4px;
+  }
+  .skill-tag {
+    font-size: 10.5px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .skill-tag .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .dot-fmp { background: #A371F7; }
+  .dot-yf  { background: #3FB950; }
+  .skill-tag.fmp-tag { background: #1A0D3A; border: 1px solid #6E40C944; }
+  .skill-tag.yf-tag  { background: #0D2F1F; border: 1px solid #23863644; }
+
+  /* ─── cron table ─────────────────────────────────── */
+  .cron-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+    border-bottom: 1px solid #21262D33;
+    font-size: 11px;
+  }
+  .cron-time { color: #58A6FF; font-weight: 700; min-width: 48px; }
+  .cron-days { color: #6E7681; font-size: 10px; margin-left: 4px; }
+
+  /* ─── output tabs ────────────────────────────────── */
+  .tab-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+    flex-wrap: wrap;
+  }
+  .tab {
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: #161B22;
+    border: 1px solid #30363D;
+    color: #C9D1D9;
+  }
+
+  /* ─── legend ─────────────────────────────────────── */
+  .legend {
+    display: flex;
+    gap: 24px;
+    justify-content: center;
+    margin-top: 28px;
+    padding-top: 16px;
+    border-top: 1px solid #21262D;
+    flex-wrap: wrap;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11px;
+    color: #8B949E;
+  }
+  .legend-dot {
+    width: 10px; height: 10px;
+    border-radius: 3px;
+  }
+
+  /* ─── env vars strip ─────────────────────────────── */
+  .env-strip {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 28px;
+    justify-content: center;
+  }
+  .env-var {
+    font-size: 10px;
+    padding: 3px 9px;
+    border-radius: 4px;
+    background: #161B22;
+    border: 1px solid #30363D;
+    color: #58A6FF;
+    font-family: monospace;
+  }
+  .env-var span { color: #6E7681; }
+
+  /* ─── section title ──────────────────────────────── */
+  .section-divider {
+    grid-column: 1 / -1;
+    text-align: center;
+    font-size: 10px;
+    color: #6E7681;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 8px 0 16px;
+  }
+
+  hr.dashed {
+    border: none;
+    border-top: 1px dashed #21262D;
+    margin: 24px 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>⚙ TRADING BOT SYSTEM ARCHITECTURE</h1>
+<p class="subtitle">Railway Cloud · 17 Skills · Streamlit Dashboard · Claude AI Chat · Alpaca Brokerage</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<div class="arch">
+
+  <!-- ── Column headers ── -->
+  <div class="col-header" style="grid-column:1">DATA SOURCES</div>
+  <div class="arrow-col"  style="grid-column:2"></div>
+  <div class="col-header" style="grid-column:3">SKILLS (17)</div>
+  <div class="arrow-col"  style="grid-column:4"></div>
+  <div class="col-header" style="grid-column:5">RAILWAY SERVICES</div>
+  <div class="arrow-col"  style="grid-column:6"></div>
+  <div class="col-header" style="grid-column:7">OUTPUTS</div>
+
+  <!-- ══════════════════════════════ COL 1 – DATA SOURCES ══════════════════════ -->
+  <div style="grid-column:1; grid-row:2">
+
+    <div class="box blue">
+      <div class="box-title">FMP API <span class="badge badge-paid">PAID/FREE</span></div>
+      <div class="box-item">Historical OHLCV</div>
+      <div class="box-item">Options Chain</div>
+      <div class="box-item">Earnings Calendar</div>
+      <div class="box-item">Economic Calendar</div>
+      <div class="box-item">Insider Transactions</div>
+      <div class="box-item">Short Interest</div>
+      <div class="box-item">Stock News Feed</div>
+      <div class="box-note">250 calls/day free tier<br>financialmodelingprep.com</div>
+    </div>
+
+    <div class="box blue" style="margin-top:12px">
+      <div class="box-title">yfinance <span class="badge badge-free">FREE</span></div>
+      <div class="box-item">Daily price history</div>
+      <div class="box-item">Options chains</div>
+      <div class="box-item">ETF/index data</div>
+      <div class="box-item">Treasury yields (^TNX)</div>
+      <div class="box-item">VIX, DXY, Gold</div>
+      <div class="box-note">No API key required</div>
+    </div>
+
+    <div class="box blue" style="margin-top:12px">
+      <div class="box-title">TraderMonty CSV <span class="badge badge-free">FREE</span></div>
+      <div class="box-item">200-DMA breadth data</div>
+      <div class="box-item">Uptrend ratio dashboard</div>
+      <div class="box-note">Public CSV download</div>
+    </div>
+
+    <div class="box teal" style="margin-top:12px">
+      <div class="box-title">Alpaca API <span class="badge badge-free">FREE</span></div>
+      <div class="box-item">Live stock quotes</div>
+      <div class="box-item">Portfolio positions</div>
+      <div class="box-item">Order management</div>
+      <div class="box-item">Short inventory lookup</div>
+      <div class="box-note">Paper + Live trading<br>alpaca.markets</div>
+    </div>
+
+  </div>
+
+  <!-- ══════════════════════════════ COL 2 – ARROW ══════════════════════ -->
+  <div style="grid-column:2; grid-row:2; display:flex; flex-direction:column; gap:0; align-items:center; padding-top:70px">
+    <div style="color:#30363D; font-size:20px; margin-bottom:88px">→</div>
+    <div style="color:#30363D; font-size:20px; margin-bottom:74px">→</div>
+    <div style="color:#30363D; font-size:20px; margin-bottom:88px">→</div>
+    <div style="color:#30363D; font-size:20px; margin-top:16px">→</div>
+  </div>
+
+  <!-- ══════════════════════════════ COL 3 – SKILLS ══════════════════════════ -->
+  <div style="grid-column:3; grid-row:2">
+
+    <div class="box purple">
+      <div class="box-title">FMP-Powered Skills <span class="badge badge-fmp">9 skills</span></div>
+      <div class="skill-grid">
+        <div class="skill-tag fmp-tag"><span class="dot dot-fmp"></span>FTD Detector</div>
+        <div class="skill-tag fmp-tag"><span class="dot dot-fmp"></span>Theme Detector</div>
+        <div class="skill-tag fmp-tag"><span class="dot dot-fmp"></span>Market Top Detector</div>
+        <div class="skill-tag fmp-tag"><span class="dot dot-fmp"></span>Economic Calendar</div>
+        <div class="skill-tag fmp-tag"><span class="dot dot-fmp"></span>VCP Screener</div>
+        <div class="skill-tag fmp-tag"><span class="dot dot-fmp"></span>Earnings Momentum</div>
+        <div class="skill-tag fmp-tag"><span class="dot dot-fmp"></span>News Sentiment</div>
+        <div class="skill-tag fmp-tag"><span class="dot dot-fmp"></span>Insider Buying</div>
+        <div class="skill-tag fmp-tag"><span class="dot dot-fmp"></span>Short Squeeze</div>
+      </div>
+    </div>
+
+    <div class="box green" style="margin-top:10px">
+      <div class="box-title">yfinance Skills <span class="badge badge-yf">8 skills</span></div>
+      <div class="skill-grid">
+        <div class="skill-tag yf-tag"><span class="dot dot-yf"></span>Uptrend Analyzer</div>
+        <div class="skill-tag yf-tag"><span class="dot dot-yf"></span>Market Breadth</div>
+        <div class="skill-tag yf-tag"><span class="dot dot-yf"></span>Sector Rotation</div>
+        <div class="skill-tag yf-tag"><span class="dot dot-yf"></span>Technical Indicators</div>
+        <div class="skill-tag yf-tag"><span class="dot dot-yf"></span>Mean Reversion</div>
+        <div class="skill-tag yf-tag"><span class="dot dot-yf"></span>Breakout Scanner</div>
+        <div class="skill-tag yf-tag"><span class="dot dot-yf"></span>Macro Signals</div>
+        <div class="skill-tag yf-tag"><span class="dot dot-yf"></span>Options Flow</div>
+      </div>
+    </div>
+
+    <div class="box grey" style="margin-top:10px">
+      <div class="box-title">Execution Pipeline</div>
+      <div class="skill-grid" style="grid-template-columns:1fr">
+        <div class="box-item" style="font-size:11px">ProcessPoolExecutor (10 workers)</div>
+        <div class="box-item" style="font-size:11px">All 17 skills run in parallel</div>
+        <div class="box-item" style="font-size:11px">300s timeout per skill</div>
+        <div class="box-item" style="font-size:11px">JSON output → tmpdir → parse</div>
+        <div class="box-item" style="font-size:11px">Graceful fallback on API failure</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ══════════════════════════════ COL 4 – ARROW ══════════════════════ -->
+  <div style="grid-column:4; grid-row:2; display:flex; flex-direction:column; gap:0; align-items:center; padding-top:70px">
+    <div style="color:#30363D; font-size:20px; margin-bottom:148px">→</div>
+    <div style="color:#30363D; font-size:20px; margin-bottom:168px">→</div>
+  </div>
+
+  <!-- ══════════════════════════════ COL 5 – RAILWAY ══════════════════════════ -->
+  <div style="grid-column:5; grid-row:2">
+
+    <div class="box green">
+      <div class="box-title">🚂 Railway · WEB Service</div>
+      <div class="box-item" style="color:#58A6FF">streamlit run app.py</div>
+      <div style="margin-top:8px">
+        <div class="box-item"><b>app.py</b> — Streamlit UI</div>
+        <div class="box-item"><b>generate_dashboard.py</b></div>
+        <div class="box-item"><b>agent/client.py</b> — Claude SDK</div>
+        <div class="box-item"><b>agent/knowledge.py</b></div>
+      </div>
+      <hr style="border-color:#21262D; margin:8px 0">
+      <div class="box-note">Triggered by: Regenerate Dashboard button<br>Port: $PORT (Railway-assigned)<br>URL: web-production-8bab1.up.railway.app</div>
+    </div>
+
+    <div class="box grey" style="margin-top:10px">
+      <div class="box-title">🔧 Railway · WORKER Service</div>
+      <div class="box-item" style="color:#58A6FF">python3 worker.py</div>
+      <div style="margin-top:8px">
+        <div class="box-item"><b>worker.py</b> — daemon loop</div>
+        <div class="box-item">Polls scheduler every 600s</div>
+        <div class="box-item">540s timeout per routine</div>
+        <div class="box-item"><b>scheduler.py</b> — time-based dispatch</div>
+      </div>
+      <hr style="border-color:#21262D; margin:8px 0">
+      <div class="box-title" style="margin-bottom:5px">Cron Schedule (ET)</div>
+      <div class="cron-row">
+        <span class="cron-time">06:00</span>
+        <span>Pre-Market Briefing</span>
+        <span class="cron-days">Mon–Fri</span>
+      </div>
+      <div class="cron-row">
+        <span class="cron-time">08:30</span>
+        <span>Market Open Analysis</span>
+        <span class="cron-days">Mon–Fri</span>
+      </div>
+      <div class="cron-row">
+        <span class="cron-time">12:00</span>
+        <span>Midday Review</span>
+        <span class="cron-days">Mon–Fri</span>
+      </div>
+      <div class="cron-row">
+        <span class="cron-time">15:00</span>
+        <span>Market Close Summary</span>
+        <span class="cron-days">Mon–Fri</span>
+      </div>
+      <div class="cron-row" style="border:none">
+        <span class="cron-time">16:00</span>
+        <span>Weekly Review</span>
+        <span class="cron-days">Fri only</span>
+      </div>
+    </div>
+
+    <div class="box teal" style="margin-top:10px">
+      <div class="box-title">🦙 Alpaca MCP</div>
+      <div class="box-item">Portfolio Manager skill</div>
+      <div class="box-item">Live quotes in Chart tab</div>
+      <div class="box-item">Paper + live trading</div>
+      <div class="box-note">ALPACA_API_KEY + ALPACA_SECRET_KEY</div>
+    </div>
+
+  </div>
+
+  <!-- ══════════════════════════════ COL 6 – ARROW ══════════════════════ -->
+  <div style="grid-column:6; grid-row:2; display:flex; flex-direction:column; align-items:center; padding-top:70px; gap:0">
+    <div style="color:#30363D; font-size:20px; margin-bottom:214px">→</div>
+    <div style="color:#30363D; font-size:20px; margin-bottom:148px">→</div>
+    <div style="color:#30363D; font-size:20px; margin-top:14px">→</div>
+  </div>
+
+  <!-- ══════════════════════════════ COL 7 – OUTPUTS ══════════════════════════ -->
+  <div style="grid-column:7; grid-row:2">
+
+    <div class="box orange">
+      <div class="box-title">📊 Streamlit Dashboard</div>
+      <div style="margin-bottom:8px">
+        <div class="box-item">Dashboard Tab</div>
+        <div style="margin-left:16px; font-size:10.5px; color:#8B949E; line-height:1.8">
+          4 KPI tiles (FTD / Uptrend / Breadth / Themes)<br>
+          Skill Status table (17 skills)<br>
+          Macro Signals + 5 metric tiles<br>
+          Sector Rotation ranked table<br>
+          Technical Indicators grid<br>
+          News Sentiment scores<br>
+          Breakout Scanner results<br>
+          Mean Reversion setups<br>
+          Options Flow unusual activity<br>
+          Earnings Momentum (PEAD)<br>
+          Insider Buying signals<br>
+          Short Squeeze setups<br>
+          VCP Candidates table<br>
+          Economic Calendar events<br>
+          FTD Detector state<br>
+          Theme Highlights (top 3)<br>
+          Market Top Detector<br>
+        </div>
+      </div>
+      <div class="box-item">Chart Tab</div>
+      <div style="margin-left:16px; font-size:10.5px; color:#8B949E; line-height:1.8">
+        TradingView iframe (any symbol)<br>
+        Alpaca live bid/ask/volume<br>
+        1D / 1W / 1M / 3M / 1Y timeframes<br>
+      </div>
+      <div class="box-item">Chat Tab</div>
+      <div style="margin-left:16px; font-size:10.5px; color:#8B949E; line-height:1.8">
+        Claude AI market advisor<br>
+        Reads dashboard knowledge/  <br>
+        Streaming responses (SDK)<br>
+      </div>
+    </div>
+
+    <div class="box red" style="margin-top:10px">
+      <div class="box-title">📧 Email Alerts</div>
+      <div class="box-item">Gmail SMTP SSL :465</div>
+      <div class="box-item">From: ihsanqatar2014@gmail.com</div>
+      <div class="box-item">To: ihsanlankan@icloud.com</div>
+      <div class="box-item">5 daily routine summaries</div>
+      <div class="box-note">Silent no-op if GMAIL_PASSWORD unset</div>
+    </div>
+
+    <div class="box grey" style="margin-top:10px">
+      <div class="box-title">📁 Report Files</div>
+      <div class="box-item">reports/ — skill JSON + MD</div>
+      <div class="box-item">knowledge/ — dashboard MD/JSON</div>
+      <div class="box-item">state/theses/ — trader memory</div>
+      <div class="box-item">logs/ — scheduler + improvement</div>
+      <div class="box-note">3-day retention on dashboard files</div>
+    </div>
+
+  </div>
+
+</div>
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+
+<hr class="dashed">
+
+<!-- ENV VARS -->
+<div style="text-align:center; font-size:10px; color:#6E7681; margin-bottom:10px; letter-spacing:1px; text-transform:uppercase">Railway Environment Variables</div>
+<div class="env-strip">
+  <div class="env-var">FMP_API_KEY <span>— Financial Modeling Prep</span></div>
+  <div class="env-var">ANTHROPIC_API_KEY <span>— Claude AI (chat + scheduler)</span></div>
+  <div class="env-var">ALPACA_API_KEY <span>— Brokerage</span></div>
+  <div class="env-var">ALPACA_SECRET_KEY <span>— Brokerage</span></div>
+  <div class="env-var">GMAIL_PASSWORD <span>— App password for email alerts</span></div>
+</div>
+
+<hr class="dashed">
+
+<!-- LEGEND -->
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#1F6FEB"></div>Data Source</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#6E40C9"></div>FMP Skill (9)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#238636"></div>yfinance Skill (8)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#2EA44F"></div>Alpaca / Teal</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#D29922"></div>Dashboard Output</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#F85149"></div>Email Alert</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#30363D"></div>Infrastructure</div>
+</div>
+
+<p style="text-align:center; margin-top:20px; font-size:10px; color:#3D444D">
+  claude-trading-skills · Railway (web + worker) · 17 skills · 5 daily routines · All 17/17 GREEN
+</p>
+
+</body>
+</html>

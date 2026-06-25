@@ -45,6 +45,8 @@ def run():
     positions = broker.get_positions()
     log.info(f"── Positions at close: {len(positions)}")
 
+    force_close = []   # symbols force-closed below -3%; referenced in EOD summary
+
     breadth = get_market_breadth()
     regime = analyze_market_regime(breadth)
     log.info(f"EOD regime: {regime['regime'].upper()} | Bias: {regime['trade_bias']}")
@@ -56,7 +58,6 @@ def run():
         quotes  = get_quotes(symbols)
 
         pos_data = []
-        force_close = []
 
         for p in positions:
             sym      = p.symbol
