@@ -102,17 +102,33 @@ def _tight_closes(bars: list[dict], n: int = 5, threshold: float = 1.5) -> int:
     return tight
 
 
+def _return_pct_from_bars(bars: list[dict], lookback: int = 21) -> float | None:
+    """1-month return % from bars (newest-first)."""
+    if len(bars) < lookback:
+        return None
+    recent = bars[0]["close"]
+    past   = bars[lookback - 1]["close"]
+    if past <= 0:
+        return None
+    return round((recent - past) / past * 100, 2)
+
+
 def screen(symbols: list[str] = None) -> list[dict]:
-    """Screen symbols for VCP setups using Alpaca bars only."""
+    """Screen symbols for VCP setups using Alpaca bars only.
+    Computes RS-vs-SPY and gap% from the same bars — no FMP, no rate limits."""
     if symbols is None:
         symbols = WATCHLIST
     log.info(f"VCP screen [Alpaca]: {len(symbols)} symbols")
 
-    bars_map = _fetch_bars(symbols, days=60)
-    log.info(f"Alpaca returned bars for {len(bars_map)}/{len(symbols)} symbols")
+    fetch_syms = list(dict.fromkeys(symbols + ["SPY"]))
+    bars_map = _fetch_bars(fetch_syms, days=60)
+    spy_return = _return_pct_from_bars(bars_map.get("SPY", []))
+    log.info(f"Alpaca returned bars for {len(bars_map)}/{len(fetch_syms)} symbols | SPY 1mo={spy_return}%")
 
     candidates = []
     for sym, bars in bars_map.items():
+        if sym == "SPY":
+            continue
         try:
             if len(bars) < 20:
                 continue
@@ -138,6 +154,13 @@ def screen(symbols: list[str] = None) -> list[dict]:
             contraction_weeks = _contraction_weeks(bars)
             tight_closes_n    = _tight_closes(bars)
 
+            stock_return = _return_pct_from_bars(bars)
+            rs_vs_spy = round(stock_return - spy_return, 2) if (stock_return is not None and spy_return is not None) else None
+
+            gap_pct = 0.0
+            if len(bars) >= 2 and bars[1]["close"] > 0:
+                gap_pct = round((bars[0]["close"] - bars[1]["close"]) / bars[1]["close"] * 100, 2)
+
             score = 0
             if near_high:                    score += 30
             if contraction_weeks >= 3:       score += 25
@@ -156,6 +179,8 @@ def screen(symbols: list[str] = None) -> list[dict]:
                 "tight_closes":      tight_closes_n,
                 "pct_from_52w_high": pct_from_high,
                 "near_52w_high":     near_high,
+                "rs_vs_spy":         rs_vs_spy,
+                "gap_pct":           gap_pct,
                 "raw_score":         score,
                 "score":             score,
             })
