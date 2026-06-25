@@ -46,6 +46,13 @@ def run():
 
     broker = BrokerClient()
 
+    # Market-open guard: a redeploy can trigger a catch-up run of this routine
+    # outside RTH. Quotes are one-sided when closed (sizing/brackets break), and
+    # we never want to place after-hours orders — so skip entirely if closed.
+    if not broker.is_market_open():
+        log.info("Market is CLOSED — skipping midday review (no after-hours trading)")
+        return
+
     breadth = get_market_breadth()
     regime  = analyze_market_regime(breadth)
     log.info(f"Midday regime: {regime['regime'].upper()} | Bias: {regime['trade_bias']}")

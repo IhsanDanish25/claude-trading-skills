@@ -23,7 +23,9 @@ from alpaca.trading.enums import (
     OrderSide, TimeInForce, QueryOrderStatus, OrderClass
 )
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
+from alpaca.data.requests import (
+    StockBarsRequest, StockLatestQuoteRequest, StockLatestTradeRequest,
+)
 from alpaca.data.timeframe import TimeFrame
 
 from core.config import (
@@ -97,9 +99,31 @@ class BrokerClient:
         return self.data.get_stock_latest_quote(req)
 
     def get_price(self, symbol: str) -> float:
-        quotes = self.get_latest_quotes([symbol])
-        q = quotes[symbol]
-        return float((q.ask_price + q.bid_price) / 2)
+        """Mid-quote price, robust to one-sided/empty quotes.
+
+        When the market is closed (or pre/post-market) one side of the quote is
+        often 0; ``(ask + bid) / 2`` would then return half the real price,
+        which corrupts position sizing and bracket stop/target levels. Use the
+        midpoint only when both sides are valid, otherwise fall back to the live
+        side, then to the last trade price.
+        """
+        try:
+            q = self.get_latest_quotes([symbol])[symbol]
+            bid = float(getattr(q, "bid_price", 0) or 0)
+            ask = float(getattr(q, "ask_price", 0) or 0)
+            if bid > 0 and ask > 0:
+                return (bid + ask) / 2
+            if ask > 0:
+                return ask
+            if bid > 0:
+                return bid
+        except Exception as e:
+            log.warning("get_price quote failed for %s: %s — falling back to last trade", symbol, e)
+        # Both sides unusable (or quote error) → last trade price
+        t = self.data.get_stock_latest_trade(
+            StockLatestTradeRequest(symbol_or_symbols=symbol)
+        )[symbol]
+        return float(t.price)
 
     # ── Trade execution ───────────────────────────────────────────────────────
     def buy(self, symbol: str, dollar_amount: float = None, shares: int = None,
