@@ -45,7 +45,7 @@ Set on each service (Railway → service → Variables):
 | `ALPACA_PAPER_TRADE` | `true` = paper, `false` = live. Controls `core/broker.py`. |
 | `ANTHROPIC_API_KEY` | Claude analyst |
 | `FMP_API_KEY` | Market data |
-| `GMAIL_PASSWORD` | Gmail app password for email alerts |
+| `RESEND_API_KEY` | Resend API key for email alerts |
 | `TZ` | `America/New_York` |
 
 > **Paper vs live:** live/paper is decided by `ALPACA_PAPER_TRADE` (not the

@@ -1,24 +1,23 @@
 """
-Email notifier — trading alerts via Gmail SMTP.
+Email notifier — trading alerts via Resend HTTP API.
 
 Env vars:
-    GMAIL_PASSWORD   Gmail App Password (required)
-    NOTIFY_FROM      sender address (default: ihsanqatar2014@gmail.com)
+    RESEND_API_KEY   Resend API key (required)
+    NOTIFY_FROM      sender address (default: onboarding@resend.dev)
     NOTIFY_TO        recipient address (default: ihsanlankan@icloud.com)
 """
 from __future__ import annotations
 
 import logging
 import os
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+
+import requests
 
 log = logging.getLogger(__name__)
 
-_FROM = os.environ.get("NOTIFY_FROM", "ihsanqatar2014@gmail.com")
-_TO   = os.environ.get("NOTIFY_TO",   "ihsanlankan@icloud.com")
-_PASS = os.environ.get("GMAIL_PASSWORD", "")
+_FROM    = os.environ.get("NOTIFY_FROM", "onboarding@resend.dev")
+_TO      = os.environ.get("NOTIFY_TO",   "ihsanlankan@icloud.com")
+_API_KEY = os.environ.get("RESEND_API_KEY", "")
 
 _CSS = """
 body{margin:0;padding:0;background:#0E1117;font-family:-apple-system,sans-serif;color:#E2E8F0}
@@ -66,21 +65,26 @@ def _row(label: str, value: str, color: str = "") -> str:
 
 
 def send(subject: str, plain: str, html: str | None = None) -> bool:
-    """Send email. Silent no-op if GMAIL_PASSWORD is not set."""
-    if not _PASS:
-        log.debug("GMAIL_PASSWORD not set — email skipped")
+    """Send email via Resend HTTP API. Silent no-op if RESEND_API_KEY is not set."""
+    if not _API_KEY:
+        log.debug("RESEND_API_KEY not set — email skipped")
         return False
     try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"]    = _FROM
-        msg["To"]      = _TO
-        msg.attach(MIMEText(plain, "plain"))
+        payload: dict = {
+            "from": _FROM,
+            "to": _TO,
+            "subject": subject,
+            "text": plain,
+        }
         if html:
-            msg.attach(MIMEText(html, "html"))
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as s:
-            s.login(_FROM, _PASS)
-            s.send_message(msg)
+            payload["html"] = html
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {_API_KEY}"},
+            json=payload,
+            timeout=15,
+        )
+        resp.raise_for_status()
         log.info("Email sent: %s", subject)
         return True
     except Exception as exc:
