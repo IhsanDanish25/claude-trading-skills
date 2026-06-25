@@ -66,9 +66,7 @@ def _quote(symbol: str) -> dict:
     if not data:
         return {}
     q = data[0] if isinstance(data, list) else data
-    # stable uses changePercentage; normalise to changesPercentage for callers
     q.setdefault("changesPercentage", q.get("changePercentage", 0))
-    # stable has no avgVolume — derive from bars if needed; default to volume
     q.setdefault("avgVolume", q.get("volume", 0))
     return q
 
@@ -98,7 +96,7 @@ def _alpaca_change_pct(symbol: str) -> float:
         if _alpaca_data_client is None:
             _alpaca_data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
         now   = datetime.datetime.now(pytz.utc)
-        start = now - datetime.timedelta(days=5)   # buffer covers weekends
+        start = now - datetime.timedelta(days=5)
         bars  = _alpaca_data_client.get_stock_bars(
             StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
                              start=start, end=now, feed=DataFeed.IEX)
@@ -139,9 +137,7 @@ def get_quote(symbol: str) -> dict:
 
 
 def get_quotes(symbols: list[str]) -> dict:
-    """Per-symbol quotes via stable API. Returns {symbol: quote_dict}.
-    Stable does not allow comma-batching on the current plan, so calls
-    are made individually; the TTL cache deduplicates repeated calls."""
+    """Per-symbol quotes via stable API."""
     result: dict = {}
     for sym in symbols:
         try:
@@ -154,11 +150,9 @@ def get_quotes(symbols: list[str]) -> dict:
 
 
 def get_daily_bars(symbol: str, days: int = 60) -> list[dict]:
-    """Daily OHLCV bars, most-recent first. Uses date range — the stable API
-    ignores limit/timeseries params and returns all history otherwise."""
+    """Daily OHLCV bars, most-recent first."""
     try:
         today = datetime.date.today()
-        # Add 50% calendar-day buffer to account for weekends/holidays
         start = today - datetime.timedelta(days=int(days * 1.5))
         data = _get(f"{_STABLE}/historical-price-eod/full", {
             "symbol": symbol,
@@ -172,9 +166,7 @@ def get_daily_bars(symbol: str, days: int = 60) -> list[dict]:
 
 
 def get_next_earnings(symbol: str) -> str | None:
-    """Next scheduled earnings date (YYYY-MM-DD) on/after today, or None.
-    Uses the /stable/earnings endpoint, which returns a flat list of past and
-    future earnings rows with a 'date' field, most-recent first."""
+    """Next scheduled earnings date (YYYY-MM-DD) on/after today, or None."""
     try:
         data = _get(f"{_STABLE}/earnings", {"symbol": symbol})
         if not isinstance(data, list) or not data:
@@ -236,6 +228,21 @@ def get_screener_universe(
     min_volume: int = 500_000,
     limit: int = 500,
 ) -> list[str]:
-    """Stock screener — not available on current FMP plan; returns []
-    so core/screener.py falls back to config.WATCHLIST."""
-    return _unavailable("company-screener")
+    """Live FMP screener — 500 liquid US stocks."""
+    try:
+        data = _get(f"{_STABLE}/company-screener", {
+            "marketCapMoreThan": min_market_cap,
+            "volumeMoreThan":    min_volume,
+            "isActivelyTrading": "true",
+            "isEtf":             "false",
+            "limit":             limit,
+        })
+        if not isinstance(data, list):
+            log.warning("Screener bad response: %s — falling back", type(data))
+            return []
+        symbols = [row["symbol"] for row in data if row.get("symbol")]
+        log.info("Screener returned %d symbols", len(symbols))
+        return symbols
+    except Exception as e:
+        log.warning("Screener failed: %s — returning []", e)
+        return []
