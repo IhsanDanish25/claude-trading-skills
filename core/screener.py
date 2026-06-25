@@ -1,18 +1,67 @@
 """
-VCP (Volatility Contraction Pattern) screener.
-Scores stocks for tight-base breakout setups.
+VCP (Volatility Contraction Pattern) screener — ALPACA-ONLY.
+No FMP calls = no rate limits. Uses Alpaca IEX bars (free).
 """
 from __future__ import annotations
 import logging
 import statistics
-from core.fmp import get_quotes, get_daily_bars, get_52w_stats, get_screener_universe
-from core.config import WATCHLIST, MIN_PRICE, MAX_PRICE, MIN_RELATIVE_VOLUME
+import datetime
+import pytz
+
+from core.config import WATCHLIST, MIN_PRICE, MAX_PRICE
 
 log = logging.getLogger(__name__)
+ET = pytz.timezone("America/New_York")
+
+_data_client = None
+
+
+def _client():
+    global _data_client
+    if _data_client is None:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from core.config import ALPACA_API_KEY, ALPACA_SECRET_KEY
+        _data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+    return _data_client
+
+
+def _fetch_bars(symbols: list[str], days: int = 60) -> dict:
+    """Batch daily bars from Alpaca IEX feed. Returns {symbol: [bars newest-first]}."""
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+    from alpaca.data.enums import DataFeed
+
+    now   = datetime.datetime.now(pytz.utc)
+    start = now - datetime.timedelta(days=int(days * 1.6))
+    out: dict = {}
+    for i in range(0, len(symbols), 100):
+        chunk = symbols[i:i+100]
+        try:
+            resp = _client().get_stock_bars(
+                StockBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Day,
+                                 start=start, end=now, feed=DataFeed.IEX)
+            )
+            for sym in chunk:
+                try:
+                    bars = resp[sym]
+                except (KeyError, Exception):
+                    continue
+                rows = [{
+                    "close":  float(b.close),
+                    "high":   float(b.high),
+                    "low":    float(b.low),
+                    "volume": float(b.volume),
+                } for b in bars]
+                rows.reverse()
+                if rows:
+                    out[sym] = rows
+        except Exception as e:
+            log.warning(f"Alpaca bars chunk failed: {e}")
+            continue
+    return out
 
 
 def _adr(bars: list[dict], n: int = 10) -> float:
-    """Average Daily Range % over last n bars."""
     if len(bars) < n:
         return 0.0
     recent = bars[:n]
@@ -21,11 +70,6 @@ def _adr(bars: list[dict], n: int = 10) -> float:
 
 
 def _contraction_weeks(bars: list[dict], weeks: int = 5) -> int:
-    """
-    Count consecutive weeks of tightening weekly ranges.
-    bars = daily, most-recent first.
-    """
-    # Group into weeks (5-day chunks)
     week_ranges = []
     for i in range(0, min(len(bars), weeks * 5), 5):
         chunk = bars[i:i+5]
@@ -35,11 +79,8 @@ def _contraction_weeks(bars: list[dict], weeks: int = 5) -> int:
         lows  = [b["low"]  for b in chunk]
         if highs and lows:
             week_ranges.append(max(highs) - min(lows))
-
     if len(week_ranges) < 2:
         return 0
-
-    # Count how many consecutive contractions from most recent
     count = 0
     for i in range(len(week_ranges) - 1):
         if week_ranges[i] <= week_ranges[i + 1]:
@@ -50,7 +91,6 @@ def _contraction_weeks(bars: list[dict], weeks: int = 5) -> int:
 
 
 def _tight_closes(bars: list[dict], n: int = 5, threshold: float = 1.5) -> int:
-    """Count bars where close-to-close change < threshold %."""
     if len(bars) < n:
         return 0
     tight = 0
@@ -63,64 +103,41 @@ def _tight_closes(bars: list[dict], n: int = 5, threshold: float = 1.5) -> int:
 
 
 def screen(symbols: list[str] = None) -> list[dict]:
-    """
-    Screen symbols for VCP setups.
-    Returns list sorted by score (best first).
-    When no symbols provided, pulls a live universe from the FMP screener
-    (500 liquid US stocks, $2B+ cap, 500K+ avg vol). Falls back to the
-    static WATCHLIST if the screener call fails.
-    """
+    """Screen symbols for VCP setups using Alpaca bars only."""
     if symbols is None:
-        symbols = get_screener_universe() or WATCHLIST
-    log.info(f"VCP screen: {len(symbols)} symbols")
+        symbols = WATCHLIST
+    log.info(f"VCP screen [Alpaca]: {len(symbols)} symbols")
 
-    # Batch quote (1 API call for all symbols)
-    quotes = get_quotes(symbols)
-
-    # Pre-filter with quote data before fetching bars (saves API calls)
-    passed_quote_filter = []
-    for sym in symbols:
-        q = quotes.get(sym, {})
-        if not q:
-            continue
-        price   = float(q.get("price", 0))
-        avg_vol = float(q.get("avgVolume", 1))
-        if not (MIN_PRICE <= price <= MAX_PRICE):
-            continue
-        if avg_vol < 500_000:
-            continue
-        passed_quote_filter.append(sym)
-
-    log.info(f"VCP quote filter: {len(passed_quote_filter)}/{len(symbols)} passed — fetching bars")
+    bars_map = _fetch_bars(symbols, days=60)
+    log.info(f"Alpaca returned bars for {len(bars_map)}/{len(symbols)} symbols")
 
     candidates = []
-    for sym in passed_quote_filter:
+    for sym, bars in bars_map.items():
         try:
-            q = quotes[sym]
-            price      = float(q.get("price", 0))
-            avg_vol    = float(q.get("avgVolume", 1))
-            volume     = float(q.get("volume", 0))
-            year_high  = float(q.get("yearHigh", 1))
-
-            rel_volume = round(volume / avg_vol, 2) if avg_vol > 0 else 0
-            pct_from_high = round((price - year_high) / year_high * 100, 2)
-
-            bars = get_daily_bars(sym, days=60)
             if len(bars) < 20:
                 continue
 
-            # Recompute avg_vol from bars — stable/quote has no avgVolume field
+            price  = bars[0]["close"]
+            volume = bars[0]["volume"]
+
+            if not (MIN_PRICE <= price <= MAX_PRICE):
+                continue
+
             bar_vols = [b["volume"] for b in bars[:20] if b.get("volume")]
-            if bar_vols:
-                avg_vol = sum(bar_vols) / len(bar_vols)
+            avg_vol  = sum(bar_vols) / len(bar_vols) if bar_vols else 1
+            if avg_vol < 100_000:
+                continue
+
             rel_volume = round(volume / avg_vol, 2) if avg_vol > 0 else 0
+
+            window_high   = max(b["high"] for b in bars)
+            pct_from_high = round((price - window_high) / window_high * 100, 2)
+            near_high     = pct_from_high >= -10
 
             adr               = _adr(bars)
             contraction_weeks = _contraction_weeks(bars)
             tight_closes_n    = _tight_closes(bars)
-            near_high         = pct_from_high >= -10   # within 10% of 52w high
 
-            # Score: weight each factor
             score = 0
             if near_high:                    score += 30
             if contraction_weeks >= 3:       score += 25
@@ -128,25 +145,24 @@ def screen(symbols: list[str] = None) -> list[dict]:
             if tight_closes_n >= 4:          score += 20
             elif tight_closes_n >= 2:        score += 10
             if rel_volume >= 1.5:            score += 15
-            if 0.5 <= adr <= 3.0:            score += 10   # not too volatile
+            if 0.5 <= adr <= 3.0:            score += 10
 
             candidates.append({
-                "symbol":             sym,
-                "price":              price,
-                "rel_volume":         rel_volume,
-                "adr_pct":            adr,
-                "contraction_weeks":  contraction_weeks,
-                "tight_closes":       tight_closes_n,
-                "pct_from_52w_high":  pct_from_high,
-                "near_52w_high":      near_high,
-                "raw_score":          score,
+                "symbol":            sym,
+                "price":             price,
+                "rel_volume":        rel_volume,
+                "adr_pct":           adr,
+                "contraction_weeks": contraction_weeks,
+                "tight_closes":      tight_closes_n,
+                "pct_from_52w_high": pct_from_high,
+                "near_52w_high":     near_high,
+                "raw_score":         score,
+                "score":             score,
             })
-
         except Exception as e:
             log.warning(f"VCP {sym} skip: {e}")
             continue
 
-    # Sort by raw score
     candidates.sort(key=lambda x: x["raw_score"], reverse=True)
     log.info(f"VCP found {len(candidates)} candidates")
     return candidates
