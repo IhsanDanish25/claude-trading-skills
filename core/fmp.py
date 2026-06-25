@@ -7,7 +7,7 @@ current FMP plan. Stable field names differ from v3 in a few places:
   - quote: changePercentage (not changesPercentage), no avgVolume field
   - historical: flat list (not dict with "historical" key)
 Endpoints unavailable on this plan (economic calendar, news, gainers,
-actives, screener) return [] with a one-time warning rather than raising.
+actives) return [] with a one-time warning rather than raising.
 """
 import datetime
 import time
@@ -236,6 +236,22 @@ def get_screener_universe(
     min_volume: int = 500_000,
     limit: int = 500,
 ) -> list[str]:
-    """Stock screener — not available on current FMP plan; returns []
-    so core/screener.py falls back to config.WATCHLIST."""
-    return _unavailable("company-screener")
+    """Liquid US stock universe via /stable/company-screener.
+
+    Returns a list of ticker symbols. Falls back to [] on failure so
+    core/screener.py can use config.WATCHLIST instead.
+    """
+    try:
+        data = _get(f"{_STABLE}/company-screener", {
+            "marketCapMoreThan": min_market_cap,
+            "volumeMoreThan": min_volume,
+            "isActivelyTrading": "true",
+            "isEtf": "false",
+            "limit": limit,
+        })
+        if not isinstance(data, list):
+            return []
+        return [row["symbol"] for row in data if isinstance(row, dict) and row.get("symbol")]
+    except Exception as e:
+        log.warning("company-screener failed: %s", e)
+        return []
