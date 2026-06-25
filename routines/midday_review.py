@@ -60,6 +60,32 @@ def run():
     positions = broker.get_positions()
     log.info(f"Open positions: {len(positions)}")
 
+    # ── Repair: protect any naked position (no attached stop order) ───────────
+    # Catches positions opened when a bracket was rejected (e.g. SHOP/NET/ZS).
+    if positions:
+        try:
+            open_orders = broker.get_open_orders()
+            stopped = {
+                o.symbol for o in open_orders
+                if "stop" in str(o.type).lower() and "sell" in str(o.side).lower()
+            }
+        except Exception as e:
+            log.warning(f"Repair: could not fetch open orders ({e}) — skipping repair")
+            stopped = None
+        if stopped is not None:
+            for p in positions:
+                if p.symbol in stopped:
+                    continue
+                entry  = float(p.avg_entry_price)
+                qty    = int(float(p.qty))
+                if qty < 1:
+                    continue
+                stop   = round(entry * (1 - config.STOP_LOSS_PCT), 2)
+                target = round(entry * (1 + config.TAKE_PROFIT_PCT), 2)
+                log.info(f"  🛠️  {p.symbol}: naked position — attaching protection "
+                         f"(entry=${entry:.2f} stop=${stop} target=${target})")
+                broker.attach_stop_target(p.symbol, qty, stop, target)
+
     if not positions:
         log.info("No positions — skip position review")
     else:

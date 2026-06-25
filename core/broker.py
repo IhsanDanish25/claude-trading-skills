@@ -4,15 +4,16 @@ Alpaca broker client — paper + live unified interface.
 from __future__ import annotations
 import logging
 import datetime
+import time
 import pytz
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest,
+    LimitOrderRequest,
+    StopOrderRequest,
     GetOrdersRequest,
     ClosePositionRequest,
-    StopLossRequest,
-    TakeProfitRequest,
     ReplaceOrderRequest,
 )
 try:
@@ -20,7 +21,7 @@ try:
 except ImportError:
     GetPortfolioHistoryRequest = None
 from alpaca.trading.enums import (
-    OrderSide, TimeInForce, QueryOrderStatus, OrderClass
+    OrderSide, TimeInForce, QueryOrderStatus
 )
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import (
@@ -126,53 +127,100 @@ class BrokerClient:
         return float(t.price)
 
     # ── Trade execution ───────────────────────────────────────────────────────
+    def attach_stop_target(self, symbol: str, qty: int,
+                           stop: float, target: float) -> tuple[bool, bool]:
+        """Attach a protective stop-loss and take-profit as two separate GTC
+        SELL orders. The stop is submitted first so the position is protected
+        even if the take-profit is rejected. Each leg is independently guarded.
+        Returns (stop_attached, target_attached)."""
+        stop_attached = False
+        target_attached = False
+        try:
+            self.trade.submit_order(StopOrderRequest(
+                symbol=symbol, qty=qty, side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC, stop_price=stop,
+            ))
+            stop_attached = True
+            log.info(f"  ↳ stop-loss GTC @ ${stop:.2f} x{qty} [{symbol}]")
+        except Exception as e:
+            log.error(f"  ↳ stop-loss attach FAILED [{symbol}]: {e}")
+        try:
+            self.trade.submit_order(LimitOrderRequest(
+                symbol=symbol, qty=qty, side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC, limit_price=target,
+            ))
+            target_attached = True
+            log.info(f"  ↳ take-profit GTC @ ${target:.2f} x{qty} [{symbol}]")
+        except Exception as e:
+            log.error(f"  ↳ take-profit attach FAILED [{symbol}]: {e}")
+        return stop_attached, target_attached
+
     def buy(self, symbol: str, dollar_amount: float = None, shares: int = None,
             stop_loss_pct: float = STOP_LOSS_PCT,
             take_profit_pct: float = TAKE_PROFIT_PCT) -> dict:
         """
-        Market buy with bracket (stop + target).
-        Falls back to simple market order if bracket is rejected.
-        Pass either dollar_amount OR shares.
+        Simple market BUY, then attach protective stop + target as two separate
+        GTC orders priced off the REAL fill price.
+
+        Bracket orders were rejected on price drift (the take-profit limit
+        falling below base_price), which left positions with no stop. This
+        approach instead fills first, reads the actual fill, then attaches
+        protection so the levels are always valid.
+
+        Pass either dollar_amount OR shares. Returns qty, price (fill basis),
+        stop, target, and stop_attached / target_attached bools.
         """
-        price = self.get_price(symbol)
+        ref_price = self.get_price(symbol)
 
         if dollar_amount:
-            qty = max(1, int(dollar_amount / price))
+            qty = max(1, int(dollar_amount / ref_price))
         elif shares:
             qty = shares
         else:
             pv  = self.portfolio_value()
-            qty = max(1, int((pv * MAX_POSITION_SIZE_PCT) / price))
+            qty = max(1, int((pv * MAX_POSITION_SIZE_PCT) / ref_price))
 
-        stop   = round(price * (1 - stop_loss_pct), 2)
-        target = round(price * (1 + take_profit_pct), 2)
+        # 1. Simple market BUY
+        order = self.trade.submit_order(MarketOrderRequest(
+            symbol=symbol, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
+        ))
+        log.info(f"BUY {symbol} x{qty} (market) submitted [{str(order.id)[:8]}]")
 
-        try:
-            req = MarketOrderRequest(
-                symbol=symbol,
-                qty=qty,
-                side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
-                order_class=OrderClass.BRACKET,
-                stop_loss=StopLossRequest(stop_price=stop),
-                take_profit=TakeProfitRequest(limit_price=target),
-            )
-            order = self.trade.submit_order(req)
-            log.info(f"BUY {symbol} x{qty} @ ~{price:.2f} | SL={stop} TP={target} [bracket]")
-        except Exception as e:
-            log.warning(f"Bracket order rejected for {symbol}: {e} — falling back to simple market order")
-            req = MarketOrderRequest(
-                symbol=symbol,
-                qty=qty,
-                side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
-            )
-            order = self.trade.submit_order(req)
-            log.warning(f"BUY {symbol} x{qty} @ ~{price:.2f} [NO STOP — bracket rejected, simple order used]")
-            stop   = 0.0
-            target = 0.0
+        # 2. Poll for the actual fill price (up to ~5s)
+        fill_price = None
+        filled_qty = qty
+        for _ in range(10):
+            try:
+                o = self.trade.get_order_by_id(order.id)
+            except Exception as e:
+                log.warning(f"poll order {symbol} failed: {e}")
+                break
+            if o.filled_avg_price:
+                fill_price = float(o.filled_avg_price)
+                if o.filled_qty:
+                    filled_qty = int(float(o.filled_qty))
+                break
+            time.sleep(0.5)
 
-        return {"order": order, "qty": qty, "price": price, "stop": stop, "target": target}
+        # 3. Compute stop/target from the REAL fill price (fallback to reference)
+        basis = fill_price if fill_price else ref_price
+        if fill_price is None:
+            log.warning(f"{symbol} not filled within 5s — using reference ${ref_price:.2f} for stop/target")
+        stop   = round(basis * (1 - stop_loss_pct), 2)
+        target = round(basis * (1 + take_profit_pct), 2)
+
+        # 4. Attach protective stop-loss + take-profit (each its own try/except)
+        stop_attached, target_attached = self.attach_stop_target(
+            symbol, filled_qty, stop, target
+        )
+        log.info(f"BUY {symbol} x{filled_qty} @ ${basis:.2f} | SL={stop} TP={target} "
+                 f"| stop_attached={stop_attached} target_attached={target_attached}")
+
+        return {
+            "order": order, "qty": filled_qty, "price": basis,
+            "stop": stop, "target": target,
+            "stop_attached": stop_attached, "target_attached": target_attached,
+        }
 
     def sell(self, symbol: str, qty: int = None) -> dict:
         """Market sell. qty=None → close entire position."""
