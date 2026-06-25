@@ -1,43 +1,53 @@
-# Railway Cron Services Setup
+# Railway Deployment
 
-Project: **strong-charisma**
+Project: **trading ai master**
+
+The bot runs as **two services**, both deployed from this repo. Start commands
+come from the root [`Procfile`](../Procfile); there are no per-service TOML
+config files.
 
 ## Services
 
-| Service Name | Routine | Cron (UTC) | Schedule |
+| Service | Procfile entry | Command | Role |
 |---|---|---|---|
-| `pre-market` | `pre_market` | `0 6 * * 1-5` | 06:00 Mon-Fri |
-| `market-open` | `market_open` | `30 8 * * 1-5` | 08:30 Mon-Fri |
-| `midday-review` | `midday_review` | `0 12 * * 1-5` | 12:00 Mon-Fri |
-| `market-close` | `market_close` | `0 15 * * 1-5` | 15:00 Mon-Fri |
-| `weekly-review` | `weekly_review` | `0 16 * * 5` | 16:00 Friday |
+| `web` | `web:` | `streamlit run examples/daily-market-dashboard/app.py` | Dashboard UI |
+| `worker` | `worker:` | `python3 worker.py` | Trading daemon |
 
-## Create Each Service
+## How the worker runs the routines
 
-In Railway dashboard (strong-charisma project):
-
-1. **New Service** → **GitHub Repo** → select `claude-trading-skills`
-2. **Settings → Deploy**:
-   - Start Command: `python3 routines/run.py`
-   - Cron Schedule: copy from table above
-3. **Variables** → add:
-   - `ROUTINE` = routine name from table (e.g. `pre_market`)
-   - All other env vars are shared from the project (Alpaca, Anthropic, Telegram)
-4. **Deploy**
-
-Repeat for all 5 services. The `ROUTINE` env var is the only thing that differs.
-
-## How It Works
+The `worker` service is a long-lived daemon — it does **not** use Railway cron.
 
 ```
-Railway cron fires
-  → python3 routines/run.py
-    → reads ROUTINE env var
-    → runs Alpaca auto-connect chain (if routine needs Alpaca)
-    → dispatches to routines/<ROUTINE>.py → run()
+worker.py  (startup health check: Alpaca + FMP connectivity)
+  → loops forever, fires scheduler.py every 600s (10 min)
+    → scheduler.py reads the current time in America/New_York (pytz)
+      → dispatches the matching routine by ET window:
+          06:00  pre_market
+          09:30  market_open
+          12:00  midday_review
+          15:00  market_close
+          16:00  weekly_review   (Friday only)
+      → catch-up: re-runs a missed market_open / midday_review after redeploys
 ```
 
-## Config Files
+Scheduling is ET-correct regardless of host timezone because `scheduler.py`
+uses `pytz.timezone("America/New_York")` explicitly. `TZ=America/New_York` is
+also set on both services for consistency.
 
-Per-service TOML configs in `railway/services/` can be copy-pasted into
-each Railway service's settings if you prefer config-as-code over the dashboard.
+## Environment variables
+
+Set on each service (Railway → service → Variables):
+
+| Var | Notes |
+|---|---|
+| `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` | Brokerage creds |
+| `ALPACA_BASE_URL` | `https://paper-api.alpaca.markets` (paper) |
+| `ALPACA_PAPER_TRADE` | `true` = paper, `false` = live. Controls `core/broker.py`. |
+| `ANTHROPIC_API_KEY` | Claude analyst |
+| `FMP_API_KEY` | Market data |
+| `GMAIL_PASSWORD` | Gmail app password for email alerts |
+| `TZ` | `America/New_York` |
+
+> **Paper vs live:** live/paper is decided by `ALPACA_PAPER_TRADE` (not the
+> base URL). Keep the keys, base URL, and this flag consistent — a paper key
+> (`PK…`) with `ALPACA_PAPER_TRADE=false` will 401 against the live endpoint.

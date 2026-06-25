@@ -1,2 +1,0 @@
-[deploy]
-startCommand = "python run_trading.py"

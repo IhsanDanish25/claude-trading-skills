@@ -1,3 +1,0 @@
-[deploy]
-startCommand = "python3 routines/run.py"
-cronSchedule = "0 6 * * 1-5"
