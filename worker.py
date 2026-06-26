@@ -90,7 +90,7 @@ def startup_health_check() -> None:
     if models:
         log.info("  ANTHROPIC_MODELS: %s", models)
     else:
-        log.warning("  ANTHROPIC_MODELS: NOT SET (will use default: claude-sonnet-4-5)")
+        log.warning("  ANTHROPIC_MODELS: NOT SET (will use default: claude-opus-4-7)")
 
     missing = [k for k, v in required.items() if not v]
     if missing:
