@@ -86,6 +86,12 @@ def startup_health_check() -> None:
         else:
             log.error("  %s: MISSING", name)
 
+    models = os.environ.get("ANTHROPIC_MODELS", "")
+    if models:
+        log.info("  ANTHROPIC_MODELS: %s", models)
+    else:
+        log.warning("  ANTHROPIC_MODELS: NOT SET (will use default: claude-sonnet-4-5)")
+
     missing = [k for k, v in required.items() if not v]
     if missing:
         log.error("HEALTH CHECK FAILED: missing env vars: %s", ", ".join(missing))
