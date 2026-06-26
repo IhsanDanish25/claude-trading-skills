@@ -256,25 +256,35 @@ class BrokerClient:
         log.warning("ALL POSITIONS CLOSED")
 
     def tighten_stop(self, symbol: str, new_stop: float) -> bool:
-        """Replace the open stop-loss child order for symbol with a tighter stop price."""
+        """Replace the open stop-loss for symbol with a tighter stop price.
+
+        Handles two cases:
+          1. Standalone stop order (type=stop, side=sell) — replace directly.
+          2. OCO parent order (order_class=oco) — replace by id, which updates
+             both legs (take_profit limit + stop_loss stop) in one call.
+        Returns True only if the order was actually replaced on Alpaca."""
         try:
             open_orders = self.get_open_orders()
-            stop_orders = [
+            candidates = [
                 o for o in open_orders
                 if o.symbol == symbol
-                and "stop" in str(o.type).lower()
-                and "sell" in str(o.side).lower()
+                and "sell" in str(getattr(o, "side", "")).lower()
+                and (
+                    "oco" in str(getattr(o, "order_class", "")).lower()
+                    or "stop" in str(getattr(o, "type", "")).lower()
+                )
             ]
-            if not stop_orders:
-                log.warning("tighten_stop: no open stop order for %s", symbol)
+            if not candidates:
+                log.warning("tighten_stop: no open stop/OCO order for %s", symbol)
                 return False
-            order = stop_orders[0]
-            old_stop = getattr(order, "stop_price", "?")
+            order = candidates[0]
+            old_stop = getattr(order, "stop_price", None)
+            old_label = f"${old_stop:.2f}" if isinstance(old_stop, (int, float)) else str(old_stop or "?")
             self.trade.replace_order_by_id(
                 str(order.id),
                 ReplaceOrderRequest(stop_price=new_stop),
             )
-            log.info("Stop tightened %s: %s → $%.2f", symbol, old_stop, new_stop)
+            log.info("Stop tightened %s: %s → $%.2f", symbol, old_label, new_stop)
             return True
         except Exception as e:
             log.error("tighten_stop %s failed: %s", symbol, e)

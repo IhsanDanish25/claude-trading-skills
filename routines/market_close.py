@@ -25,6 +25,30 @@ log = logger.setup("market_close")
 ET  = pytz.timezone("America/New_York")
 
 CLOSE_EXIT_THRESHOLD = -0.03   # Force exit if P&L < -3%
+MAX_CASH_CLOSES_PER_DAY = 3    # Cap how many positions a cash-regime call can liquidate
+DAILY_CLOSE_LOG = os.path.join(config.STATE_DIR, "daily_close_log.json")
+
+
+def _today_close_count() -> int:
+    today = datetime.date.today().isoformat()
+    try:
+        with open(DAILY_CLOSE_LOG) as f:
+            data = json.load(f)
+        if data.get("date") == today:
+            return int(data.get("count", 0))
+    except (FileNotFoundError, ValueError, KeyError):
+        pass
+    return 0
+
+
+def _bump_close_count(n: int = 1) -> None:
+    today = datetime.date.today().isoformat()
+    cur = _today_close_count()
+    try:
+        with open(DAILY_CLOSE_LOG, "w") as f:
+            json.dump({"date": today, "count": cur + n}, f)
+    except Exception as e:
+        log.warning(f"Could not persist close count: {e}")
 
 
 def run():
@@ -92,6 +116,7 @@ def run():
             try:
                 broker.close_position(sym)
                 log.info(f"  ✓ Force-closed {sym}")
+                _bump_close_count()
                 q = quotes.get(sym, {})
                 price = float(q.get("price", 0))
                 send_trade_alert("SELL", sym, 0, price, 0, 0, reason="Force-closed: -3% threshold")
@@ -100,13 +125,35 @@ def run():
 
         # Claude review on remaining
         if pos_data and regime["trade_bias"] == "cash":
-            log.warning("Cash regime — closing ALL remaining positions")
-            for pd in pos_data:
-                try:
-                    broker.close_position(pd["symbol"])
-                    log.info(f"  ✓ Cash-regime close: {pd['symbol']}")
-                except Exception as e:
-                    log.error(f"  ✗ {e}")
+            already_today = _today_close_count()
+            remaining_budget = max(0, MAX_CASH_CLOSES_PER_DAY - already_today)
+            if remaining_budget == 0:
+                log.warning(
+                    f"Cash regime — but daily close cap "
+                    f"({MAX_CASH_CLOSES_PER_DAY}) already reached. "
+                    f"Skipping remaining {len(pos_data)} closes to preserve capital."
+                )
+            else:
+                log.warning(
+                    f"Cash regime — closing up to {remaining_budget} positions "
+                    f"(daily cap {MAX_CASH_CLOSES_PER_DAY}, used {already_today})"
+                )
+                closed_this_run = 0
+                for pd in pos_data:
+                    if closed_this_run >= remaining_budget:
+                        log.warning(
+                            f"  Hit daily cap — leaving {len(pos_data) - closed_this_run} "
+                            f"positions for tomorrow's market_open to evaluate"
+                        )
+                        break
+                    sym = pd["symbol"]
+                    try:
+                        broker.close_position(sym)
+                        log.info(f"  ✓ Cash-regime close: {sym}")
+                        _bump_close_count()
+                        closed_this_run += 1
+                    except Exception as e:
+                        log.error(f"  ✗ {sym} close failed: {e}")
 
         elif pos_data:
             log.info(f"── Claude: EOD position review ({len(pos_data)} positions)")

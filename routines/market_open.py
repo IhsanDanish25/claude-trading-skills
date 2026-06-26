@@ -9,7 +9,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import datetime
 import pytz
-import time
 
 from core import logger, config
 from core.broker import BrokerClient
@@ -55,18 +54,15 @@ def is_entry_window():
 
 def run():
     config.validate()
-    logger.banner(log, "MARKET OPEN — 9:30 AM ET")
+    now = datetime.datetime.now(ET)
+    logger.banner(log, f"MARKET OPEN ROUTINE — fired {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
 
     broker = BrokerClient()
 
-    for attempt in range(30):
-        if broker.is_market_open():
-            log.info("Market is OPEN ✓")
-            break
-        time.sleep(10)
-    else:
-        log.error("Market closed — aborting")
+    if not broker.is_market_open():
+        log.error("Market is CLOSED — aborting without polling")
         return
+    log.info("Market is OPEN ✓")
 
     allowed, why = is_entry_window()
     if not allowed:

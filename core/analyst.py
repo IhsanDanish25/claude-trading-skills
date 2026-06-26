@@ -3,6 +3,7 @@ Claude AI analyst.
 Sends market data → gets structured BUY/SKIP/SELL decisions.
 """
 from __future__ import annotations
+import os
 import anthropic
 import json
 import logging
@@ -11,7 +12,12 @@ from core.config import ANTHROPIC_API_KEY
 log = logging.getLogger(__name__)
 _client: anthropic.Anthropic | None = None
 
-_MODELS = ["claude-opus-4-7", "claude-sonnet-4-6"]
+# Fallback chain — env var ANTHROPIC_MODELS (comma-separated) overrides.
+# Default is empty so the live loop never burns Anthropic spend on hardcoded
+# model IDs that may be stale; if env var is unset and a caller invokes the
+# analyst, we try once and degrade gracefully.
+_DEFAULT_MODELS = os.environ.get("ANTHROPIC_MODELS", "").strip()
+_MODELS = [m.strip() for m in _DEFAULT_MODELS.split(",") if m.strip()]
 
 
 def _get_client() -> anthropic.Anthropic:
@@ -23,6 +29,11 @@ def _get_client() -> anthropic.Anthropic:
 
 def _ask(system: str, user: str, max_tokens: int = 1024) -> str:
     import time as _time
+    if not _MODELS:
+        raise RuntimeError(
+            "ANTHROPIC_MODELS env var not set (comma-separated model IDs). "
+            "Set it in Railway Variables, e.g. ANTHROPIC_MODELS=claude-sonnet-4-5"
+        )
     client = _get_client()
     for model in _MODELS:
         try:

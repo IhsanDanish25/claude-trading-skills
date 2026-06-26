@@ -41,6 +41,7 @@ SCHEDULE = [
 
 STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
 CATCHUP_FILE = os.path.join(STATE_DIR, ".scheduler_ran_today.json")
+CATCHUP_MAX_AGE_HOURS = 2.0
 
 
 def get_routine(now: datetime.datetime):
@@ -54,7 +55,8 @@ def get_routine(now: datetime.datetime):
 
 def get_catchup_routine(now: datetime.datetime):
     """If we're past a routine's window and it hasn't run today, catch up.
-    Only catches up market_open and midday_review (the buy routines)."""
+    Only catches up market_open and midday_review (the buy routines).
+    Stale cap: skip catch-ups that are more than CATCHUP_MAX_AGE_HOURS late."""
     h, m, wd = now.hour, now.minute, now.weekday()
     if wd > 4:
         return None
@@ -67,9 +69,16 @@ def get_catchup_routine(now: datetime.datetime):
     ]
 
     for (sched_h, m_min, m_max, module) in catchup_targets:
-        past_window = (h > sched_h) or (h == sched_h and m > m_max)
-        if past_window and module not in ran_today:
+        if module in ran_today:
+            continue
+        scheduled = now.replace(hour=sched_h, minute=m_max, second=0, microsecond=0)
+        age_hours = (now - scheduled).total_seconds() / 3600.0
+        past_window = age_hours >= 0
+        if past_window and age_hours <= CATCHUP_MAX_AGE_HOURS:
             return module
+        if past_window and age_hours > CATCHUP_MAX_AGE_HOURS:
+            log.info(f"Skipping stale catch-up for {module} "
+                     f"({age_hours:.1f}h late, cap={CATCHUP_MAX_AGE_HOURS}h)")
 
     return None
 
@@ -122,7 +131,7 @@ def main():
             routine = catchup
 
     if routine is None:
-        log.info(f"No routine scheduled for {now.strftime('%H:%M')} — exiting")
+        log.debug(f"No routine scheduled for {now.strftime('%H:%M')} — exiting")
         return
 
     log.info(f"Dispatching → {routine}")
