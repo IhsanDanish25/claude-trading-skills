@@ -223,6 +223,9 @@ def run():
         log.info(f"BUYING {sym} | composite={comp:.1f} (vcp={score}) | size={size_pct*100:.0f}% | ${amount:,.0f}")
         try:
             result = broker.buy(sym, dollar_amount=amount)
+            if result.get("blocked"):
+                log.warning(f"✗ {sym} buy blocked by guardrail: {result.get('reason')}")
+                continue
             if not result.get("stop_attached"):
                 log.error(f"✗ {sym} bought but stop NOT attached — flattening position")
                 broker.sell(sym, qty=result["qty"])
