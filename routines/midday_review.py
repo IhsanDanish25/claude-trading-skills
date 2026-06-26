@@ -106,6 +106,30 @@ def run():
     positions = broker.get_positions()
     log.info(f"Open positions: {len(positions)}")
 
+    # ── Cancel stale orders first so shares aren't held_for_orders ────────────
+    # Must run before the naked-position repair, otherwise OCO attach fails
+    # because stale orders lock all available qty.
+    open_orders = broker.get_open_orders()
+    if open_orders:
+        import datetime as _dt
+        now = _dt.datetime.now(pytz.utc)
+        position_symbols = {p.symbol for p in positions}
+        for o in open_orders:
+            try:
+                # Cancel orders for symbols we no longer hold
+                if o.symbol not in position_symbols:
+                    broker.trade.cancel_order_by_id(o.id)
+                    log.info(f"  Cancelled orphan order: {o.symbol} {o.side}")
+                    continue
+                submitted = o.submitted_at
+                if submitted and (now - submitted.replace(tzinfo=pytz.utc)).total_seconds() > 1800:
+                    broker.trade.cancel_order_by_id(o.id)
+                    log.info(f"  Cancelled stale order: {o.symbol} {o.side}")
+            except Exception as e:
+                log.warning(f"  Cancel order fail: {e}")
+        import time as _time
+        _time.sleep(1)
+
     # ── Repair: protect any naked position (no attached stop order) ───────────
     # Catches positions opened when a bracket was rejected (e.g. SHOP/NET/ZS).
     if positions:
@@ -126,10 +150,6 @@ def run():
                 qty    = int(float(p.qty))
                 if qty < 1:
                     continue
-                # Anchor the stop on min(entry, current price): if the position
-                # has already fallen past entry*(1-STOP_LOSS_PCT), a sell-stop
-                # can't sit above market, so anchor on the current price instead
-                # (otherwise Alpaca rejects "stop price must be < current price").
                 anchor = entry
                 try:
                     cur = broker.get_price(p.symbol)
@@ -241,20 +261,6 @@ def run():
                 ok = broker.tighten_stop(sym, float(new_stop))
                 if not ok:
                     log.warning("  %s: tighten_stop failed — no open stop order found", sym)
-
-    open_orders = broker.get_open_orders()
-    if open_orders:
-        log.info(f"Open orders: {len(open_orders)} — cancelling stale")
-        import datetime
-        now = datetime.datetime.now(pytz.utc)
-        for o in open_orders:
-            try:
-                submitted = o.submitted_at
-                if submitted and (now - submitted.replace(tzinfo=pytz.utc)).total_seconds() > 1800:
-                    broker.trade.cancel_order_by_id(o.id)
-                    log.info(f"  Cancelled stale order: {o.symbol} {o.side}")
-            except Exception as e:
-                log.warning(f"  Cancel order fail: {e}")
 
     slots = config.MAX_OPEN_POSITIONS - broker.position_count()
 
