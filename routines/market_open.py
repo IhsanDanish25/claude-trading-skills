@@ -16,6 +16,7 @@ from core.broker import BrokerClient
 from core.screener import screen
 from core.notifier import send_trade_alert
 from core.edge import circuit_breaker_tripped
+from core import composite
 
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
@@ -142,15 +143,48 @@ def run():
         log.info("Nothing passed skills — done")
         return
 
+    # ── COMPOSITE SCORING ───────────────────────────────────────────────────
+    # Every GROUP A skill (Alpaca/no-API) contributes a 0-100 sub-score; GROUP B
+    # (FMP) sub-scores fail gracefully to neutral 50 on any error/429. The
+    # survivors are ranked by the regime-scaled composite, then the top `slots`
+    # are bought. All existing filters above are unchanged; buy()/OCO untouched.
+    log.info("Composite scoring (GROUP A skills + graceful GROUP B)...")
+    passed_syms = [c["symbol"] for c in passed]
+    ctx = composite.build_context(extra_symbols=passed_syms)
+    log.info(f"Market regime score={ctx['regime_score']} → composite mult={ctx['regime_mult']} "
+             f"| sector momentum: {ctx['sector_mom']}")
+
+    bars_map = {}
+    try:
+        from core.screener import _fetch_bars
+        bars_map = _fetch_bars(passed_syms, days=60)
+    except Exception as e:
+        log.warning(f"Composite bar fetch failed (non-blocking, bar-scores→neutral): {e}")
+
+    scored = []
+    for c in passed:
+        result = composite.compute_composite(c, bars_map.get(c["symbol"]), ctx)
+        c["composite"] = result["composite"]
+        c["composite_final"] = result["final"]
+        c["composite_breakdown"] = result["breakdown"]
+        log.info(composite.format_breakdown(result))
+        scored.append(c)
+
+    scored.sort(key=lambda x: x.get("composite_final", 0), reverse=True)
+    ranked = " > ".join(f"{c['symbol']}({c.get('composite_final', 0):.1f})" for c in scored)
+    log.info(f"Composite ranking: {ranked}")
+    passed = scored
+
     buys_taken = 0
     for c in passed[:slots]:
         sym    = c["symbol"]
         score  = c.get("score", 0)
         rs     = c.get("rs_vs_spy")
+        comp     = c.get("composite_final", 0)
         size_pct = config.MAX_POSITION_SIZE_PCT
         amount   = pv * size_pct
 
-        log.info(f"BUYING {sym} | score={score} | size={size_pct*100:.0f}% | ${amount:,.0f}")
+        log.info(f"BUYING {sym} | composite={comp:.1f} (vcp={score}) | size={size_pct*100:.0f}% | ${amount:,.0f}")
         try:
             result = broker.buy(sym, dollar_amount=amount)
             log.info(f"✓ {sym} {result['qty']} sh @ ${result['price']:.2f} "
@@ -162,7 +196,7 @@ def run():
                 price=result["price"],
                 stop=result["stop"],
                 target=result["target"],
-                reason=f"VCP score={score}" + (f" RS{rs:+.0f}%" if rs is not None else ""),
+                reason=f"composite={comp:.1f} VCP={score}" + (f" RS{rs:+.0f}%" if rs is not None else ""),
             )
             buys_taken += 1
         except Exception as e:

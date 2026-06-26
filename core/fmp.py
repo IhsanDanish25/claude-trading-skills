@@ -42,6 +42,12 @@ def _get(url: str, params: dict = None) -> dict | list:
         return entry["data"]
 
     r = requests.get(url, params=params, timeout=15)
+    if r.status_code == 429:
+        # Rate-limited — degrade gracefully so the live loop never crashes.
+        if "rate_limit_429" not in _warned_unavailable:
+            log.warning("FMP rate-limited (HTTP 429) — returning [] (neutral) until quota resets")
+            _warned_unavailable.add("rate_limit_429")
+        return []
     r.raise_for_status()
     data = r.json()
 
