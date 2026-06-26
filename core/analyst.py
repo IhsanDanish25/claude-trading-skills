@@ -16,7 +16,7 @@ _client: anthropic.Anthropic | None = None
 # Default is empty so the live loop never burns Anthropic spend on hardcoded
 # model IDs that may be stale; if env var is unset and a caller invokes the
 # analyst, we try once and degrade gracefully.
-_DEFAULT_MODELS = os.environ.get("ANTHROPIC_MODELS", "claude-sonnet-4-5").strip()
+_DEFAULT_MODELS = os.environ.get("ANTHROPIC_MODELS", "claude-opus-4-7").strip()
 _MODELS = [m.strip() for m in _DEFAULT_MODELS.split(",") if m.strip()]
 
 
