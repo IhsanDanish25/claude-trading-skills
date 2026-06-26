@@ -22,7 +22,37 @@ log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
 
 DAY_START_PATH = os.path.join(config.STATE_DIR, "day_start_value.json")
+TODAY_BOUGHT_PATH = os.path.join(config.STATE_DIR, "today_bought.json")
 MAX_BUYS       = 3
+
+
+def _load_today_bought() -> set:
+    try:
+        today = datetime.datetime.now(ET).date().isoformat()
+        with open(TODAY_BOUGHT_PATH) as f:
+            data = json.load(f)
+        if data.get("date") != today:
+            return set()
+        return set(data.get("symbols", []))
+    except (FileNotFoundError, ValueError, KeyError):
+        return set()
+
+
+def _mark_bought(symbol: str, result: dict) -> None:
+    try:
+        today = datetime.datetime.now(ET).date().isoformat()
+        bought = _load_today_bought()
+        bought.add(symbol)
+        with open(TODAY_BOUGHT_PATH, "w") as f:
+            json.dump({
+                "date": today,
+                "symbols": sorted(bought),
+                "orders": [
+                    {"symbol": s, "order_id": None} for s in sorted(bought)
+                ],
+            }, f, indent=2)
+    except Exception as e:
+        log.warning(f"Failed to persist today_bought state: {e}")
 
 
 def load_day_start_value(current_pv: float) -> float:
@@ -93,6 +123,10 @@ def run():
     except Exception as e:
         log.warning(f"Could not fetch holdings (non-blocking): {e}")
 
+    already_bought_today = _load_today_bought()
+    if already_bought_today:
+        log.info(f"Already bought today (idempotency): {sorted(already_bought_today)}")
+
     universe = build_universe()
     log.info(f"Universe: {len(universe)} symbols → screening...")
     candidates = screen(universe)
@@ -115,7 +149,11 @@ def run():
             log.info(f"  ✗ {sym} SKIP — already holding")
             continue
 
-        if not (5.0 <= price <= 500.0):
+        if sym in already_bought_today:
+            log.info(f"  ✗ {sym} SKIP — already bought today (idempotency)")
+            continue
+
+        if not (config.MIN_PRICE <= price <= config.MAX_PRICE):
             log.info(f"  ✗ {sym} SKIP — price ${price:.2f} out of band")
             continue
 
@@ -127,8 +165,8 @@ def run():
             log.info(f"  ✗ {sym} REJECT — gap {gap:+.1f}% > {config.MAX_GAP_PCT}%")
             continue
 
-        if score < 20:
-            log.info(f"  ✗ {sym} REJECT — score {score} below 20 floor")
+        if score < config.MIN_COMPOSITE_SCORE:
+            log.info(f"  ✗ {sym} REJECT — score {score} below {config.MIN_COMPOSITE_SCORE} floor")
             continue
 
         rs_str  = f"RS{rs:+.1f}%" if rs is not None else "RS n/a"
@@ -185,6 +223,17 @@ def run():
         log.info(f"BUYING {sym} | composite={comp:.1f} (vcp={score}) | size={size_pct*100:.0f}% | ${amount:,.0f}")
         try:
             result = broker.buy(sym, dollar_amount=amount)
+            if not result.get("stop_attached"):
+                log.error(f"✗ {sym} bought but stop NOT attached — flattening position")
+                broker.sell(sym, qty=result["qty"])
+                send_trade_alert(
+                    action="FLATTEN",
+                    ticker=sym,
+                    shares=result["qty"],
+                    price=result["price"],
+                    reason="stop-loss attach failed at entry — unprotected position rejected",
+                )
+                continue
             log.info(f"✓ {sym} {result['qty']} sh @ ${result['price']:.2f} "
                      f"SL={result['stop']} TP={result['target']}")
             send_trade_alert(
@@ -196,6 +245,7 @@ def run():
                 target=result["target"],
                 reason=f"composite={comp:.1f} VCP={score}" + (f" RS{rs:+.0f}%" if rs is not None else ""),
             )
+            _mark_bought(sym, result)
             buys_taken += 1
         except Exception as e:
             log.error(f"✗ {sym} buy failed: {e}")

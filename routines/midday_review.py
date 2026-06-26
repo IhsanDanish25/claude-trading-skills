@@ -12,18 +12,43 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
+import datetime
 import pytz
 from core import logger, config
 from core.broker   import BrokerClient
 from core.fmp      import get_quotes, get_market_breadth
 from core.analyst  import review_open_positions, analyze_market_regime, score_vcp_candidates
 from core.screener import screen
-from core.edge     import should_pyramid, compute_trail_stop
+from core.edge     import should_pyramid, compute_trail_stop, circuit_breaker_tripped
 
 log = logger.setup("midday")
 ET  = pytz.timezone("America/New_York")
 
 PYRAMID_STATE_PATH = os.path.join(config.STATE_DIR, "pyramided.json")
+TODAY_BOUGHT_PATH  = os.path.join(config.STATE_DIR, "today_bought.json")
+
+
+def _load_today_bought() -> set:
+    try:
+        today = datetime.datetime.now(ET).date().isoformat()
+        with open(TODAY_BOUGHT_PATH) as f:
+            data = json.load(f)
+        if data.get("date") != today:
+            return set()
+        return set(data.get("symbols", []))
+    except (FileNotFoundError, ValueError, KeyError):
+        return set()
+
+
+def _mark_bought(symbol: str) -> None:
+    try:
+        today = datetime.datetime.now(ET).date().isoformat()
+        bought = _load_today_bought()
+        bought.add(symbol)
+        with open(TODAY_BOUGHT_PATH, "w") as f:
+            json.dump({"date": today, "symbols": sorted(bought)}, f, indent=2)
+    except Exception as e:
+        log.warning(f"Failed to persist today_bought state: {e}")
 
 
 def _load_pyramided() -> set:
@@ -52,6 +77,27 @@ def run():
     if not broker.is_market_open():
         log.info("Market is CLOSED — skipping midday review (no after-hours trading)")
         return
+
+    pv        = broker.portfolio_value()
+    pos_count = broker.position_count()
+    log.info(f"Portfolio: ${pv:,.2f} | Positions: {pos_count}")
+
+    day_start_path = os.path.join(config.STATE_DIR, "day_start_value.json")
+    day_start = pv
+    try:
+        import json as _json
+        with open(day_start_path) as _f:
+            _data = _json.load(_f)
+        if _data.get("date") == datetime.datetime.now(ET).date().isoformat() and _data.get("value"):
+            day_start = float(_data["value"])
+    except (FileNotFoundError, ValueError, KeyError):
+        pass
+
+    if circuit_breaker_tripped(pv, day_start):
+        day_pnl = (pv - day_start) / day_start * 100
+        log.warning(f"CIRCUIT BREAKER: day P&L {day_pnl:+.2f}% — NO new entries, NO new pyramids")
+        return
+    log.info(f"Day P&L OK ({((pv - day_start) / day_start * 100):+.2f}%) — circuit breaker clear")
 
     breadth = get_market_breadth()
     regime  = analyze_market_regime(breadth)
@@ -217,14 +263,25 @@ def run():
         if top:
             scored = score_vcp_candidates(top)
             buys   = [s for s in scored if s.get("action") == "BUY" and s.get("score", 0) >= 75]
+            already_bought_today = _load_today_bought()
+            if already_bought_today:
+                buys = [s for s in buys if s["symbol"] not in already_bought_today]
             log.info(f"  High-confidence midday setups: {len(buys)}")
             for s in buys[:3]:
+                if s["symbol"] in already_bought_today:
+                    log.info(f"  ✗ {s['symbol']:6} SKIP — already bought today")
+                    continue
                 log.info(f"  ⚡ {s['symbol']:6} score={s['score']} | {s['reason']}")
                 try:
                     pv     = broker.portfolio_value()
                     amount = pv * config.MAX_POSITION_SIZE_PCT * 0.5
                     result = broker.buy(s["symbol"], dollar_amount=amount)
+                    if not result.get("stop_attached"):
+                        log.error(f"  ✗ {s['symbol']} bought but stop NOT attached — flattening")
+                        broker.sell(s["symbol"], qty=result["qty"])
+                        continue
                     log.info(f"  ✓ Midday buy {s['symbol']}: {result['qty']} @ ~${result['price']:.2f}")
+                    _mark_bought(s["symbol"])
                 except Exception as e:
                     log.error(f"  ✗ Midday buy {s['symbol']} failed: {e}")
     else:

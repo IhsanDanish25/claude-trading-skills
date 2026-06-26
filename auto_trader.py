@@ -41,20 +41,28 @@ def load_dashboard():
     return files[0].read_text(encoding="utf-8")
 
 def parse_ftd_score(content):
-    # Look for the explicit "Quality Score" row in the FTD report
-    # Format: "| **Quality Score** | **95/100** |"
+    # Markdown-table parser per the markdown-table-parser skill:
+    # split on '|', strip **/__ bold, lowercase, exact-match the header cell,
+    # iterate value cells. Substring match breaks on "AI Quality Score"
+    # appearing before "Quality Score" — see skill 5-test suite for proof.
+    return _parse_markdown_table_score(content, "quality score")
+
+
+def _parse_markdown_table_score(content: str, target_header: str) -> float:
+    target = target_header.lower()
     for line in content.splitlines():
-        if "Quality Score" in line and "|" in line:
-            m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*100", line)
-            if m:
-                return float(m.group(1))
-    # Fallback: any "X/100" near a Score keyword
-    for line in content.splitlines():
-        if "Score" in line and "/" in line:
-            m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*100", line)
-            if m:
-                return float(m.group(1))
-    logger.warning("FTD Quality Score not found in dashboard")
+        if "|" not in line:
+            continue
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) < 3:
+            continue
+        header = re.sub(r"\*+", "", cells[1]).strip().lower()
+        if header == target:
+            for cell in cells[2:]:
+                m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*100", cell)
+                if m:
+                    return float(m.group(1))
+    logger.warning(f"Header '{target_header}' not found in dashboard")
     return 0.0
 
 def load_vcp():

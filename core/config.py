@@ -42,6 +42,8 @@ TAKE_PROFIT_PCT       = float(os.environ.get("TAKE_PROFIT_PCT", "0.06"))
 MIN_RELATIVE_VOLUME   = float(os.environ.get("MIN_REL_VOL", "1.5"))
 MIN_PRICE             = float(os.environ.get("MIN_PRICE", "5.0"))
 MAX_PRICE             = float(os.environ.get("MAX_PRICE", "500.0"))
+MIN_COMPOSITE_SCORE   = int(os.environ.get("MIN_COMPOSITE_SCORE", "20"))
+RISK_PCT              = float(os.environ.get("RISK_PCT", "0.01"))
 
 # ── Edge upgrades ─────────────────────────────────────────────────────────────
 ENTRY_DELAY_MIN       = int(os.environ.get("ENTRY_DELAY_MIN", "20"))
