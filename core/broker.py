@@ -32,7 +32,8 @@ from alpaca.data.timeframe import TimeFrame
 
 from core.config import (
     ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL,
-    PAPER_TRADE, MAX_POSITION_SIZE_PCT, STOP_LOSS_PCT, TAKE_PROFIT_PCT
+    PAPER_TRADE, MAX_POSITION_SIZE_PCT, MAX_OPEN_POSITIONS,
+    STOP_LOSS_PCT, TAKE_PROFIT_PCT,
 )
 
 log = logging.getLogger(__name__)
@@ -161,26 +162,67 @@ class BrokerClient:
             stop_loss_pct: float = STOP_LOSS_PCT,
             take_profit_pct: float = TAKE_PROFIT_PCT) -> dict:
         """
-        Simple market BUY, then attach a protective OCO exit (stop + target)
-        priced off the REAL fill price.
+        Simple market BUY with hard position-sizing guardrails, then attach a
+        protective OCO exit (stop + target) priced off the REAL fill price.
 
-        Bracket-on-entry orders were rejected on price drift (the take-profit
-        limit falling below base_price), which left positions with no stop.
-        This fills first, reads the actual fill, then attaches an OCO exit so
-        the levels are always valid and both stop and target coexist.
+        Guardrails enforced before every order:
+        1. Position count must be below MAX_OPEN_POSITIONS (new symbols only).
+        2. Order value is clamped to equity * MAX_POSITION_SIZE_PCT, accounting
+           for any existing position in the same symbol.
 
         Pass either dollar_amount OR shares. Returns qty, price (fill basis),
         stop, target, and stop_attached / target_attached bools.
         """
         ref_price = self.get_price(symbol)
+        equity = self.portfolio_value()
+        max_position_dollars = equity * MAX_POSITION_SIZE_PCT
+
+        # ── Guardrail 1: enforce MAX_OPEN_POSITIONS ──────────────────────────
+        existing_pos = self.get_position(symbol)
+        if existing_pos is None and self.position_count() >= MAX_OPEN_POSITIONS:
+            log.warning(
+                "BUY %s BLOCKED — already at %d/%d open positions",
+                symbol, self.position_count(), MAX_OPEN_POSITIONS,
+            )
+            return {"blocked": True, "reason": "max_open_positions"}
+
+        # ── Guardrail 2: clamp order to per-position cap ─────────────────────
+        existing_value = 0.0
+        if existing_pos is not None:
+            existing_value = abs(float(existing_pos.market_value or 0))
+        remaining_cap = max(0.0, max_position_dollars - existing_value)
+
+        if remaining_cap <= 0:
+            log.warning(
+                "BUY %s BLOCKED — existing position $%.0f already at/above "
+                "%.1f%% cap ($%.0f)",
+                symbol, existing_value, MAX_POSITION_SIZE_PCT * 100,
+                max_position_dollars,
+            )
+            return {"blocked": True, "reason": "position_size_cap"}
 
         if dollar_amount:
             qty = max(1, int(dollar_amount / ref_price))
         elif shares:
             qty = shares
         else:
-            pv  = self.portfolio_value()
-            qty = max(1, int((pv * MAX_POSITION_SIZE_PCT) / ref_price))
+            qty = max(1, int(remaining_cap / ref_price))
+
+        order_value = qty * ref_price
+        if order_value > remaining_cap:
+            clamped_qty = max(1, int(remaining_cap / ref_price))
+            log.warning(
+                "BUY %s CLAMPED — requested %d shares ($%.0f) exceeds "
+                "%.1f%% cap; reduced to %d shares ($%.0f)",
+                symbol, qty, order_value,
+                MAX_POSITION_SIZE_PCT * 100,
+                clamped_qty, clamped_qty * ref_price,
+            )
+            qty = clamped_qty
+
+        if qty < 1:
+            log.warning("BUY %s BLOCKED — clamped qty to 0", symbol)
+            return {"blocked": True, "reason": "position_size_cap"}
 
         # 1. Simple market BUY
         order = self.trade.submit_order(MarketOrderRequest(

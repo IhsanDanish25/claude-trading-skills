@@ -35,8 +35,10 @@ def validate() -> None:
         raise RuntimeError(msg)
 
 # ── Trading params ────────────────────────────────────────────────────────────
-MAX_POSITION_SIZE_PCT = float(os.environ.get("MAX_POSITION_PCT", "0.05"))
-MAX_OPEN_POSITIONS    = int(os.environ.get("MAX_POSITIONS", "10"))
+MAX_POSITION_SIZE_PCT = float(os.environ.get("MAX_POSITION_SIZE_PCT",
+                              os.environ.get("MAX_POSITION_PCT", "0.05")))
+MAX_OPEN_POSITIONS    = int(os.environ.get("MAX_OPEN_POSITIONS",
+                            os.environ.get("MAX_POSITIONS", "10")))
 STOP_LOSS_PCT         = float(os.environ.get("STOP_LOSS_PCT", "0.02"))
 TAKE_PROFIT_PCT       = float(os.environ.get("TAKE_PROFIT_PCT", "0.06"))
 MIN_RELATIVE_VOLUME   = float(os.environ.get("MIN_REL_VOL", "1.5"))

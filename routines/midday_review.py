@@ -195,10 +195,13 @@ def run():
                 add_amount = pv * config.MAX_POSITION_SIZE_PCT * 0.5
                 try:
                     result = broker.buy(sym, dollar_amount=add_amount)
-                    pyramided.add(sym)
-                    qty += result["qty"]
-                    log.info(f"  ➕ {sym}: pyramided +{result['qty']} shares "
-                             f"@ ~${result['price']:.2f} (P&L +{pnl_pct:.1f}%)")
+                    if result.get("blocked"):
+                        log.warning(f"  ✗ {sym} pyramid blocked: {result.get('reason')}")
+                    else:
+                        pyramided.add(sym)
+                        qty += result["qty"]
+                        log.info(f"  ➕ {sym}: pyramided +{result['qty']} shares "
+                                 f"@ ~${result['price']:.2f} (P&L +{pnl_pct:.1f}%)")
                 except Exception as e:
                     log.error(f"  ✗ Pyramid {sym} failed: {e}")
 
@@ -276,6 +279,9 @@ def run():
                     pv     = broker.portfolio_value()
                     amount = pv * config.MAX_POSITION_SIZE_PCT * 0.5
                     result = broker.buy(s["symbol"], dollar_amount=amount)
+                    if result.get("blocked"):
+                        log.warning(f"  ✗ {s['symbol']} midday buy blocked: {result.get('reason')}")
+                        continue
                     if not result.get("stop_attached"):
                         log.error(f"  ✗ {s['symbol']} bought but stop NOT attached — flattening")
                         broker.sell(s["symbol"], qty=result["qty"])
