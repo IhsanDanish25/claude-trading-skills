@@ -17,6 +17,7 @@ from core.screener import screen
 from core.notifier import send_trade_alert
 from core.edge import circuit_breaker_tripped
 from core import composite
+from core.universe import build_universe
 
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
@@ -96,8 +97,9 @@ def run():
     except Exception as e:
         log.warning(f"Could not fetch holdings (non-blocking): {e}")
 
-    log.info("Screening...")
-    candidates = screen()
+    universe = build_universe()
+    log.info(f"Universe: {len(universe)} symbols → screening...")
+    candidates = screen(universe)
     log.info(f"Got {len(candidates)} candidates")
 
     if not candidates:
