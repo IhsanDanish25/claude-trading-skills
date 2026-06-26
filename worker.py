@@ -132,11 +132,66 @@ def startup_health_check() -> None:
     log.info("=" * 50)
 
 
+def startup_rebalance() -> None:
+    """One-shot rebalance hook controlled by REBALANCE_ON_BOOT env var.
+
+    Values: unset/"false" -> skip, "dry" -> plan only, "execute" -> plan + orders.
+    Idempotent: logs "Already within caps" and does nothing if portfolio is clean.
+    """
+    mode = os.environ.get("REBALANCE_ON_BOOT", "false").strip().lower()
+    if mode in ("", "false", "0", "no"):
+        log.info("REBALANCE_ON_BOOT not set — skipping startup rebalance")
+        return
+
+    if mode not in ("dry", "execute"):
+        log.error("REBALANCE_ON_BOOT=%r is invalid (expected 'dry' or 'execute') "
+                  "— skipping", mode)
+        return
+
+    log.info("=" * 50)
+    log.info("STARTUP REBALANCE (mode=%s)", mode)
+    log.info("=" * 50)
+
+    try:
+        from core.broker import BrokerClient
+        from scripts.rebalance_to_caps import build_plan, execute_plan, format_plan
+
+        target_positions = 2
+        max_pct = 5.0
+
+        broker = BrokerClient()
+        plan = build_plan(broker, target_positions, max_pct, keep_symbols=None)
+
+        for line in format_plan(plan):
+            if line:
+                log.info(line)
+
+        if plan["status"] == "within_caps":
+            log.info("Already within caps — no action needed")
+        elif plan["status"] == "empty":
+            log.info("No positions — nothing to rebalance")
+        elif mode == "dry":
+            log.info("DRY RUN — no orders placed. Set REBALANCE_ON_BOOT=execute "
+                     "to submit orders on next deploy.")
+        elif mode == "execute":
+            ok = execute_plan(broker, plan, logger=log)
+            if ok:
+                log.info("Startup rebalance executed successfully")
+            else:
+                log.error("Startup rebalance had failures — check logs above")
+
+    except Exception:
+        log.exception("Startup rebalance failed — continuing normal startup")
+
+    log.info("=" * 50)
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, _request_shutdown)
     signal.signal(signal.SIGINT, _request_shutdown)
 
     startup_health_check()
+    startup_rebalance()
     log.info("Worker daemon started — scheduler fires every %ds "
              "(RSS=%.1f MB, pid=%d)", TICK_SECONDS, _rss_mb(), os.getpid())
 

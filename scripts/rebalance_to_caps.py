@@ -127,104 +127,127 @@ def build_plan(broker: BrokerClient, target_positions: int,
     }
 
 
-def print_plan(plan: dict):
+def format_plan(plan: dict) -> list[str]:
+    """Return the plan as a list of log-friendly lines (no trailing newlines)."""
+    lines: list[str] = []
+
     if plan["status"] == "empty":
-        print(f"\n{'='*60}")
-        print("REBALANCE PLAN — No open positions")
-        print(f"Equity: ${plan['equity']:,.2f}")
-        print(f"{'='*60}\n")
-        return
+        lines.append("=" * 60)
+        lines.append("REBALANCE PLAN — No open positions")
+        lines.append(f"Equity: ${plan['equity']:,.2f}")
+        lines.append("=" * 60)
+        return lines
 
     if plan["status"] == "within_caps":
-        print(f"\n{'='*60}")
-        print("REBALANCE CHECK — Already within caps ✓")
-        print(f"{'='*60}")
-        print(f"  Equity:     ${plan['equity']:,.2f}")
-        print(f"  Cash:       ${plan['cash']:,.2f}")
-        print(f"  Positions:  {plan['position_count']} / {plan['target_positions']} cap")
-        print(f"  Deployed:   {plan['deployed_pct']:.1f}%")
+        lines.append("=" * 60)
+        lines.append("REBALANCE CHECK — Already within caps")
+        lines.append("=" * 60)
+        lines.append(f"  Equity:     ${plan['equity']:,.2f}")
+        lines.append(f"  Cash:       ${plan['cash']:,.2f}")
+        lines.append(f"  Positions:  {plan['position_count']} / {plan['target_positions']} cap")
+        lines.append(f"  Deployed:   {plan['deployed_pct']:.1f}%")
         for r in plan["positions"]:
-            flag = " ⚠ OVER CAP" if r["pct_of_equity"] > (plan.get("max_pct", MAX_POSITION_SIZE_PCT * 100)) else ""
-            print(f"    {r['symbol']:6s}  {r['qty']:>8.2f} sh  "
-                  f"${r['market_value']:>10,.2f}  ({r['pct_of_equity']:5.1f}%)  "
-                  f"P&L ${r['unrealized_pl']:>+8,.2f} ({r['unrealized_pl_pct']:>+.1f}%){flag}")
-        print(f"{'='*60}\n")
-        return
+            flag = " OVER CAP" if r["pct_of_equity"] > (plan.get("max_pct", MAX_POSITION_SIZE_PCT * 100)) else ""
+            lines.append(
+                f"    {r['symbol']:6s}  {r['qty']:>8.2f} sh  "
+                f"${r['market_value']:>10,.2f}  ({r['pct_of_equity']:5.1f}%)  "
+                f"P&L ${r['unrealized_pl']:>+8,.2f} ({r['unrealized_pl_pct']:>+.1f}%){flag}")
+        lines.append("=" * 60)
+        return lines
 
-    print(f"\n{'='*60}")
-    print("REBALANCE PLAN (DRY RUN)")
-    print(f"{'='*60}")
-    print(f"  Equity:          ${plan['equity']:,.2f}")
-    print(f"  Cash:            ${plan['cash']:,.2f}")
-    print(f"  Positions:       {plan['position_count']} → {plan['target_positions']}")
-    print(f"  Per-position cap: {plan['max_pct']:.1f}%")
-    print()
-
-    print("── CURRENT POSITIONS (ranked by P&L %) ──")
+    lines.append("=" * 60)
+    lines.append("REBALANCE PLAN (DRY RUN)")
+    lines.append("=" * 60)
+    lines.append(f"  Equity:          ${plan['equity']:,.2f}")
+    lines.append(f"  Cash:            ${plan['cash']:,.2f}")
+    lines.append(f"  Positions:       {plan['position_count']} -> {plan['target_positions']}")
+    lines.append(f"  Per-position cap: {plan['max_pct']:.1f}%")
+    lines.append("")
+    lines.append("-- CURRENT POSITIONS (ranked by P&L %) --")
     for i, r in enumerate(plan["all_positions"], 1):
         kept = r["symbol"] in {s["symbol"] for s in plan["survivors"]}
         tag = "KEEP" if kept else "CLOSE"
-        print(f"  {i}. [{tag:5s}] {r['symbol']:6s}  {r['qty']:>8.2f} sh  "
-              f"${r['market_value']:>10,.2f}  ({r['pct_of_equity']:5.1f}%)  "
-              f"P&L ${r['unrealized_pl']:>+8,.2f} ({r['unrealized_pl_pct']:>+.1f}%)")
-    print()
+        lines.append(
+            f"  {i}. [{tag:5s}] {r['symbol']:6s}  {r['qty']:>8.2f} sh  "
+            f"${r['market_value']:>10,.2f}  ({r['pct_of_equity']:5.1f}%)  "
+            f"P&L ${r['unrealized_pl']:>+8,.2f} ({r['unrealized_pl_pct']:>+.1f}%)")
+    lines.append("")
 
     if plan["closures"]:
-        print("── CLOSE (full liquidation) ──")
+        lines.append("-- CLOSE (full liquidation) --")
         for r in plan["closures"]:
-            loss_flag = " ⚠ LOCKING IN LOSS" if r["unrealized_pl"] < -50 else ""
-            print(f"  SELL ALL  {r['symbol']:6s}  {r['qty']:>8.2f} sh  "
-                  f"≈ ${r['market_value']:>10,.2f}  "
-                  f"P&L ${r['unrealized_pl']:>+8,.2f}{loss_flag}")
-        print()
+            loss_flag = " LOCKING IN LOSS" if r["unrealized_pl"] < -50 else ""
+            lines.append(
+                f"  SELL ALL  {r['symbol']:6s}  {r['qty']:>8.2f} sh  "
+                f"~${r['market_value']:>10,.2f}  "
+                f"P&L ${r['unrealized_pl']:>+8,.2f}{loss_flag}")
+        lines.append("")
 
     if plan["trims"]:
-        print("── TRIM (reduce to cap) ──")
+        lines.append("-- TRIM (reduce to cap) --")
         for t in plan["trims"]:
-            print(f"  SELL {t['trim_shares']:>4d}  {t['symbol']:6s}  "
-                  f"${t['market_value']:>10,.2f} → ${t['post_trim_value']:>10,.2f}  "
-                  f"({t['pct_of_equity']:.1f}% → {t['post_trim_pct']:.1f}%)")
-        print()
+            lines.append(
+                f"  SELL {t['trim_shares']:>4d}  {t['symbol']:6s}  "
+                f"${t['market_value']:>10,.2f} -> ${t['post_trim_value']:>10,.2f}  "
+                f"({t['pct_of_equity']:.1f}% -> {t['post_trim_pct']:.1f}%)")
+        lines.append("")
 
-    print("── RESULT ──")
-    print(f"  Freed cash:    ${plan['freed_cash']:>10,.2f}")
-    print(f"  Post cash:     ${plan['post_cash']:>10,.2f}")
-    print(f"  Post deployed: {plan['post_deployed_pct']:.1f}%")
-    print(f"  Positions:     {plan['target_positions']}")
-    print(f"{'='*60}\n")
+    lines.append("-- RESULT --")
+    lines.append(f"  Freed cash:    ${plan['freed_cash']:>10,.2f}")
+    lines.append(f"  Post cash:     ${plan['post_cash']:>10,.2f}")
+    lines.append(f"  Post deployed: {plan['post_deployed_pct']:.1f}%")
+    lines.append(f"  Positions:     {plan['target_positions']}")
+    lines.append("=" * 60)
+    return lines
 
 
-def execute_plan(broker: BrokerClient, plan: dict):
+def print_plan(plan: dict):
+    for line in format_plan(plan):
+        print(line)
+
+
+def execute_plan(broker: BrokerClient, plan: dict,
+                 logger: logging.Logger | None = None):
+    """Execute the rebalance plan. Returns True if all orders succeeded.
+
+    If *logger* is provided, uses it instead of print() for output.
+    """
+    def _out(msg: str):
+        if logger:
+            logger.info(msg)
+        else:
+            print(msg)
+
     if plan["status"] != "needs_rebalance":
-        print("Nothing to execute.")
+        _out("Nothing to execute.")
         return True
 
-    print("\n── EXECUTING ──")
+    _out("-- EXECUTING --")
     ok = True
 
     broker.cancel_all_orders()
-    print("  Cancelled all open orders first.")
+    _out("  Cancelled all open orders first.")
 
     for r in plan["closures"]:
         try:
             result = broker.sell(r["symbol"])
             oid = str(result.get("order", {}).id)[:8] if result.get("order") else "n/a"
-            print(f"  CLOSED {r['symbol']:6s}  {r['qty']:.2f} sh  [order {oid}]")
+            _out(f"  CLOSED {r['symbol']:6s}  {r['qty']:.2f} sh  [order {oid}]")
         except Exception as e:
-            print(f"  FAILED to close {r['symbol']}: {e}")
+            _out(f"  FAILED to close {r['symbol']}: {e}")
             ok = False
 
     for t in plan["trims"]:
         try:
             result = broker.sell(t["symbol"], qty=t["trim_shares"])
             oid = str(result.get("order", {}).id)[:8] if result.get("order") else "n/a"
-            print(f"  TRIMMED {t['symbol']:6s}  -{t['trim_shares']} sh  [order {oid}]")
+            _out(f"  TRIMMED {t['symbol']:6s}  -{t['trim_shares']} sh  [order {oid}]")
         except Exception as e:
-            print(f"  FAILED to trim {t['symbol']}: {e}")
+            _out(f"  FAILED to trim {t['symbol']}: {e}")
             ok = False
 
-    status = "All orders submitted." if ok else "Some orders FAILED — check above."
-    print(f"\n  {status}")
+    status = "All orders submitted." if ok else "Some orders FAILED -- check above."
+    _out(f"  {status}")
     return ok
 
 
