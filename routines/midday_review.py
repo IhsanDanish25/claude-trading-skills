@@ -106,62 +106,47 @@ def run():
     positions = broker.get_positions()
     log.info(f"Open positions: {len(positions)}")
 
-    # ── Cancel stale orders first so shares aren't held_for_orders ────────────
-    # Must run before the naked-position repair, otherwise OCO attach fails
-    # because stale orders lock all available qty.
-    open_orders = broker.get_open_orders()
-    if open_orders:
-        import datetime as _dt
-        now = _dt.datetime.now(pytz.utc)
-        position_symbols = {p.symbol for p in positions}
-        for o in open_orders:
-            try:
-                # Cancel orders for symbols we no longer hold
-                if o.symbol not in position_symbols:
-                    broker.trade.cancel_order_by_id(o.id)
-                    log.info(f"  Cancelled orphan order: {o.symbol} {o.side}")
-                    continue
-                submitted = o.submitted_at
-                if submitted and (now - submitted.replace(tzinfo=pytz.utc)).total_seconds() > 1800:
-                    broker.trade.cancel_order_by_id(o.id)
-                    log.info(f"  Cancelled stale order: {o.symbol} {o.side}")
-            except Exception as e:
-                log.warning(f"  Cancel order fail: {e}")
-        import time as _time
-        _time.sleep(1)
-
-    # ── Repair: protect any naked position (no attached stop order) ───────────
-    # Catches positions opened when a bracket was rejected (e.g. SHOP/NET/ZS).
+    # ── Repair: ensure every position has a stop order ──────────────────────
+    # Cancel all existing sell orders first (they hold qty and block new OCOs),
+    # then re-attach fresh stop/target protection on every position.
     if positions:
-        try:
-            open_orders = broker.get_open_orders()
-            stopped = {
-                o.symbol for o in open_orders
-                if "stop" in str(o.type).lower() and "sell" in str(o.side).lower()
-            }
-        except Exception as e:
-            log.warning(f"Repair: could not fetch open orders ({e}) — skipping repair")
-            stopped = None
-        if stopped is not None:
-            for p in positions:
-                if p.symbol in stopped:
-                    continue
-                entry  = float(p.avg_entry_price)
-                qty    = int(float(p.qty))
-                if qty < 1:
-                    continue
-                anchor = entry
+        open_orders = broker.get_open_orders()
+        if open_orders:
+            position_symbols = {p.symbol for p in positions}
+            cancelled = 0
+            for o in open_orders:
                 try:
-                    cur = broker.get_price(p.symbol)
-                    if cur > 0:
-                        anchor = min(entry, cur)
+                    if o.symbol not in position_symbols:
+                        broker.trade.cancel_order_by_id(o.id)
+                        log.info(f"  Cancelled orphan order: {o.symbol} {o.side}")
+                        cancelled += 1
+                    elif "sell" in str(o.side).lower():
+                        broker.trade.cancel_order_by_id(o.id)
+                        log.info(f"  Cancelled existing sell order: {o.symbol} {o.type}")
+                        cancelled += 1
                 except Exception as e:
-                    log.warning(f"  {p.symbol}: price check failed ({e}) — anchoring on entry")
-                stop   = round(anchor * (1 - config.STOP_LOSS_PCT), 2)
-                target = round(entry  * (1 + config.TAKE_PROFIT_PCT), 2)
-                log.info(f"  🛠️  {p.symbol}: naked position — attaching protection "
-                         f"(entry=${entry:.2f} stop=${stop} target=${target})")
-                broker.attach_stop_target(p.symbol, qty, stop, target)
+                    log.warning(f"  Cancel order fail: {e}")
+            if cancelled:
+                import time as _time
+                _time.sleep(1)
+
+        for p in positions:
+            entry = float(p.avg_entry_price)
+            qty = int(float(p.qty))
+            if qty < 1:
+                continue
+            anchor = entry
+            try:
+                cur = broker.get_price(p.symbol)
+                if cur > 0:
+                    anchor = min(entry, cur)
+            except Exception as e:
+                log.warning(f"  {p.symbol}: price check failed ({e}) — anchoring on entry")
+            stop = round(anchor * (1 - config.STOP_LOSS_PCT), 2)
+            target = round(entry * (1 + config.TAKE_PROFIT_PCT), 2)
+            log.info(f"  Attaching protection: {p.symbol} "
+                     f"(entry=${entry:.2f} stop=${stop} target=${target})")
+            broker.attach_stop_target(p.symbol, qty, stop, target)
 
     if not positions:
         log.info("No positions — skip position review")
