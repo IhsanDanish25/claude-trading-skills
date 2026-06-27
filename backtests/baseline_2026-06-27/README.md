@@ -53,9 +53,13 @@ USD totals: A $10,646.90 · B $3,701.53 · C -$3,304.49 · SPY $39,539.70.
 
 ## Caveats
 
-- **Single regime window.** 2024-25 AI rally; bear-market behavior
-  unknown. Multi-window validation (2022, 2018) is the highest-value
-  next iteration.
+- **Single regime window.** 2024-05 → 2026-06 (AI rally); bear-market
+  behavior unknown. Multi-window validation (2022, 2018) is the
+  highest-value next iteration — **blocked at 2026-06-27 by Alpaca
+  data tier**: IEX free plan returns 401 on historical bars >~2y old
+  (verified by single-symbol `get_stock_bars` for start=2022-01-01).
+  Would require Alpaca Algo Trader Plus ($99/mo) or equivalent for
+  point-in-time 4y+ bars.
 - **Over-trading.** 2.2 trades/day in backtest vs ~1/day in live bot.
   The 9:35-09:44 entry-timing window and 1-trade-per-ticker-per-week
   filters are NOT modeled. Adding them will likely drop trade count
@@ -65,6 +69,26 @@ USD totals: A $10,646.90 · B $3,701.53 · C -$3,304.49 · SPY $39,539.70.
 - **FMP disabled.** Earnings-calendar + fundamental sub-scores (15%
   of composite weight) are zeroed out. Adding them with a point-in-time
   FMP cache is the second-highest-value next iteration.
+
+## Verification (per the backtest-live-strategy skill)
+
+1. ✅ **No look-ahead.** `backtest_harness/test_no_lookahead.py`
+   instruments `BarStore.slice_asof` and asserts every fetch call's
+   max bar date ≤ as_of. Confirmed across 25,049 fetch calls
+   spanning 972 decision dates from 2024-05-13 to 2026-06-25.
+2. ✅ **Smoke test on synthetic data.** `backtest_harness/smoke.py`
+   builds RISE/FALL/CHOP synthetic series, asserts curve length and
+   that target exits fire on the rising series.
+3. ✅ **Cache hit on re-run.** Second invocation reads from cache,
+   no network contact, same numbers as first run (1194 trades,
+   +11.13% return).
+4. ✅ **Reproducibility.** Same cache + same code + same scenario
+   → identical JSON. Verified by comparing pre- and post-rebase runs.
+5. ✅ **Re-run after strategy code change.** Post-merge re-run of
+   scenario A (after the 6 fix PRs landed in `f254e68`) produced
+   identical numbers → the 6 PRs touched OCO repair / position
+   sizing / model name / REBALANCE_ON_BOOT, NOT the composite
+   scoring path. Baseline remains valid.
 
 ## Artifacts
 
