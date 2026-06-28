@@ -71,6 +71,8 @@ def run_earnings_simulation(
     min_surprise_pct: float = 10.0,
     min_price: float = 10.0,
     min_avg_volume: float = 500_000.0,
+    trailing_stop: bool = True,
+    fixed_stop_pct: float | None = None,
 ) -> Portfolio:
     cal = store.trading_calendar("SPY")
     if len(cal) <= warmup + 1:
@@ -155,7 +157,10 @@ def run_earnings_simulation(
                 basis = buy_fill(op)
                 if pf.cash < qty * basis:
                     continue
-                stop = _initial_stop(basis, _atr14(store, sym, as_of), atr_stop_mult)
+                if fixed_stop_pct is not None:
+                    stop = round(basis * (1 - fixed_stop_pct), 2)
+                else:
+                    stop = _initial_stop(basis, _atr14(store, sym, as_of), atr_stop_mult)
                 pf.lots.append(Lot(sym, T, basis, qty, stop, float("inf")))
                 pf.cash -= qty * basis
                 held.add(sym)
@@ -193,15 +198,16 @@ def run_earnings_simulation(
         pf.lots = survivors
 
         # ── ratchet the ATR trailing stop up on the T close (never down) ──────
-        for l in pf.lots:
-            bar = store.bar_on(l.symbol, T)
-            if not bar:
-                continue
-            atr = _atr14(store, l.symbol, T)
-            if atr is not None:
-                cand = round(bar["close"] - atr_stop_mult * atr, 2)
-                if cand > l.stop:
-                    l.stop = cand
+        if trailing_stop:
+            for l in pf.lots:
+                bar = store.bar_on(l.symbol, T)
+                if not bar:
+                    continue
+                atr = _atr14(store, l.symbol, T)
+                if atr is not None:
+                    cand = round(bar["close"] - atr_stop_mult * atr, 2)
+                    if cand > l.stop:
+                        l.stop = cand
 
         # ── mark equity at T close ────────────────────────────────────────────
         eq = pf.cash

@@ -40,16 +40,28 @@ SUITE = [
     ("B_slip10_atr", 10, "atr", False),
     ("C_slip20_atr", 20, "atr", False),
     ("D_slip10_atr_regime", 10, "atr", True),
+    # Earnings-momentum scenarios — routed to earnings_engine, not engine.py.
+    # (stop_mode field unused for E-series; stop config is in E_CONFIGS below.)
     ("E_earnings_momentum_regime", 10, "atr", True),
+    ("E2_earnings_wide_stop",      10, "atr", True),
+    ("E3_earnings_time_only",      10, "atr", True),
 ]
 
-# Scenario E specifics (wider window than B/D for more earnings events).
+# Scenario E-series shared parameters.
 E_WINDOW_START = "2024-01-01"
 E_WINDOW_END = "2026-06-26"
 E_HOLD_DAYS = 60
-E_MIN_SURPRISE_PCT = 10.0
+E_MIN_SURPRISE_PCT = 5.0   # lowered from 10% — wider net for trade-count gate
 E_MIN_PRICE = 10.0
 E_MIN_AVG_VOLUME = 500_000.0
+
+# Per-scenario stop configuration for the E-series.
+# trailing_stop=False + fixed_stop_pct → flat disaster-protection stop, never ratcheted.
+E_CONFIGS: dict[str, dict] = {
+    "E_earnings_momentum_regime": {"atr_stop_mult": 1.5, "trailing_stop": True,  "fixed_stop_pct": None},
+    "E2_earnings_wide_stop":      {"atr_stop_mult": 3.0, "trailing_stop": True,  "fixed_stop_pct": None},
+    "E3_earnings_time_only":      {"atr_stop_mult": 1.5, "trailing_stop": False, "fixed_stop_pct": 0.15},
+}
 
 
 def build_universe(store, years: float) -> list[str]:
@@ -144,14 +156,19 @@ def _run_one(store, universe, cfg, out_dir, start_equity, scenario, slippage_bps
 
 def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
                            regime_gated=True):
-    """Scenario E: earnings-momentum strategy on its own engine + universe + window.
+    """E-series earnings-momentum scenarios — own engine, own universe, own window.
 
-    Sources EPS surprises from FMP (/stable/earnings-calendar, disk-cached),
-    builds an Alpaca-bar store over the reporting names, runs the dedicated
-    earnings simulation (day-after-earnings entry, 60d hold OR ATR(14)x1.5
-    trailing stop), then prints the same summary + validation gates as A–D.
+    Stop behaviour is looked up from E_CONFIGS by scenario name:
+      E  — ATR(14)×1.5 trailing stop
+      E2 — ATR(14)×3.0 trailing stop (wider room to breathe)
+      E3 — fixed -15% disaster stop only, no trailing; pure 60d time exit
     engine.run_simulation (scenarios A–D) is not involved."""
     from backtest_harness import data, earnings_data, earnings_engine, metrics
+
+    ecfg = E_CONFIGS.get(scenario, E_CONFIGS["E_earnings_momentum_regime"])
+    atr_stop_mult = ecfg["atr_stop_mult"]
+    trailing_stop = ecfg["trailing_stop"]
+    fixed_stop_pct = ecfg["fixed_stop_pct"]
 
     gate_tag = " | regime-gated" if regime_gated else ""
     log.info("── Scenario %s | earnings-momentum | slippage=%dbps | hold=%dd | %s..%s%s ──",
@@ -184,10 +201,11 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
     # 3. Run the dedicated earnings-momentum simulation.
     pf = earnings_engine.run_earnings_simulation(
         store, qualifying, start_equity=start_equity, slippage_bps=slippage_bps,
-        atr_stop_mult=ATR_STOP_MULT, hold_days=E_HOLD_DAYS, regime_gated=regime_gated,
+        atr_stop_mult=atr_stop_mult, hold_days=E_HOLD_DAYS, regime_gated=regime_gated,
         window_start=E_WINDOW_START, window_end=E_WINDOW_END,
         min_surprise_pct=E_MIN_SURPRISE_PCT, min_price=E_MIN_PRICE,
         min_avg_volume=E_MIN_AVG_VOLUME,
+        trailing_stop=trailing_stop, fixed_stop_pct=fixed_stop_pct,
     )
     if not pf.equity_curve:
         log.error("Scenario %s produced no equity curve — skipping.", scenario)
@@ -203,16 +221,26 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
     metrics.plot_equity(pf.equity_curve, spy_curve, png_path,
                         f"{scenario}: earnings momentum vs SPY  ({start_date} → {end_date})")
 
-    stop_desc = f"ATR(14) × {ATR_STOP_MULT} trailing + {E_HOLD_DAYS}d time stop"
+    if fixed_stop_pct is not None:
+        stop_desc = f"-{fixed_stop_pct*100:.0f}% fixed stop + {E_HOLD_DAYS}d time stop (no trailing)"
+        stop_mode_tag = "fixed_flat"
+    elif trailing_stop:
+        stop_desc = f"ATR(14) × {atr_stop_mult} trailing + {E_HOLD_DAYS}d time stop"
+        stop_mode_tag = "atr_trailing"
+    else:
+        stop_desc = f"{E_HOLD_DAYS}d time stop only"
+        stop_mode_tag = "time_only"
     report = {
         "generated": datetime.datetime.now().isoformat(timespec="seconds"),
         "scenario": scenario,
         "config": {
             "strategy": "earnings_momentum",
             "slippage_bps": slippage_bps,
-            "stop_mode": "atr_trailing",
+            "stop_mode": stop_mode_tag,
             "stop_rule": stop_desc,
-            "atr_stop_mult": ATR_STOP_MULT,
+            "atr_stop_mult": atr_stop_mult,
+            "trailing_stop": trailing_stop,
+            "fixed_stop_pct": fixed_stop_pct,
             "hold_days": E_HOLD_DAYS,
             "entry_rule": f"buy next-open after EPS surprise >= {E_MIN_SURPRISE_PCT}%",
             "regime_gated": regime_gated,
@@ -283,7 +311,12 @@ def main() -> int:
         scenarios = SUITE
     elif args.scenario:
         prefix = args.scenario.upper().rstrip("_")
-        scenarios = [s for s in SUITE if s[0].startswith(prefix + "_") or s[0].upper() == prefix]
+        # Single-letter prefix (e.g. "E") matches the whole family (E, E2, E3).
+        # Multi-char prefix (e.g. "E2") matches only that scenario.
+        if len(prefix) == 1:
+            scenarios = [s for s in SUITE if s[0].upper().startswith(prefix)]
+        else:
+            scenarios = [s for s in SUITE if s[0].startswith(prefix + "_") or s[0].upper() == prefix]
         if not scenarios:
             log.error("No scenario in SUITE matching %r — valid names: %s",
                       args.scenario, [s[0] for s in SUITE])
@@ -293,8 +326,8 @@ def main() -> int:
     log.info("Simulating %d symbols over ~%.1fy | %d scenario(s)", len(universe), args.years, len(scenarios))
     ok = False
     for name, slip, mode, gated in scenarios:
-        if name.startswith("E_"):
-            # Earnings-momentum scenario: own engine, own universe, own window.
+        if name.startswith("E"):
+            # Earnings-momentum scenario (E, E2, E3): own engine, own universe, own window.
             if _run_earnings_scenario(cfg, out_dir, args.start_equity, name, slip,
                                       regime_gated=gated) is not None:
                 ok = True
