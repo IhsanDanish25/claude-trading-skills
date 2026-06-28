@@ -31,12 +31,25 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SLIPPAGE_BPS = 0      # default: no slippage. Each fill moves against us by BPS/10000.
 ATR_STOP_MULT = 1.5   # ATR-stop multiple: stop = entry - ATR_STOP_MULT * ATR(14)
 
-# Predefined scenario suite (run with --suite): (name, slippage_bps, stop_mode)
+# Predefined scenario suite (run with --suite): (name, slippage_bps, stop_mode, regime_gated)
+# Scenarios A–D run the VCP composite engine (engine.run_simulation).
+# Scenario E (name prefix "E_") is the earnings-momentum strategy and is routed
+# to its own engine + window via _run_earnings_scenario — see main().
 SUITE = [
-    ("A_control_slip0_flat2pct", 0, "flat"),
-    ("B_slip10_atr", 10, "atr"),
-    ("C_slip20_atr", 20, "atr"),
+    ("A_control_slip0_flat2pct", 0, "flat", False),
+    ("B_slip10_atr", 10, "atr", False),
+    ("C_slip20_atr", 20, "atr", False),
+    ("D_slip10_atr_regime", 10, "atr", True),
+    ("E_earnings_momentum_regime", 10, "atr", True),
 ]
+
+# Scenario E specifics (wider window than B/D for more earnings events).
+E_WINDOW_START = "2024-01-01"
+E_WINDOW_END = "2026-06-26"
+E_HOLD_DAYS = 60
+E_MIN_SURPRISE_PCT = 10.0
+E_MIN_PRICE = 10.0
+E_MIN_AVG_VOLUME = 500_000.0
 
 
 def build_universe(store, years: float) -> list[str]:
@@ -61,14 +74,16 @@ def build_universe(store, years: float) -> list[str]:
     return universe
 
 
-def _run_one(store, universe, cfg, out_dir, start_equity, scenario, slippage_bps, stop_mode):
+def _run_one(store, universe, cfg, out_dir, start_equity, scenario, slippage_bps, stop_mode,
+             regime_gated=False):
     """Run one scenario, write its JSON+PNG, print its table, return the report."""
     from backtest_harness import engine, metrics
 
-    log.info("── Scenario %s | slippage=%dbps | stop=%s ──", scenario, slippage_bps, stop_mode)
+    gate_tag = " | regime-gated" if regime_gated else ""
+    log.info("── Scenario %s | slippage=%dbps | stop=%s%s ──", scenario, slippage_bps, stop_mode, gate_tag)
     pf = engine.run_simulation(store, universe, start_equity=start_equity,
                                slippage_bps=slippage_bps, stop_mode=stop_mode,
-                               atr_stop_mult=ATR_STOP_MULT)
+                               atr_stop_mult=ATR_STOP_MULT, regime_gated=regime_gated)
     if not pf.equity_curve:
         log.error("Scenario %s produced no equity curve — skipping.", scenario)
         return None
@@ -123,6 +138,109 @@ def _run_one(store, universe, cfg, out_dir, start_equity, scenario, slippage_bps
         json.dump(report, f, indent=2)
 
     _print_summary(scenario, slippage_bps, stop_desc, strat, spy, tstats, json_path, png_path)
+    _run_validation_gates(pf, spy_curve)
+    return report
+
+
+def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
+                           regime_gated=True):
+    """Scenario E: earnings-momentum strategy on its own engine + universe + window.
+
+    Sources EPS surprises from FMP (/stable/earnings-calendar, disk-cached),
+    builds an Alpaca-bar store over the reporting names, runs the dedicated
+    earnings simulation (day-after-earnings entry, 60d hold OR ATR(14)x1.5
+    trailing stop), then prints the same summary + validation gates as A–D.
+    engine.run_simulation (scenarios A–D) is not involved."""
+    from backtest_harness import data, earnings_data, earnings_engine, metrics
+
+    gate_tag = " | regime-gated" if regime_gated else ""
+    log.info("── Scenario %s | earnings-momentum | slippage=%dbps | hold=%dd | %s..%s%s ──",
+             scenario, slippage_bps, E_HOLD_DAYS, E_WINDOW_START, E_WINDOW_END, gate_tag)
+
+    # 1. Historical EPS surprises over the (wide) E window — cached on disk.
+    from core.earnings_screener import get_sp500_symbols
+    universe_symbols = get_sp500_symbols()
+    qualifying = earnings_data.get_historical_surprises(
+        universe_symbols, E_WINDOW_START, E_WINDOW_END, min_surprise_pct=E_MIN_SURPRISE_PCT,
+    )
+    syms = sorted({s["symbol"] for s in qualifying})
+    log.info("Scenario %s: %d qualifying surprises (>=%.0f%%), %d unique symbols",
+             scenario, len(qualifying), E_MIN_SURPRISE_PCT, len(syms))
+    if not syms:
+        log.error("Scenario %s: no qualifying earnings surprises — skipping.", scenario)
+        return None
+
+    # 2. Daily bars for the reporting names + SPY. years=3.0 covers the
+    #    2024-01-01 window start plus warmup/ATR from today (no look-ahead;
+    #    the sim only ever reads bars <= as_of).
+    need_syms = list(dict.fromkeys(syms + ["SPY"]))
+    series = data.fetch_and_cache(need_syms, years=3.0)
+    if "SPY" not in series:
+        log.error("Scenario %s: no SPY bars — aborting.", scenario)
+        return None
+    store = data.BarStore(series)
+    data.install_store(store)
+
+    # 3. Run the dedicated earnings-momentum simulation.
+    pf = earnings_engine.run_earnings_simulation(
+        store, qualifying, start_equity=start_equity, slippage_bps=slippage_bps,
+        atr_stop_mult=ATR_STOP_MULT, hold_days=E_HOLD_DAYS, regime_gated=regime_gated,
+        window_start=E_WINDOW_START, window_end=E_WINDOW_END,
+        min_surprise_pct=E_MIN_SURPRISE_PCT, min_price=E_MIN_PRICE,
+        min_avg_volume=E_MIN_AVG_VOLUME,
+    )
+    if not pf.equity_curve:
+        log.error("Scenario %s produced no equity curve — skipping.", scenario)
+        return None
+
+    start_date, end_date = pf.equity_curve[0]["date"], pf.equity_curve[-1]["date"]
+    strat = metrics.equity_stats(pf.equity_curve, "Earnings momentum")
+    tstats = metrics.trade_stats(pf.trades)
+    spy_curve = metrics.spy_buy_hold(store, start_date, end_date, start_equity)
+    spy = metrics.equity_stats(spy_curve, "SPY buy & hold") if spy_curve else {}
+
+    png_path = os.path.join(out_dir, f"equity_curve_{scenario}.png")
+    metrics.plot_equity(pf.equity_curve, spy_curve, png_path,
+                        f"{scenario}: earnings momentum vs SPY  ({start_date} → {end_date})")
+
+    stop_desc = f"ATR(14) × {ATR_STOP_MULT} trailing + {E_HOLD_DAYS}d time stop"
+    report = {
+        "generated": datetime.datetime.now().isoformat(timespec="seconds"),
+        "scenario": scenario,
+        "config": {
+            "strategy": "earnings_momentum",
+            "slippage_bps": slippage_bps,
+            "stop_mode": "atr_trailing",
+            "stop_rule": stop_desc,
+            "atr_stop_mult": ATR_STOP_MULT,
+            "hold_days": E_HOLD_DAYS,
+            "entry_rule": f"buy next-open after EPS surprise >= {E_MIN_SURPRISE_PCT}%",
+            "regime_gated": regime_gated,
+            "liquidity_filter": {"min_price": E_MIN_PRICE, "min_avg_volume": E_MIN_AVG_VOLUME},
+            "signal_source": "yfinance Ticker.get_earnings_dates (S&P 500 universe)",
+            "note": "no look-ahead: entry is next trading day open after report date",
+            "window": {"start": start_date, "end": end_date},
+            "start_equity": start_equity,
+            "n_qualifying_surprises": len(qualifying),
+            "n_universe_symbols": len(syms),
+            "params": {
+                "MAX_POSITION_SIZE_PCT": float(cfg.MAX_POSITION_SIZE_PCT),
+                "MAX_OPEN_POSITIONS": int(cfg.MAX_OPEN_POSITIONS),
+                "STOP_LOSS_PCT": float(cfg.STOP_LOSS_PCT),
+            },
+        },
+        "strategy": strat,
+        "spy_buy_hold": spy,
+        "trade_stats": tstats,
+        "equity_curve": pf.equity_curve,
+        "trades": pf.trades,
+    }
+    json_path = os.path.join(out_dir, f"baseline_{scenario}.json")
+    with open(json_path, "w") as f:
+        json.dump(report, f, indent=2)
+
+    _print_summary(scenario, slippage_bps, stop_desc, strat, spy, tstats, json_path, png_path)
+    _run_validation_gates(pf, spy_curve)
     return report
 
 
@@ -135,6 +253,8 @@ def main() -> int:
     ap.add_argument("--stop-mode", choices=["flat", "atr"], default="flat")
     ap.add_argument("--suite", action="store_true",
                     help="run the predefined 3-scenario suite (control / slip10+atr / slip20+atr)")
+    ap.add_argument("--scenario", type=str, default=None,
+                    help="run only the named scenario or prefix (e.g. E or E_earnings_momentum_regime)")
     args = ap.parse_args()
 
     from backtest_harness import data
@@ -159,11 +279,28 @@ def main() -> int:
     out_dir = os.path.join(REPO, "backtests", f"baseline_{today}")
     os.makedirs(out_dir, exist_ok=True)
 
-    scenarios = SUITE if args.suite else [("single", int(args.slippage_bps), args.stop_mode)]
+    if args.suite:
+        scenarios = SUITE
+    elif args.scenario:
+        prefix = args.scenario.upper().rstrip("_")
+        scenarios = [s for s in SUITE if s[0].startswith(prefix + "_") or s[0].upper() == prefix]
+        if not scenarios:
+            log.error("No scenario in SUITE matching %r — valid names: %s",
+                      args.scenario, [s[0] for s in SUITE])
+            return 1
+    else:
+        scenarios = [("single", int(args.slippage_bps), args.stop_mode, False)]
     log.info("Simulating %d symbols over ~%.1fy | %d scenario(s)", len(universe), args.years, len(scenarios))
     ok = False
-    for name, slip, mode in scenarios:
-        if _run_one(store, universe, cfg, out_dir, args.start_equity, name, slip, mode) is not None:
+    for name, slip, mode, gated in scenarios:
+        if name.startswith("E_"):
+            # Earnings-momentum scenario: own engine, own universe, own window.
+            if _run_earnings_scenario(cfg, out_dir, args.start_equity, name, slip,
+                                      regime_gated=gated) is not None:
+                ok = True
+            continue
+        if _run_one(store, universe, cfg, out_dir, args.start_equity, name, slip, mode,
+                    regime_gated=gated) is not None:
             ok = True
     return 0 if ok else 1
 
@@ -203,6 +340,32 @@ def _print_summary(scenario, slippage_bps, stop_desc, strat, spy, t, json_path, 
     print(_row("JSON", os.path.relpath(json_path, REPO)))
     print(_row("Equity PNG", os.path.relpath(png_path, REPO)))
     print(line + "\n")
+
+
+def _curve_to_daily_returns(curve):
+    """Convert oldest->newest equity curve to daily return decimals."""
+    eq = [p["equity"] for p in (curve or [])]
+    return [(b / a - 1) for a, b in zip(eq[:-1], eq[1:]) if a > 0]
+
+
+def _run_validation_gates(pf, spy_curve):
+    """Bolt validation_gates onto the harness output. Harness logic is unchanged;
+    this only reads pf.equity_curve and spy_curve already produced by the run."""
+    from validation_gates import run_gates
+    strat_rets = _curve_to_daily_returns(pf.equity_curve)
+    spy_rets   = _curve_to_daily_returns(spy_curve)
+    if len(strat_rets) != len(spy_rets) or len(strat_rets) < 2:
+        log.warning("Validation gates skipped: curve length mismatch strat=%d spy=%d",
+                    len(strat_rets), len(spy_rets))
+        return
+    rep = run_gates(
+        strat_daily_returns=strat_rets,
+        spy_daily_returns=spy_rets,
+        n_trades=len(pf.trades),
+        is_return=None,
+        oos_return=None,
+    )
+    print(rep.summary())
 
 
 if __name__ == "__main__":

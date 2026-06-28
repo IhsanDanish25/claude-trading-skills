@@ -149,7 +149,7 @@ def _open_px(store: data.BarStore, sym: str, d: datetime.date, last_px: dict) ->
 
 def run_simulation(store: data.BarStore, universe: list[str], start_equity: float = 100_000.0,
                    warmup: int = 70, slippage_bps: float = 0.0, stop_mode: str = "flat",
-                   atr_stop_mult: float = 1.5) -> Portfolio:
+                   atr_stop_mult: float = 1.5, regime_gated: bool = False) -> Portfolio:
     cal = store.trading_calendar("SPY")
     if len(cal) <= warmup + 1:
         raise RuntimeError(f"Not enough SPY history ({len(cal)} bars) for warmup={warmup}")
@@ -190,23 +190,36 @@ def run_simulation(store: data.BarStore, universe: list[str], start_equity: floa
             held = pf.held_symbols()
             slots = min(MAX_BUYS, MAX_OPEN - len(held))
             if slots > 0:
-                ranked = _select_ranked_candidates(universe, held, entered_today)
-                for c in ranked:
-                    if slots <= 0:
-                        break
-                    sym = c["symbol"]
-                    op = _open_px(store, sym, T, last_px)
-                    if op <= 0:
-                        continue  # no tradable open on T
-                    qty = int((pv_open * MAXP) / op)  # size on observable open
-                    if qty < 1:
-                        continue
-                    basis = buy_fill(op)             # slipped fill price = cost basis
-                    stop = _initial_stop(basis, store, sym, as_of, stop_mode, atr_stop_mult)
-                    pf.lots.append(Lot(sym, T, basis, qty, stop, round(basis * (1 + TP), 2)))
-                    pf.cash -= qty * basis
-                    entered_today.add(sym)
-                    slots -= 1
+                if regime_gated:
+                    spy_bars = [b for b in store.series.get("SPY", [])
+                                if b["date"] <= as_of.isoformat()]
+                    if len(spy_bars) >= 50:
+                        from regime_gate import classify as _regime_classify
+                        _reg = _regime_classify(
+                            [b["high"] for b in spy_bars],
+                            [b["low"]  for b in spy_bars],
+                            [b["close"] for b in spy_bars],
+                        )
+                        if not _reg.can_trade:
+                            slots = 0  # STAND_DOWN: hold existing, no new entries
+                if slots > 0:
+                    ranked = _select_ranked_candidates(universe, held, entered_today)
+                    for c in ranked:
+                        if slots <= 0:
+                            break
+                        sym = c["symbol"]
+                        op = _open_px(store, sym, T, last_px)
+                        if op <= 0:
+                            continue  # no tradable open on T
+                        qty = int((pv_open * MAXP) / op)  # size on observable open
+                        if qty < 1:
+                            continue
+                        basis = buy_fill(op)             # slipped fill price = cost basis
+                        stop = _initial_stop(basis, store, sym, as_of, stop_mode, atr_stop_mult)
+                        pf.lots.append(Lot(sym, T, basis, qty, stop, round(basis * (1 + TP), 2)))
+                        pf.cash -= qty * basis
+                        entered_today.add(sym)
+                        slots -= 1
 
         # ── c. EXITS via OCO bracket (stop-first on same-day double touch) ─────
         survivors: list[Lot] = []

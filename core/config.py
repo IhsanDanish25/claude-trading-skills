@@ -1,8 +1,17 @@
 """
-Central config — reads from env vars (Railway secrets).
+Central config — reads from env vars (Railway secrets) or .env file locally.
 """
 import os
 import sys
+
+try:
+    from dotenv import load_dotenv
+    # Load .env from repo root regardless of working directory.
+    # Existing env vars take precedence (override=False is the default).
+    _dotenv = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    load_dotenv(_dotenv)
+except ImportError:
+    pass
 
 # ── Alpaca ────────────────────────────────────────────────────────────────────
 ALPACA_API_KEY    = os.environ.get("ALPACA_API_KEY", "")

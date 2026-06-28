@@ -78,6 +78,26 @@ def fetch_and_cache(symbols: list[str], years: float = 2.2, force: bool = False)
         else:
             todo.append(s)
 
+    def _bars_to_rows(bars) -> list[dict]:
+        return [{
+            "date":   b.timestamp.date().isoformat(),
+            "open":   float(b.open),
+            "high":   float(b.high),
+            "low":    float(b.low),
+            "close":  float(b.close),
+            "volume": float(b.volume),
+        } for b in bars]
+
+    def _process_resp(resp, syms):
+        for sym in syms:
+            try:
+                rows = _bars_to_rows(resp[sym])
+            except (KeyError, Exception):
+                continue
+            if rows:
+                _save_cached(sym, rows)
+                out[sym] = rows
+
     log.info("cache: %d symbols cached, fetching %d from Alpaca IEX", len(out), len(todo))
     for i in range(0, len(todo), 100):
         chunk = todo[i:i + 100]
@@ -85,25 +105,18 @@ def fetch_and_cache(symbols: list[str], years: float = 2.2, force: bool = False)
             resp = client.get_stock_bars(StockBarsRequest(
                 symbol_or_symbols=chunk, timeframe=TimeFrame.Day,
                 start=start, end=end, feed=DataFeed.IEX))
+            _process_resp(resp, chunk)
         except Exception as e:  # noqa: BLE001
-            log.warning("cache: chunk fetch failed (%s) — symbols: %s", e, chunk)
-            continue
-        for sym in chunk:
-            try:
-                bars = resp[sym]
-            except (KeyError, Exception):
-                continue
-            rows = [{
-                "date":   b.timestamp.date().isoformat(),
-                "open":   float(b.open),
-                "high":   float(b.high),
-                "low":    float(b.low),
-                "close":  float(b.close),
-                "volume": float(b.volume),
-            } for b in bars]
-            if rows:
-                _save_cached(sym, rows)
-                out[sym] = rows
+            # Batch failed (often one invalid symbol); retry each individually.
+            log.warning("cache: chunk failed (%s) — retrying %d symbols individually", e, len(chunk))
+            for sym in chunk:
+                try:
+                    r = client.get_stock_bars(StockBarsRequest(
+                        symbol_or_symbols=sym, timeframe=TimeFrame.Day,
+                        start=start, end=end, feed=DataFeed.IEX))
+                    _process_resp(r, [sym])
+                except Exception:  # noqa: BLE001
+                    pass
     return out
 
 

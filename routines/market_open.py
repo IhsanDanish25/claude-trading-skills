@@ -17,13 +17,168 @@ from core.notifier import send_trade_alert
 from core.edge import circuit_breaker_tripped
 from core import composite
 from core.universe import build_universe
+from circuit_breaker import CircuitBreaker, TradingHalted
+from regime_gate import classify
+from kelly_sizing import KellySizer, stats_from_trades
 
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
 
+
+def _build_breaker(broker: BrokerClient) -> CircuitBreaker:
+    return CircuitBreaker(
+        get_account=broker.get_account,
+        get_positions=broker.get_positions,
+        max_open_positions=3,
+        max_position_pct=0.05,
+        max_daily_loss=0.03,
+    )
+
 DAY_START_PATH = os.path.join(config.STATE_DIR, "day_start_value.json")
 TODAY_BOUGHT_PATH = os.path.join(config.STATE_DIR, "today_bought.json")
+TRADE_LOG_PATH = os.path.join(config.STATE_DIR, "trade_log.jsonl")
 MAX_BUYS       = 3
+KELLY_WINDOW_TRADES = 100
+
+
+def _load_trade_returns(n: int = KELLY_WINDOW_TRADES) -> list[float]:
+    """Last n closed-trade return decimals from state/trade_log.jsonl.
+
+    Entries with a null pnl (still open, or close-event not yet recorded) are
+    skipped — only realized trades contribute to Kelly stats.
+    """
+    if not os.path.exists(TRADE_LOG_PATH):
+        return []
+    out: list[float] = []
+    try:
+        with open(TRADE_LOG_PATH) as f:
+            lines = f.readlines()
+        for line in lines[-n:]:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            pnl = rec.get("pnl_pct")
+            if pnl is None:
+                continue
+            out.append(float(pnl) / 100.0)
+    except OSError as e:
+        log.warning(f"trade_log read failed (non-blocking): {e}")
+    return out
+
+
+def _append_trade_log(entry: dict) -> None:
+    """Append one JSONL record to state/trade_log.jsonl. Non-blocking on error."""
+    try:
+        with open(TRADE_LOG_PATH, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError as e:
+        log.warning(f"trade_log append failed: {e}")
+
+
+def _compute_kelly_shadow(equity: float) -> tuple[float, str]:
+    """Quarter-Kelly shadow. Returns (fraction, reason). fraction is what Kelly
+    WOULD size — the live code does NOT use it. Logs only."""
+    sizer = KellySizer(kelly_fraction=0.25, max_position_pct=0.05)
+    rets = _load_trade_returns()
+    n = len(rets)
+    wr, aw, al, _ = stats_from_trades(rets)
+    res = sizer.size(equity, win_rate=wr, avg_win=aw, avg_loss=al, n_trades=n)
+    return res.fraction, res.reason
+
+
+def _reconcile_closed_trades(broker) -> int:
+    """For each buy row in trade_log.jsonl with pnl_pct=null, look up the matching
+    closed SELL order on Alpaca. If found, fill exit_price/exit_date/pnl_pct in
+    place and rewrite the JSONL. Returns the number of rows reconciled today.
+
+    Called at the top of run() so the rolling-100 stats used by the Kelly shadow
+    reflect realized exits from yesterday and earlier.
+    """
+    if not os.path.exists(TRADE_LOG_PATH):
+        return 0
+    try:
+        with open(TRADE_LOG_PATH) as f:
+            lines = f.readlines()
+    except OSError as e:
+        log.warning(f"trade_log read failed during reconcile: {e}")
+        return 0
+
+    pending = []
+    parsed = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            parsed.append({"_raw": line.rstrip("\n")})
+            continue
+        if rec.get("side") == "buy" and rec.get("pnl_pct") is None and rec.get("symbol"):
+            pending.append(rec)
+        parsed.append(rec)
+
+    if not pending:
+        return 0
+
+    from alpaca.trading.requests import GetOrdersRequest
+    from alpaca.trading.enums import QueryOrderStatus, OrderSide
+
+    symbols = sorted({r["symbol"] for r in pending})
+    try:
+        req = GetOrdersRequest(
+            status=QueryOrderStatus.CLOSED,
+            side=OrderSide.SELL,
+            symbols=symbols,
+            limit=200,
+        )
+        closed_orders = broker.trade.get_orders(filter=req) or []
+    except Exception as e:
+        log.warning(f"closed-order fetch failed (non-blocking): {e}")
+        return 0
+
+    last_sell_by_symbol: dict[str, dict] = {}
+    for o in closed_orders:
+        sym = getattr(o, "symbol", None)
+        filled_at = getattr(o, "filled_at", None) or getattr(o, "submitted_at", None)
+        avg = getattr(o, "filled_avg_price", None)
+        if not sym or avg is None:
+            continue
+        cur = last_sell_by_symbol.get(sym)
+        if cur is None or (filled_at and (cur.get("_ts") or "") < str(filled_at)):
+            last_sell_by_symbol[sym] = {
+                "_ts": str(filled_at) if filled_at else "",
+                "exit_price": float(avg),
+                "exit_date": str(filled_at)[:10] if filled_at else None,
+            }
+
+    reconciled = 0
+    for rec in pending:
+        sym = rec["symbol"]
+        exit_info = last_sell_by_symbol.get(sym)
+        if not exit_info:
+            continue
+        entry_price = rec.get("price")
+        if not entry_price:
+            continue
+        pnl_pct = (exit_info["exit_price"] / float(entry_price) - 1.0) * 100.0
+        rec["exit_price"] = exit_info["exit_price"]
+        rec["exit_date"]  = exit_info["exit_date"]
+        rec["pnl_pct"]    = round(pnl_pct, 4)
+        reconciled += 1
+
+    if reconciled > 0:
+        try:
+            tmp_path = TRADE_LOG_PATH + ".tmp"
+            with open(tmp_path, "w") as f:
+                for rec in parsed:
+                    if "_raw" in rec:
+                        f.write(rec["_raw"] + "\n")
+                    else:
+                        f.write(json.dumps(rec) + "\n")
+            os.replace(tmp_path, TRADE_LOG_PATH)
+        except OSError as e:
+            log.warning(f"trade_log rewrite failed: {e}")
+
+    return reconciled
 
 
 def _load_today_bought() -> set:
@@ -88,6 +243,11 @@ def run():
     logger.banner(log, f"MARKET OPEN ROUTINE — fired {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
 
     broker = BrokerClient()
+    cb = _build_breaker(broker)
+
+    reconciled = _reconcile_closed_trades(broker)
+    if reconciled:
+        log.info(f"Reconciled {reconciled} closed trades from Alpaca order history into trade_log.jsonl")
 
     if not broker.is_market_open():
         log.error("Market is CLOSED — aborting without polling")
@@ -129,6 +289,25 @@ def run():
 
     universe = build_universe()
     log.info(f"Universe: {len(universe)} symbols → screening...")
+
+    try:
+        from core.screener import _fetch_bars
+        spy_bars = (_fetch_bars(["SPY"], days=400) or {}).get("SPY") or []
+    except Exception as e:
+        log.warning(f"Regime gate SPY bars fetch failed (non-blocking): {e}")
+        spy_bars = []
+    if spy_bars:
+        highs  = [b["high"]   for b in spy_bars]
+        lows   = [b["low"]    for b in spy_bars]
+        closes = [b["close"]  for b in spy_bars]
+        reg = classify(highs, lows, closes)
+        log.info(f"Regime gate: state={reg.state} trend={reg.trend} adx={reg.adx:.1f} sma50={reg.sma50:.2f} sma200={reg.sma200:.2f} reason={reg.reason}")
+        if not reg.can_trade:
+            log.warning(f"REGIME GATE: STAND_DOWN — {reg.reason} — holding cash, no screening")
+            return
+    else:
+        log.warning("Regime gate skipped: no SPY bars available — proceeding without gate")
+
     candidates = screen(universe)
     log.info(f"Got {len(candidates)} candidates")
 
@@ -220,8 +399,16 @@ def run():
         size_pct = config.MAX_POSITION_SIZE_PCT
         amount   = pv * size_pct
 
+        kelly_frac, kelly_reason = _compute_kelly_shadow(pv)
+        log.info(f"KELLY_SHADOW {sym} | would_size={kelly_frac:.2%} | flat_size={size_pct:.2%} | diff={kelly_frac - size_pct:+.2%} | {kelly_reason}")
+
         log.info(f"BUYING {sym} | composite={comp:.1f} (vcp={score}) | size={size_pct*100:.0f}% | ${amount:,.0f}")
         try:
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+            except TradingHalted as halt:
+                log.warning(f"✗ {sym} blocked by circuit breaker: {halt.reason} — {halt}")
+                continue
             result = broker.buy(sym, dollar_amount=amount)
             if result.get("blocked"):
                 log.warning(f"✗ {sym} buy blocked by guardrail: {result.get('reason')}")
@@ -249,6 +436,18 @@ def run():
                 reason=f"composite={comp:.1f} VCP={score}" + (f" RS{rs:+.0f}%" if rs is not None else ""),
             )
             _mark_bought(sym, result)
+            _append_trade_log({
+                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                "symbol": sym,
+                "side": "buy",
+                "qty": result.get("qty"),
+                "price": result.get("price"),
+                "stop": result.get("stop"),
+                "target": result.get("target"),
+                "exit_date": None,
+                "exit_price": None,
+                "pnl_pct": None,
+            })
             buys_taken += 1
         except Exception as e:
             log.error(f"✗ {sym} buy failed: {e}")
