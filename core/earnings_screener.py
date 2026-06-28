@@ -35,28 +35,60 @@ def compute_surprise_pct(actual, estimated) -> float | None:
 
 
 def get_sp500_symbols() -> list[str]:
-    """Fetch current S&P 500 constituents from Wikipedia.
-    Falls back to a hardcoded top-100 by market cap if Wikipedia is unreachable."""
+    """Fetch current S&P 500 constituents (~503 symbols).
+
+    Sources tried in order:
+      1. DataHub CSV (GitHub raw) — reliable, no bot-block
+      2. Wikipedia HTML table — often Cloudflare-blocked
+      3. Hardcoded top-200 by market cap — offline fallback
+    """
+    import pandas as pd
+
+    # 1. DataHub (most reliable — plain CSV, no scraping)
     try:
-        import pandas as pd
+        df = pd.read_csv(
+            "https://raw.githubusercontent.com/datasets/s-and-p-500-companies"
+            "/main/data/constituents.csv"
+        )
+        syms = df["Symbol"].str.replace(".", "-", regex=False).tolist()
+        if len(syms) > 400:
+            log.info("S&P 500 from DataHub: %d symbols", len(syms))
+            return syms
+    except Exception as e:
+        log.debug("DataHub S&P 500 fetch failed: %s", e)
+
+    # 2. Wikipedia
+    try:
         table = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
         syms = table["Symbol"].str.replace(".", "-", regex=False).tolist()
-        log.info("S&P 500 from Wikipedia: %d symbols", len(syms))
-        return syms
+        if len(syms) > 400:
+            log.info("S&P 500 from Wikipedia: %d symbols", len(syms))
+            return syms
     except Exception as e:
-        log.warning("Wikipedia S&P 500 fetch failed (%s) — using hardcoded top-100", e)
-        return [
-            "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "JPM",
-            "LLY", "UNH", "V", "XOM", "COST", "MA", "HD", "WMT", "NFLX", "PG",
-            "JNJ", "ORCL", "ABBV", "CRM", "BAC", "AMD", "MRK", "CVX", "KO", "PEP",
-            "ADBE", "TMO", "LIN", "ACN", "MCD", "CSCO", "WFC", "ABT", "GE", "DHR",
-            "TXN", "IBM", "INTU", "AMGN", "QCOM", "NEE", "RTX", "PM", "VZ", "LOW",
-            "UBER", "ISRG", "SPGI", "GS", "BKNG", "MS", "ELV", "COP", "CAT", "SYK",
-            "MDT", "T", "DE", "BLK", "PFE", "ADP", "SCHW", "C", "GILD", "AMAT",
-            "SBUX", "ADI", "MDLZ", "MMC", "VRTX", "LRCX", "AMT", "CI", "MU", "AXP",
-            "PLD", "SO", "ETN", "ZTS", "CB", "NOW", "REGN", "TJX", "BSX", "DUK",
-            "EOG", "PH", "KLAC", "HUM", "PANW", "ITW", "MO", "GEV", "CME", "USB",
-        ]
+        log.debug("Wikipedia S&P 500 fetch failed: %s", e)
+
+    # 3. Hardcoded top-200 by market cap (offline fallback)
+    log.warning("All S&P 500 sources failed — using hardcoded top-200")
+    return [
+        "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","JPM","LLY",
+        "UNH","V","XOM","COST","MA","HD","WMT","NFLX","PG","JNJ","ORCL","ABBV",
+        "CRM","BAC","AMD","MRK","CVX","KO","PEP","ADBE","TMO","LIN","ACN","MCD",
+        "CSCO","WFC","ABT","GE","DHR","TXN","IBM","INTU","AMGN","QCOM","NEE",
+        "RTX","PM","VZ","LOW","UBER","ISRG","SPGI","GS","BKNG","MS","ELV","COP",
+        "CAT","SYK","MDT","T","DE","BLK","PFE","ADP","SCHW","C","GILD","AMAT",
+        "SBUX","ADI","MDLZ","MMC","VRTX","LRCX","AMT","CI","MU","AXP","PLD",
+        "SO","ETN","ZTS","CB","NOW","REGN","TJX","BSX","DUK","EOG","PH","KLAC",
+        "HUM","PANW","ITW","MO","GEV","CME","USB","MMM","AOS","AFL","A","APD",
+        "ABNB","AKAM","ALB","ARE","ALGN","LNT","ALL","GOOGL","GOOG","MO","AMCR",
+        "AEE","AAL","AEP","AIG","AME","AMGN","APH","ADM","ANET","AJG","AIZ",
+        "ATO","ADSK","AZO","AVB","AVY","AXON","BKR","BALL","BAX","BBY","BIO",
+        "TECH","BLK","BX","BA","BCH","BKNG","BWA","BSX","BMY","AVGO","BR","BRO",
+        "BLDR","BG","CHRW","CDNS","CZR","CPT","CPB","COF","CAH","KMX","CCL",
+        "CARR","CTLT","CAT","CBRE","CDW","CE","CNC","CNP","CF","CHTR","CVX",
+        "CMG","CB","CHD","CI","CINF","CTAS","CSCO","C","CFG","CLX","CME","CMS",
+        "KO","CTSH","CL","CMCSA","CMA","CAG","COP","ED","STZ","CEG","COO","CPRT",
+        "GLW","CPAY","CTVA","CSGP","CS","DHI","DHR","DRI","DVA","DAY","DECK",
+    ]
 
 
 def fetch_symbol_earnings(symbol: str, sleep: bool = True) -> list[dict] | None:
