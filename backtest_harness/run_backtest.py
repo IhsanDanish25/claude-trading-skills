@@ -62,7 +62,7 @@ E_CONFIGS: dict[str, dict] = {
     "E_earnings_momentum_regime": {"atr_stop_mult": 1.5, "trailing_stop": True,  "fixed_stop_pct": None,  "spy_overlay": False},
     "E2_earnings_wide_stop":      {"atr_stop_mult": 3.0, "trailing_stop": True,  "fixed_stop_pct": None,  "spy_overlay": False},
     "E3_earnings_time_only":      {"atr_stop_mult": 1.5, "trailing_stop": False, "fixed_stop_pct": 0.15,  "spy_overlay": False},
-    "E4_earnings_portable_alpha": {"atr_stop_mult": 1.5, "trailing_stop": False, "fixed_stop_pct": 0.15,  "spy_overlay": True},
+    "E4_earnings_portable_alpha": {"atr_stop_mult": 1.5, "trailing_stop": False, "fixed_stop_pct": 0.15,  "spy_overlay": True, "window_start": "2023-01-01"},
 }
 
 
@@ -174,16 +174,17 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
     fixed_stop_pct   = ecfg["fixed_stop_pct"]
     spy_overlay      = ecfg.get("spy_overlay", False)
     min_surprise_pct = ecfg.get("min_surprise_pct", E_MIN_SURPRISE_PCT)
+    window_start     = ecfg.get("window_start", E_WINDOW_START)
 
     gate_tag = " | regime-gated" if regime_gated else ""
     log.info("── Scenario %s | earnings-momentum | slippage=%dbps | hold=%dd | %s..%s%s ──",
-             scenario, slippage_bps, E_HOLD_DAYS, E_WINDOW_START, E_WINDOW_END, gate_tag)
+             scenario, slippage_bps, E_HOLD_DAYS, window_start, E_WINDOW_END, gate_tag)
 
     # 1. Historical EPS surprises over the (wide) E window — cached on disk.
     from core.earnings_screener import get_sp500_symbols
     universe_symbols = get_sp500_symbols()
     qualifying = earnings_data.get_historical_surprises(
-        universe_symbols, E_WINDOW_START, E_WINDOW_END, min_surprise_pct=min_surprise_pct,
+        universe_symbols, window_start, E_WINDOW_END, min_surprise_pct=min_surprise_pct,
     )
     syms = sorted({s["symbol"] for s in qualifying})
     log.info("Scenario %s: %d qualifying surprises (>=%.0f%%), %d unique symbols",
@@ -207,7 +208,7 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
     pf = earnings_engine.run_earnings_simulation(
         store, qualifying, start_equity=start_equity, slippage_bps=slippage_bps,
         atr_stop_mult=atr_stop_mult, hold_days=E_HOLD_DAYS, regime_gated=regime_gated,
-        window_start=E_WINDOW_START, window_end=E_WINDOW_END,
+        window_start=window_start, window_end=E_WINDOW_END,
         min_surprise_pct=min_surprise_pct, min_price=E_MIN_PRICE,
         min_avg_volume=E_MIN_AVG_VOLUME,
         trailing_stop=trailing_stop, fixed_stop_pct=fixed_stop_pct,
