@@ -100,5 +100,10 @@ PEAD_MIN_PRICE        = float(os.environ.get("PEAD_MIN_PRICE", "10.0"))
 PEAD_MIN_AVG_VOLUME   = float(os.environ.get("PEAD_MIN_AVG_VOLUME", "500000"))
 PEAD_SIZE_PCT         = float(os.environ.get("PEAD_SIZE_PCT", "0.05"))
 
+# ── E4 Portable Alpha: idle cash → SPY ───────────────────────────────────────
+SPY_BASE_ENABLED      = os.environ.get("SPY_BASE_ENABLED", "true").lower() == "true"
+SPY_CASH_RESERVE_PCT  = float(os.environ.get("SPY_CASH_RESERVE_PCT", "0.10"))  # keep 10% cash buffer
+SPY_REBALANCE_BAND    = float(os.environ.get("SPY_REBALANCE_BAND", "0.05"))    # rebalance if off by 5%+
+
 # ── Timezone ──────────────────────────────────────────────────────────────────
 TIMEZONE = "America/New_York"

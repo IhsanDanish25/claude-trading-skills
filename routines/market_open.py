@@ -22,6 +22,7 @@ from regime_gate import classify
 from kelly_sizing import KellySizer, stats_from_trades
 from core.earnings_screener import screen_earnings
 from core.pead_tracker import add_position as pead_track
+from core.spy_base import rebalance_to_spy, free_cash_for_pead, log_status as spy_log
 
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
@@ -279,6 +280,11 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today):
         log.info(f"PEAD BUY {sym} | surprise={surprise:+.1f}% | "
                  f"size={size_pct*100:.0f}% | ${amount:,.0f}")
         try:
+            # Free SPY cash if needed for this PEAD entry
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"✗ {sym} SKIP — cannot free ${amount:,.0f} from SPY base")
+                continue
+
             try:
                 cb.check_before_order(intended_notional=amount, symbol=sym)
             except TradingHalted as halt:
@@ -341,6 +347,12 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today):
             log.error(f"✗ PEAD {sym} buy failed: {e}")
 
     log.info(f"PEAD complete | Buys taken: {buys_taken}")
+
+    # Rebalance idle cash back into SPY
+    spy_log(broker)
+    spy_result = rebalance_to_spy(broker)
+    if spy_result["action"] not in ("none", "disabled"):
+        log.info(f"SPY base: {spy_result['action']} {spy_result.get('qty', 0)} shares")
 
 
 def run():

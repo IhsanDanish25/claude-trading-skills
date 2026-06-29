@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy all code
+COPY . .
+
+# Make modules importable
+RUN touch routines/__init__.py core/__init__.py
+
+# Worker service: trading daemon (no PORT needed)
+CMD ["python3", "worker.py"]

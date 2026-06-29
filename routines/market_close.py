@@ -21,6 +21,7 @@ from core.fmp      import get_quotes, get_market_breadth, get_daily_bars
 from core.analyst  import review_open_positions, analyze_market_regime, detect_ftd
 from core.notifier import send_eod_summary, send_trade_alert
 from core.pead_tracker import get_expired, remove_position as pead_untrack, get_all as pead_all
+from core.spy_base import log_status as spy_log
 
 log = logger.setup("market_close")
 ET  = pytz.timezone("America/New_York")
@@ -263,6 +264,9 @@ def run():
         ftd_detected=ftd_result.get("ftd_detected", False),
         force_closed=force_close,
     )
+
+    # ── SPY base EOD status ────────────────────────────────────────────────
+    spy_log(broker)
 
     logger.banner(log, "MARKET CLOSE COMPLETE")
 

@@ -20,6 +20,7 @@ from core.fmp      import get_quotes, get_market_breadth
 from core.analyst  import review_open_positions, analyze_market_regime, score_vcp_candidates
 from core.screener import screen
 from core.edge     import should_pyramid, compute_trail_stop, circuit_breaker_tripped
+from core.spy_base import rebalance_to_spy, log_status as spy_log
 
 log = logger.setup("midday")
 ET  = pytz.timezone("America/New_York")
@@ -289,6 +290,12 @@ def run():
     log.info(f"── Midday summary")
     log.info(f"  Positions: {len(positions_after)}")
     log.info(f"  Total unrealized P&L: ${total_unrealized:+,.2f}")
+
+    # ── SPY base rebalance ─────────────────────────────────────────────────
+    spy_log(broker)
+    spy_result = rebalance_to_spy(broker)
+    if spy_result["action"] not in ("none", "disabled"):
+        log.info(f"SPY base midday: {spy_result['action']} {spy_result.get('qty', 0)} shares")
 
     logger.banner(log, "MIDDAY REVIEW COMPLETE")
 
