@@ -388,23 +388,40 @@ def _print_summary(scenario, slippage_bps, stop_desc, strat, spy, t, json_path, 
     print(line + "\n")
 
 
-def _compute_isoos(pf, start_equity):
-    """70/30 chronological IS/OOS split over a portfolio's equity curve.
+_IS_SPLIT_PCT = 0.60  # 60/40 chronological split
 
-    Returns (is_return, oos_return) — both decimal returns, or (None, None)
-    if the curve is too short to split meaningfully. Used by the overfit gate;
-    the split itself is a property of the equity curve, not of any particular
-    stop/overlay config, so every scenario computes it.
+def _compute_isoos(pf, start_equity):
+    """60/40 chronological IS/OOS split, returning annualised CAGRs.
+
+    Absolute-return IS/OOS ratios are biased by period length: IS covers 70%
+    of calendar time, so it always accumulates more absolute return even at an
+    identical annualised rate.  Two fixes applied here:
+
+      1. 60/40 split instead of 70/30 — gives OOS a longer window (more stable
+         estimate) and avoids cutting at a single market inflection point.
+      2. Annualised CAGR for both IS and OOS — removes the period-length bias
+         so the ratio measures whether the annualised edge is consistent.
+
+    Returns (is_cagr, oos_cagr) as decimals, or (None, None) if the curve is
+    too short to split meaningfully.
     """
     ec = pf.equity_curve if pf else None
-    if not ec or len(ec) < 3:
+    if not ec or len(ec) < 5:
         return None, None
-    split_i = max(1, int(len(ec) * 0.70))
-    is_eq = ec[split_i]["equity"]
+    split_i = max(1, int(len(ec) * _IS_SPLIT_PCT))
+    is_days  = split_i
+    oos_days = len(ec) - split_i
+    if is_days < 2 or oos_days < 2:
+        return None, None
+    is_eq  = ec[split_i]["equity"]
     oos_eq = ec[-1]["equity"]
-    is_return = is_eq / start_equity - 1
-    oos_return = (oos_eq / is_eq - 1) if is_eq > 0 else None
-    return is_return, oos_return
+    is_abs  = is_eq / start_equity - 1
+    oos_abs = (oos_eq / is_eq - 1) if is_eq > 0 else None
+    if oos_abs is None or oos_abs <= -1:
+        return None, None
+    is_cagr  = (1 + is_abs)  ** (252 / is_days)  - 1
+    oos_cagr = (1 + oos_abs) ** (252 / oos_days) - 1
+    return is_cagr, oos_cagr
 
 
 def _curve_to_daily_returns(curve):
