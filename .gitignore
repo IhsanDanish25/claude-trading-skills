@@ -40,6 +40,9 @@ reviews/
 state/
 .auto_trader_state.json
 
+# Backtest runtime caches (generated data, hundreds of files)
+backtest_harness/cache/
+
 # CI artifacts
 htmlcov/
 .coverage
