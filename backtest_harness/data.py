@@ -19,6 +19,9 @@ log = logging.getLogger("backtest.data")
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+YF_CACHE_DIR = os.path.join(CACHE_DIR, "yf")
+os.makedirs(YF_CACHE_DIR, exist_ok=True)
+
 # Index + sector ETFs the composite regime/sector context needs, plus SPY for
 # the screener's RS-vs-SPY and the buy-and-hold benchmark.
 INDEX_SYMBOLS = ["SPY", "QQQ", "IWM"]
@@ -117,6 +120,76 @@ def fetch_and_cache(symbols: list[str], years: float = 2.2, force: bool = False)
                     _process_resp(r, [sym])
                 except Exception:  # noqa: BLE001
                     pass
+    return out
+
+
+# ── yfinance bar fetcher (4y+ history, no API key) ───────────────────────────
+def _yf_cache_path(symbol: str) -> str:
+    return os.path.join(YF_CACHE_DIR, f"{symbol.upper()}.json")
+
+
+def _load_cached_yf(symbol: str) -> list[dict]:
+    p = _yf_cache_path(symbol)
+    if not os.path.exists(p):
+        return []
+    try:
+        with open(p) as f:
+            return json.load(f).get("bars", [])
+    except (ValueError, OSError):
+        return []
+
+
+def fetch_and_cache_yf(
+    symbols: list[str],
+    years: float = 4.0,
+    force: bool = False,
+    sleep: float = 0.3,
+) -> dict[str, list[dict]]:
+    """Fetch daily OHLCV bars via yfinance and cache in cache/yf/.
+
+    Covers 4y+ history (no API key). Used by E-series so significance gate
+    has enough data. Cache is separate from Alpaca cache (cache/yf/{SYM}.json).
+    """
+    import time
+    import yfinance as yf
+
+    period = f"{max(1, int(math.ceil(years)))+1}y"
+    out: dict[str, list[dict]] = {}
+    todo: list[str] = []
+    for s in symbols:
+        cached = _load_cached_yf(s)
+        if cached and not force:
+            out[s] = cached
+        else:
+            todo.append(s)
+
+    log.info("yf-cache: %d symbols cached, fetching %d from yfinance", len(out), len(todo))
+    for i, sym in enumerate(todo):
+        try:
+            hist = yf.Ticker(sym).history(period=period, interval="1d", auto_adjust=True)
+            if hist is None or hist.empty:
+                continue
+            rows = []
+            for ts, row in hist.iterrows():
+                rows.append({
+                    "date":   ts.date().isoformat(),
+                    "open":   round(float(row["Open"]),   4),
+                    "high":   round(float(row["High"]),   4),
+                    "low":    round(float(row["Low"]),    4),
+                    "close":  round(float(row["Close"]),  4),
+                    "volume": float(row["Volume"]),
+                })
+            if rows:
+                with open(_yf_cache_path(sym), "w") as f:
+                    json.dump({"symbol": sym.upper(), "bars": rows}, f)
+                out[sym] = rows
+        except Exception as e:  # noqa: BLE001
+            log.warning("yf-cache: %s failed (%s)", sym, e)
+        if sleep and i < len(todo) - 1:
+            time.sleep(sleep)
+        if (i + 1) % 50 == 0:
+            log.info("yf-cache: fetched %d/%d symbols", i + 1, len(todo))
+
     return out
 
 

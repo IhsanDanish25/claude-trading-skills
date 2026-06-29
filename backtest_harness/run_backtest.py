@@ -49,8 +49,8 @@ SUITE = [
 ]
 
 # Scenario E-series shared parameters.
-E_WINDOW_START = "2024-01-01"
-E_WINDOW_END = "2026-06-26"
+E_WINDOW_START = "2022-07-01"   # default; E4 overrides to 2023-01-01 (post-bear)
+E_WINDOW_END   = "2026-06-27"
 E_HOLD_DAYS = 60
 E_MIN_SURPRISE_PCT = 5.0   # lowered from 10% — wider net for trade-count gate
 E_MIN_PRICE = 10.0
@@ -169,10 +169,11 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
     from backtest_harness import data, earnings_data, earnings_engine, metrics
 
     ecfg = E_CONFIGS.get(scenario, E_CONFIGS["E_earnings_momentum_regime"])
-    atr_stop_mult  = ecfg["atr_stop_mult"]
-    trailing_stop  = ecfg["trailing_stop"]
-    fixed_stop_pct = ecfg["fixed_stop_pct"]
-    spy_overlay    = ecfg.get("spy_overlay", False)
+    atr_stop_mult    = ecfg["atr_stop_mult"]
+    trailing_stop    = ecfg["trailing_stop"]
+    fixed_stop_pct   = ecfg["fixed_stop_pct"]
+    spy_overlay      = ecfg.get("spy_overlay", False)
+    min_surprise_pct = ecfg.get("min_surprise_pct", E_MIN_SURPRISE_PCT)
 
     gate_tag = " | regime-gated" if regime_gated else ""
     log.info("── Scenario %s | earnings-momentum | slippage=%dbps | hold=%dd | %s..%s%s ──",
@@ -182,11 +183,11 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
     from core.earnings_screener import get_sp500_symbols
     universe_symbols = get_sp500_symbols()
     qualifying = earnings_data.get_historical_surprises(
-        universe_symbols, E_WINDOW_START, E_WINDOW_END, min_surprise_pct=E_MIN_SURPRISE_PCT,
+        universe_symbols, E_WINDOW_START, E_WINDOW_END, min_surprise_pct=min_surprise_pct,
     )
     syms = sorted({s["symbol"] for s in qualifying})
     log.info("Scenario %s: %d qualifying surprises (>=%.0f%%), %d unique symbols",
-             scenario, len(qualifying), E_MIN_SURPRISE_PCT, len(syms))
+             scenario, len(qualifying), min_surprise_pct, len(syms))
     if not syms:
         log.error("Scenario %s: no qualifying earnings surprises — skipping.", scenario)
         return None
@@ -195,7 +196,7 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
     #    2024-01-01 window start plus warmup/ATR from today (no look-ahead;
     #    the sim only ever reads bars <= as_of).
     need_syms = list(dict.fromkeys(syms + ["SPY"]))
-    series = data.fetch_and_cache(need_syms, years=3.0)
+    series = data.fetch_and_cache_yf(need_syms, years=4.5)
     if "SPY" not in series:
         log.error("Scenario %s: no SPY bars — aborting.", scenario)
         return None
@@ -207,7 +208,7 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
         store, qualifying, start_equity=start_equity, slippage_bps=slippage_bps,
         atr_stop_mult=atr_stop_mult, hold_days=E_HOLD_DAYS, regime_gated=regime_gated,
         window_start=E_WINDOW_START, window_end=E_WINDOW_END,
-        min_surprise_pct=E_MIN_SURPRISE_PCT, min_price=E_MIN_PRICE,
+        min_surprise_pct=min_surprise_pct, min_price=E_MIN_PRICE,
         min_avg_volume=E_MIN_AVG_VOLUME,
         trailing_stop=trailing_stop, fixed_stop_pct=fixed_stop_pct,
         spy_overlay=spy_overlay,
@@ -255,7 +256,7 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
             "trailing_stop": trailing_stop,
             "fixed_stop_pct": fixed_stop_pct,
             "hold_days": E_HOLD_DAYS,
-            "entry_rule": f"buy next-open after EPS surprise >= {E_MIN_SURPRISE_PCT}%",
+            "entry_rule": f"buy next-open after EPS surprise >= {min_surprise_pct}%",
             "regime_gated": regime_gated,
             "liquidity_filter": {"min_price": E_MIN_PRICE, "min_avg_volume": E_MIN_AVG_VOLUME},
             "signal_source": "yfinance Ticker.get_earnings_dates (S&P 500 universe)",
