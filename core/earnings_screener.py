@@ -91,6 +91,56 @@ def get_sp500_symbols() -> list[str]:
     ]
 
 
+def _fetch_fmp_earnings(symbol: str) -> list[dict] | None:
+    """Fetch historical EPS surprises from FMP /api/v3/earnings-surprises.
+
+    Returns same shape as the yfinance path: [{date, eps_estimate,
+    reported_eps, surprise_pct}], or None on error.
+    FMP_API_KEY must be set; silently returns None if absent.
+    """
+    import os
+    import requests
+
+    api_key = os.environ.get("FMP_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        r = requests.get(
+            f"https://financialmodelingprep.com/api/v3/earnings-surprises/{symbol}",
+            params={"apikey": api_key},
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, list):
+            return None
+        rows = []
+        for item in data:
+            date_str = item.get("date")
+            actual = item.get("actualEarningResult")
+            estimated = item.get("estimatedEarning")
+            if not date_str or actual is None:
+                continue
+            try:
+                reported = float(actual)
+            except (TypeError, ValueError):
+                continue
+            try:
+                eps_est = float(estimated) if estimated is not None else None
+            except (TypeError, ValueError):
+                eps_est = None
+            rows.append({
+                "date": date_str,
+                "eps_estimate": eps_est,
+                "reported_eps": reported,
+                "surprise_pct": compute_surprise_pct(reported, eps_est),
+            })
+        return rows
+    except Exception as e:
+        log.warning("FMP earnings fetch failed for %s: %s", symbol, e)
+        return None
+
+
 def fetch_symbol_earnings(symbol: str, sleep: bool = True) -> list[dict] | None:
     """Fetch earnings history for one symbol via yfinance (no disk cache).
 
@@ -98,6 +148,7 @@ def fetch_symbol_earnings(symbol: str, sleep: bool = True) -> list[dict] | None:
     an empty list if the symbol has no reported earnings (e.g. ETFs).
     Returns None on fetch error — callers should NOT cache None results so
     the next run retries.  Future reports (no Reported EPS yet) are skipped.
+    Falls back to FMP /api/v3/earnings-surprises when yfinance fails.
     """
     try:
         import yfinance as yf
@@ -144,8 +195,14 @@ def fetch_symbol_earnings(symbol: str, sleep: bool = True) -> list[dict] | None:
             time.sleep(_SLEEP_BETWEEN_SYMBOLS)
         return rows
     except Exception as e:
-        log.warning("yfinance earnings fetch failed for %s: %s", symbol, e)
-        return None  # do not cache — caller will retry next run
+        log.warning("yfinance earnings fetch failed for %s: %s — trying FMP fallback", symbol, e)
+
+    # FMP fallback — only reached when yfinance raises
+    result = _fetch_fmp_earnings(symbol)
+    if result is not None:
+        log.info("FMP fallback succeeded for %s (%d rows)", symbol, len(result))
+        return result
+    return None  # do not cache — caller will retry next run
 
 
 def _liquidity(symbols: list[str], lookback: int = 20) -> dict[str, dict]:

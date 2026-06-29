@@ -17,13 +17,16 @@ Memory is logged each tick so OOM trends are visible before the kill.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import resource
 import signal
 import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +40,28 @@ SHUTDOWN_GRACE_SECONDS = 8  # must beat Railway's 10s SIGKILL window
 
 # Set by SIGTERM/SIGINT handler. Checked at the top of every sleep + tick.
 _shutdown_requested = False
+
+# Updated after each scheduler tick; read by the heartbeat handler.
+_last_tick: str = "never"
+
+
+class _HeartbeatHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"status": "alive", "last_tick": _last_tick}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):  # suppress per-request access logs
+        pass
+
+
+def _start_heartbeat(port: int) -> None:
+    server = HTTPServer(("0.0.0.0", port), _HeartbeatHandler)
+    threading.Thread(target=server.serve_forever, daemon=True, name="heartbeat").start()
+    log.info("Heartbeat server listening on port %d", port)
 
 
 def _request_shutdown(signum, frame):
@@ -193,8 +218,13 @@ def startup_rebalance() -> None:
 
 
 def main() -> None:
+    global _last_tick
+
     signal.signal(signal.SIGTERM, _request_shutdown)
     signal.signal(signal.SIGINT, _request_shutdown)
+
+    port = int(os.environ.get("PORT", "8080"))
+    _start_heartbeat(port)
 
     startup_health_check()
     startup_rebalance()
@@ -217,6 +247,8 @@ def main() -> None:
             log.error("Scheduler timed out after 540s")
         except Exception as exc:
             log.error("Scheduler failed: %s", exc)
+
+        _last_tick = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
         # Periodic memory observation so OOM trends are visible before kill.
         if tick_count % 5 == 0:
