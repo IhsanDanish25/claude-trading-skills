@@ -152,7 +152,8 @@ def _run_one(store, universe, cfg, out_dir, start_equity, scenario, slippage_bps
         json.dump(report, f, indent=2)
 
     _print_summary(scenario, slippage_bps, stop_desc, strat, spy, tstats, json_path, png_path)
-    _run_validation_gates(pf, spy_curve)
+    is_return_val, oos_return_val = _compute_isoos(pf, start_equity)
+    _run_validation_gates(pf, spy_curve, is_return=is_return_val, oos_return=oos_return_val)
     return report
 
 
@@ -238,16 +239,9 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
         stop_desc += " + SPY idle overlay"
         stop_mode_tag += "_spy_overlay"
 
-    # IS/OOS split (70/30 chronological) — used by overfit gate for E4+.
-    is_return_val = None
-    oos_return_val = None
-    if spy_overlay and len(pf.equity_curve) >= 3:
-        ec = pf.equity_curve
-        split_i = max(1, int(len(ec) * 0.70))
-        is_eq = ec[split_i]["equity"]
-        oos_eq = ec[-1]["equity"]
-        is_return_val = is_eq / start_equity - 1
-        oos_return_val = (oos_eq / is_eq - 1) if is_eq > 0 else None
+    # IS/OOS split (70/30 chronological) — feeds the overfit gate for every
+    # scenario, not just E4. See _compute_isoos for the calculation.
+    is_return_val, oos_return_val = _compute_isoos(pf, start_equity)
 
     report = {
         "generated": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -392,6 +386,25 @@ def _print_summary(scenario, slippage_bps, stop_desc, strat, spy, t, json_path, 
     print(_row("JSON", os.path.relpath(json_path, REPO)))
     print(_row("Equity PNG", os.path.relpath(png_path, REPO)))
     print(line + "\n")
+
+
+def _compute_isoos(pf, start_equity):
+    """70/30 chronological IS/OOS split over a portfolio's equity curve.
+
+    Returns (is_return, oos_return) — both decimal returns, or (None, None)
+    if the curve is too short to split meaningfully. Used by the overfit gate;
+    the split itself is a property of the equity curve, not of any particular
+    stop/overlay config, so every scenario computes it.
+    """
+    ec = pf.equity_curve if pf else None
+    if not ec or len(ec) < 3:
+        return None, None
+    split_i = max(1, int(len(ec) * 0.70))
+    is_eq = ec[split_i]["equity"]
+    oos_eq = ec[-1]["equity"]
+    is_return = is_eq / start_equity - 1
+    oos_return = (oos_eq / is_eq - 1) if is_eq > 0 else None
+    return is_return, oos_return
 
 
 def _curve_to_daily_returns(curve):
