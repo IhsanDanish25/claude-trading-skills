@@ -23,6 +23,7 @@ from __future__ import annotations
 import bisect
 import datetime
 import logging
+import math
 
 from backtest_harness import data
 from backtest_harness.engine import Lot, Portfolio, _atr14
@@ -73,6 +74,7 @@ def run_earnings_simulation(
     min_avg_volume: float = 500_000.0,
     trailing_stop: bool = True,
     fixed_stop_pct: float | None = None,
+    spy_overlay: bool = False,
 ) -> Portfolio:
     cal = store.trading_calendar("SPY")
     if len(cal) <= warmup + 1:
@@ -98,6 +100,7 @@ def run_earnings_simulation(
     pf = Portfolio(cash=start_equity)
     last_px: dict[str, float] = {}
     slip = slippage_bps / 10_000.0
+    spy_shares: float = 0.0  # idle cash invested in SPY (E4 portable-alpha overlay)
     buy_fill = lambda px: px * (1 + slip)    # noqa: E731
     sell_fill = lambda px: px * (1 - slip)   # noqa: E731
     MAXP, MAX_OPEN = config.MAX_POSITION_SIZE_PCT, config.MAX_OPEN_POSITIONS
@@ -135,7 +138,10 @@ def run_earnings_simulation(
 
         # ── ENTRIES: day-after-earnings, filled at T open ─────────────────────
         if allow_entries and entries_by_day.get(T):
+            spy_op = _open_px("SPY") if spy_overlay else 0.0
             pv_open = pf.cash + sum(l.qty * _open_px(l.symbol) for l in pf.lots)
+            if spy_overlay:
+                pv_open += spy_shares * spy_op
             held = pf.held_symbols()
             for s in entries_by_day[T]:
                 if len(pf.lots) >= MAX_OPEN:
@@ -155,14 +161,22 @@ def run_earnings_simulation(
                 if qty < 1:
                     continue
                 basis = buy_fill(op)
-                if pf.cash < qty * basis:
+                cost = qty * basis
+                # SPY overlay: liquidate SPY at open to cover shortfall before entry
+                if spy_overlay and pf.cash < cost and spy_shares > 0 and spy_op > 0:
+                    shortfall = cost - pf.cash
+                    spy_sell_px = sell_fill(spy_op)
+                    shares_to_sell = min(spy_shares, math.ceil(shortfall / spy_sell_px))
+                    spy_shares -= shares_to_sell
+                    pf.cash += round(shares_to_sell * spy_sell_px, 2)
+                if pf.cash < cost:
                     continue
                 if fixed_stop_pct is not None:
                     stop = round(basis * (1 - fixed_stop_pct), 2)
                 else:
                     stop = _initial_stop(basis, _atr14(store, sym, as_of), atr_stop_mult)
                 pf.lots.append(Lot(sym, T, basis, qty, stop, float("inf")))
-                pf.cash -= qty * basis
+                pf.cash -= cost
                 held.add(sym)
 
         # ── EXITS: trailing-stop touch first, then time stop ──────────────────
@@ -209,12 +223,25 @@ def run_earnings_simulation(
                     if cand > l.stop:
                         l.stop = cand
 
+        # ── SPY overlay: invest idle cash in SPY at close ────────────────────
+        if spy_overlay and pf.cash > 0:
+            spy_bar = store.bar_on("SPY", T)
+            if spy_bar:
+                spy_buy_px = buy_fill(spy_bar["close"])
+                new_shares = pf.cash / spy_buy_px
+                spy_shares += new_shares
+                pf.cash = 0.0
+
         # ── mark equity at T close ────────────────────────────────────────────
         eq = pf.cash
         for l in pf.lots:
             bar = store.bar_on(l.symbol, T)
             px = bar["close"] if bar else last_px.get(l.symbol, l.entry_price)
             eq += l.qty * px
+        if spy_overlay and spy_shares > 0:
+            spy_bar = store.bar_on("SPY", T)
+            spy_px = spy_bar["close"] if spy_bar else last_px.get("SPY", 0.0)
+            eq += spy_shares * spy_px
         pf.equity_curve.append({"date": T.isoformat(), "equity": round(eq, 2)})
 
     return pf

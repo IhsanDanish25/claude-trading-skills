@@ -42,9 +42,10 @@ SUITE = [
     ("D_slip10_atr_regime", 10, "atr", True),
     # Earnings-momentum scenarios — routed to earnings_engine, not engine.py.
     # (stop_mode field unused for E-series; stop config is in E_CONFIGS below.)
-    ("E_earnings_momentum_regime", 10, "atr", True),
-    ("E2_earnings_wide_stop",      10, "atr", True),
-    ("E3_earnings_time_only",      10, "atr", True),
+    ("E_earnings_momentum_regime",  10, "atr", True),
+    ("E2_earnings_wide_stop",       10, "atr", True),
+    ("E3_earnings_time_only",       10, "atr", True),
+    ("E4_earnings_portable_alpha",  10, "atr", True),
 ]
 
 # Scenario E-series shared parameters.
@@ -58,9 +59,10 @@ E_MIN_AVG_VOLUME = 500_000.0
 # Per-scenario stop configuration for the E-series.
 # trailing_stop=False + fixed_stop_pct → flat disaster-protection stop, never ratcheted.
 E_CONFIGS: dict[str, dict] = {
-    "E_earnings_momentum_regime": {"atr_stop_mult": 1.5, "trailing_stop": True,  "fixed_stop_pct": None},
-    "E2_earnings_wide_stop":      {"atr_stop_mult": 3.0, "trailing_stop": True,  "fixed_stop_pct": None},
-    "E3_earnings_time_only":      {"atr_stop_mult": 1.5, "trailing_stop": False, "fixed_stop_pct": 0.15},
+    "E_earnings_momentum_regime": {"atr_stop_mult": 1.5, "trailing_stop": True,  "fixed_stop_pct": None,  "spy_overlay": False},
+    "E2_earnings_wide_stop":      {"atr_stop_mult": 3.0, "trailing_stop": True,  "fixed_stop_pct": None,  "spy_overlay": False},
+    "E3_earnings_time_only":      {"atr_stop_mult": 1.5, "trailing_stop": False, "fixed_stop_pct": 0.15,  "spy_overlay": False},
+    "E4_earnings_portable_alpha": {"atr_stop_mult": 1.5, "trailing_stop": False, "fixed_stop_pct": 0.15,  "spy_overlay": True},
 }
 
 
@@ -166,9 +168,10 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
     from backtest_harness import data, earnings_data, earnings_engine, metrics
 
     ecfg = E_CONFIGS.get(scenario, E_CONFIGS["E_earnings_momentum_regime"])
-    atr_stop_mult = ecfg["atr_stop_mult"]
-    trailing_stop = ecfg["trailing_stop"]
+    atr_stop_mult  = ecfg["atr_stop_mult"]
+    trailing_stop  = ecfg["trailing_stop"]
     fixed_stop_pct = ecfg["fixed_stop_pct"]
+    spy_overlay    = ecfg.get("spy_overlay", False)
 
     gate_tag = " | regime-gated" if regime_gated else ""
     log.info("── Scenario %s | earnings-momentum | slippage=%dbps | hold=%dd | %s..%s%s ──",
@@ -206,6 +209,7 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
         min_surprise_pct=E_MIN_SURPRISE_PCT, min_price=E_MIN_PRICE,
         min_avg_volume=E_MIN_AVG_VOLUME,
         trailing_stop=trailing_stop, fixed_stop_pct=fixed_stop_pct,
+        spy_overlay=spy_overlay,
     )
     if not pf.equity_curve:
         log.error("Scenario %s produced no equity curve — skipping.", scenario)
@@ -230,6 +234,21 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
     else:
         stop_desc = f"{E_HOLD_DAYS}d time stop only"
         stop_mode_tag = "time_only"
+    if spy_overlay:
+        stop_desc += " + SPY idle overlay"
+        stop_mode_tag += "_spy_overlay"
+
+    # IS/OOS split (70/30 chronological) — used by overfit gate for E4+.
+    is_return_val = None
+    oos_return_val = None
+    if spy_overlay and len(pf.equity_curve) >= 3:
+        ec = pf.equity_curve
+        split_i = max(1, int(len(ec) * 0.70))
+        is_eq = ec[split_i]["equity"]
+        oos_eq = ec[-1]["equity"]
+        is_return_val = is_eq / start_equity - 1
+        oos_return_val = (oos_eq / is_eq - 1) if is_eq > 0 else None
+
     report = {
         "generated": datetime.datetime.now().isoformat(timespec="seconds"),
         "scenario": scenario,
@@ -268,7 +287,7 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
         json.dump(report, f, indent=2)
 
     _print_summary(scenario, slippage_bps, stop_desc, strat, spy, tstats, json_path, png_path)
-    _run_validation_gates(pf, spy_curve)
+    _run_validation_gates(pf, spy_curve, is_return=is_return_val, oos_return=oos_return_val)
     return report
 
 
@@ -381,7 +400,7 @@ def _curve_to_daily_returns(curve):
     return [(b / a - 1) for a, b in zip(eq[:-1], eq[1:]) if a > 0]
 
 
-def _run_validation_gates(pf, spy_curve):
+def _run_validation_gates(pf, spy_curve, is_return=None, oos_return=None):
     """Bolt validation_gates onto the harness output. Harness logic is unchanged;
     this only reads pf.equity_curve and spy_curve already produced by the run."""
     from validation_gates import run_gates
@@ -395,8 +414,8 @@ def _run_validation_gates(pf, spy_curve):
         strat_daily_returns=strat_rets,
         spy_daily_returns=spy_rets,
         n_trades=len(pf.trades),
-        is_return=None,
-        oos_return=None,
+        is_return=is_return,
+        oos_return=oos_return,
     )
     print(rep.summary())
 
