@@ -12,6 +12,9 @@ Four gates:
   1. TRADE-COUNT GATE  : n >= 50. Below that, results are noise, not edge.
   2. OVERFIT GATE      : in-sample/out-of-sample return ratio <= 1.5.
                          If IS crushes OOS, you curve-fit the past.
+                         Both IS and OOS must be positive for the ratio to
+                         mean anything — a loss in both windows trivially
+                         satisfies the ratio check without proving edge.
   3. SIGNIFICANCE GATE : t-stat on mean daily return; p < 0.05 (two-sided).
   4. BENCHMARK GATE    : must clear SPY on the SAME window AFTER costs,
                          on BOTH total return and risk-adjusted (Sharpe within
@@ -144,9 +147,16 @@ def run_gates(
     dd_better = strat_dd > spy_dd  # less negative = shallower drawdown = better
     beats_spy = beats_return and (sharpe_ok or dd_better)
 
+    # The ratio test only means something when the strategy is actually
+    # positive in both windows. Without this guard, a loss-loss scenario
+    # (e.g. IS=-1.83% / OOS=-1.49%) auto-passes the ratio<=1.5 check
+    # without telling us anything about whether the strategy has edge.
+    both_positive = (is_return is not None and oos_return is not None
+                     and is_return > 0 and oos_return > 0)
+
     gates = {
         "trade_count": n_trades >= MIN_TRADES,
-        "not_overfit": ratio <= OVERFIT_MAX_RATIO,
+        "not_overfit": both_positive and ratio <= OVERFIT_MAX_RATIO,
         "significant": p < P_VALUE_MAX,
         "beats_spy": beats_spy,
     }
