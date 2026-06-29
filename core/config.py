@@ -87,5 +87,18 @@ WATCHLIST = [
     "CELH","ENPH","FSLR","ON","AEHR","SMCI","AXON","COCO","DUOL","PINS"
 ]
 
+# ── Strategy mode ─────────────────────────────────────────────────────────────
+# "vcp" = original VCP momentum (default), "pead" = earnings drift
+STRATEGY_MODE = os.environ.get("STRATEGY_MODE", "pead").lower()
+
+# ── PEAD params ───────────────────────────────────────────────────────────────
+PEAD_HOLD_DAYS        = int(os.environ.get("PEAD_HOLD_DAYS", "60"))
+PEAD_STOP_PCT         = float(os.environ.get("PEAD_STOP_PCT", "0.15"))
+PEAD_LOOKBACK_DAYS    = int(os.environ.get("PEAD_LOOKBACK_DAYS", "7"))
+PEAD_MIN_SURPRISE_PCT = float(os.environ.get("PEAD_MIN_SURPRISE_PCT", "10.0"))
+PEAD_MIN_PRICE        = float(os.environ.get("PEAD_MIN_PRICE", "10.0"))
+PEAD_MIN_AVG_VOLUME   = float(os.environ.get("PEAD_MIN_AVG_VOLUME", "500000"))
+PEAD_SIZE_PCT         = float(os.environ.get("PEAD_SIZE_PCT", "0.05"))
+
 # ── Timezone ──────────────────────────────────────────────────────────────────
 TIMEZONE = "America/New_York"

@@ -20,6 +20,8 @@ from core.universe import build_universe
 from circuit_breaker import CircuitBreaker, TradingHalted
 from regime_gate import classify
 from kelly_sizing import KellySizer, stats_from_trades
+from core.earnings_screener import screen_earnings
+from core.pead_tracker import add_position as pead_track
 
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
@@ -237,6 +239,110 @@ def is_entry_window():
     return True, "entry window open"
 
 
+def _run_pead(broker, cb, pv, slots, held, already_bought_today):
+    """PEAD strategy: buy stocks with big earnings surprises, hold 60 days,
+    -15% disaster stop, no take-profit. Time-exit handled by market_close."""
+    log.info("PEAD: screening S&P 500 for earnings beats...")
+    candidates = screen_earnings(
+        lookback_days=config.PEAD_LOOKBACK_DAYS,
+        min_surprise_pct=config.PEAD_MIN_SURPRISE_PCT,
+        min_price=config.PEAD_MIN_PRICE,
+        min_avg_volume=config.PEAD_MIN_AVG_VOLUME,
+    )
+    log.info(f"PEAD: {len(candidates)} candidates with surprise >= {config.PEAD_MIN_SURPRISE_PCT}%")
+
+    if not candidates:
+        log.info("PEAD: no earnings beats — done")
+        return
+
+    for c in candidates:
+        log.info(f"  • {c['symbol']} surprise={c['surprise_pct']:+.1f}% "
+                 f"EPS={c.get('actual_eps')}/{c.get('estimated_eps')} "
+                 f"reported={c['report_date']} price=${c.get('price', 0):.2f}")
+
+    buys_taken = 0
+    for c in candidates[:slots]:
+        sym = c["symbol"]
+        surprise = c["surprise_pct"]
+        price = c.get("price", 0)
+
+        if sym in held:
+            log.info(f"  ✗ {sym} SKIP — already holding")
+            continue
+        if sym in already_bought_today:
+            log.info(f"  ✗ {sym} SKIP — already bought today")
+            continue
+
+        size_pct = config.PEAD_SIZE_PCT
+        amount = pv * size_pct
+
+        log.info(f"PEAD BUY {sym} | surprise={surprise:+.1f}% | "
+                 f"size={size_pct*100:.0f}% | ${amount:,.0f}")
+        try:
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+            except TradingHalted as halt:
+                log.warning(f"✗ {sym} blocked by circuit breaker: {halt}")
+                continue
+
+            # PEAD uses wide stop (-15%), NO take-profit (time exit at 60d)
+            # Set take_profit very wide (99%) so OCO doesn't trigger early
+            result = broker.buy(
+                sym,
+                dollar_amount=amount,
+                stop_loss_pct=config.PEAD_STOP_PCT,
+                take_profit_pct=0.99,
+            )
+            if result.get("blocked"):
+                log.warning(f"✗ {sym} buy blocked: {result.get('reason')}")
+                continue
+            if not result.get("stop_attached"):
+                log.error(f"✗ {sym} bought but stop NOT attached — flattening")
+                broker.sell(sym, qty=result["qty"])
+                send_trade_alert(
+                    action="FLATTEN", ticker=sym, shares=result["qty"],
+                    price=result["price"],
+                    reason="PEAD stop-loss attach failed — position rejected",
+                )
+                continue
+
+            log.info(f"✓ PEAD {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                     f"SL={result['stop']} (hold {config.PEAD_HOLD_DAYS}d)")
+
+            # Track for time-based exit
+            pead_track(sym, result["price"], surprise, c["report_date"])
+
+            send_trade_alert(
+                action="BUY",
+                ticker=sym,
+                shares=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                target=None,
+                reason=f"PEAD surprise={surprise:+.1f}% hold={config.PEAD_HOLD_DAYS}d",
+            )
+            _mark_bought(sym, result)
+            _append_trade_log({
+                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                "symbol": sym,
+                "side": "buy",
+                "qty": result.get("qty"),
+                "price": result.get("price"),
+                "stop": result.get("stop"),
+                "target": None,
+                "strategy": "pead",
+                "surprise_pct": surprise,
+                "exit_date": None,
+                "exit_price": None,
+                "pnl_pct": None,
+            })
+            buys_taken += 1
+        except Exception as e:
+            log.error(f"✗ PEAD {sym} buy failed: {e}")
+
+    log.info(f"PEAD complete | Buys taken: {buys_taken}")
+
+
 def run():
     config.validate()
     now = datetime.datetime.now(ET)
@@ -287,9 +393,7 @@ def run():
     if already_bought_today:
         log.info(f"Already bought today (idempotency): {sorted(already_bought_today)}")
 
-    universe = build_universe()
-    log.info(f"Universe: {len(universe)} symbols → screening...")
-
+    # ── Regime gate (shared by both strategies) ─────────────────────────────
     try:
         from core.screener import _fetch_bars
         spy_bars = (_fetch_bars(["SPY"], days=400) or {}).get("SPY") or []
@@ -308,6 +412,18 @@ def run():
     else:
         log.warning("Regime gate skipped: no SPY bars available — proceeding without gate")
 
+    # ── STRATEGY ROUTER ───────────────────────────────────────────────────────
+    strategy = config.STRATEGY_MODE
+    log.info(f"Strategy mode: {strategy.upper()}")
+
+    if strategy == "pead":
+        _run_pead(broker, cb, pv, slots, held, already_bought_today)
+        logger.banner(log, "MARKET OPEN COMPLETE (PEAD)")
+        return
+
+    # ── VCP path (original) ───────────────────────────────────────────────────
+    universe = build_universe()
+    log.info(f"Universe: {len(universe)} symbols → screening...")
     candidates = screen(universe)
     log.info(f"Got {len(candidates)} candidates")
 

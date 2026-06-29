@@ -20,6 +20,7 @@ from core.broker   import BrokerClient
 from core.fmp      import get_quotes, get_market_breadth, get_daily_bars
 from core.analyst  import review_open_positions, analyze_market_regime, detect_ftd
 from core.notifier import send_eod_summary, send_trade_alert
+from core.pead_tracker import get_expired, remove_position as pead_untrack, get_all as pead_all
 
 log = logger.setup("market_close")
 ET  = pytz.timezone("America/New_York")
@@ -64,6 +65,38 @@ def run():
         broker.cancel_all_orders()
     except Exception as e:
         log.warning(f"Cancel orders: {e}")
+
+    # ── PEAD time-exit: close positions past hold period ───────────────────
+    pead_positions = pead_all()
+    if pead_positions:
+        log.info(f"── PEAD positions tracked: {len(pead_positions)}")
+        expired = get_expired()
+        if expired:
+            log.info(f"── PEAD time-exits due: {len(expired)}")
+            for exp in expired:
+                sym = exp["symbol"]
+                age = exp["age_days"]
+                hold = exp["hold_days"]
+                log.info(f"  PEAD TIME-EXIT {sym} — held {age}d (limit {hold}d)")
+                try:
+                    broker.close_position(sym)
+                    pead_untrack(sym)
+                    send_trade_alert(
+                        action="SELL",
+                        ticker=sym,
+                        shares=0,
+                        price=0,
+                        reason=f"PEAD time-exit: {age}d held (max {hold}d)",
+                    )
+                    log.info(f"  ✓ PEAD closed {sym} after {age} days")
+                except Exception as e:
+                    log.error(f"  ✗ PEAD close {sym} failed: {e}")
+        else:
+            for sym, info in pead_positions.items():
+                from core.pead_tracker import position_age
+                age = position_age(sym)
+                log.info(f"  PEAD {sym}: day {age}/{info.get('hold_days', 60)} "
+                         f"(surprise={info.get('surprise_pct', '?')}%)")
 
     # ── Position final review ─────────────────────────────────────────────────
     positions = broker.get_positions()
