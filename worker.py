@@ -159,6 +159,20 @@ def startup_health_check() -> None:
     except Exception as e:
         log.warning("  FMP: FAILED — %s (non-fatal, screener may degrade)", e)
 
+    # Test heartbeat — hit localhost so it works before the Railway domain
+    # propagates. Also logs the public URL for quick reference.
+    try:
+        import requests
+        port = int(os.environ.get("PORT", "8080"))
+        r = requests.get(f"http://localhost:{port}/", timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        public_url = "https://worker-production-191c.up.railway.app/"
+        log.info("  HEARTBEAT: ALIVE ✓ (last_tick=%s)", data.get("last_tick", "?"))
+        log.info("  HEARTBEAT URL: %s", public_url)
+    except Exception as e:
+        log.warning("  HEARTBEAT: FAILED — %s (non-fatal)", e)
+
     log.info("HEALTH CHECK COMPLETE")
     log.info("=" * 50)
 
