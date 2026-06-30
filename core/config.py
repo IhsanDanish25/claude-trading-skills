@@ -88,8 +88,11 @@ WATCHLIST = [
 ]
 
 # ── Strategy mode ─────────────────────────────────────────────────────────────
-# "vcp" = original VCP momentum (default), "pead" = earnings drift
-STRATEGY_MODE = os.environ.get("STRATEGY_MODE", "pead").lower()
+# Comma-separated list of strategies to run each market-open cycle, in order.
+# Available: "pead", "vcp", "meanrev", "insider", "squeeze", "breakout", "earnmom"
+# Strategies share the slot budget; exhausted slots stop the loop early.
+STRATEGY_MODE  = os.environ.get("STRATEGY_MODE", "pead").lower()
+STRATEGY_MODES = [s.strip() for s in STRATEGY_MODE.split(",") if s.strip()]
 
 # ── PEAD params ───────────────────────────────────────────────────────────────
 PEAD_HOLD_DAYS        = int(os.environ.get("PEAD_HOLD_DAYS", "60"))
@@ -99,6 +102,41 @@ PEAD_MIN_SURPRISE_PCT = float(os.environ.get("PEAD_MIN_SURPRISE_PCT", "10.0"))
 PEAD_MIN_PRICE        = float(os.environ.get("PEAD_MIN_PRICE", "10.0"))
 PEAD_MIN_AVG_VOLUME   = float(os.environ.get("PEAD_MIN_AVG_VOLUME", "500000"))
 PEAD_SIZE_PCT         = float(os.environ.get("PEAD_SIZE_PCT", "0.05"))
+
+# ── Mean-reversion screener params ───────────────────────────────────────────
+MEANREV_RSI_THRESHOLD = float(os.environ.get("MEANREV_RSI_THRESHOLD", "30.0"))
+MEANREV_BB_STD        = float(os.environ.get("MEANREV_BB_STD", "2.0"))
+MEANREV_MIN_PRICE     = float(os.environ.get("MEANREV_MIN_PRICE", "5.0"))
+MEANREV_MIN_AVG_VOL   = float(os.environ.get("MEANREV_MIN_AVG_VOL", "500000"))
+MEANREV_SIZE_PCT      = float(os.environ.get("MEANREV_SIZE_PCT", str(MAX_POSITION_SIZE_PCT)))
+
+# ── Insider screener params ───────────────────────────────────────────────────
+INSIDER_LOOKBACK_DAYS = int(os.environ.get("INSIDER_LOOKBACK_DAYS", "30"))
+INSIDER_MIN_SCORE     = int(os.environ.get("INSIDER_MIN_SCORE", "20"))
+INSIDER_MIN_CLUSTER   = int(os.environ.get("INSIDER_MIN_CLUSTER", "1"))
+INSIDER_SIZE_PCT      = float(os.environ.get("INSIDER_SIZE_PCT", str(MAX_POSITION_SIZE_PCT)))
+
+# ── Squeeze screener params ───────────────────────────────────────────────────
+SQUEEZE_SI_MIN_PCT    = float(os.environ.get("SQUEEZE_SI_MIN_PCT", "15.0"))
+SQUEEZE_DTC_MIN       = float(os.environ.get("SQUEEZE_DTC_MIN", "3.0"))
+SQUEEZE_MIN_PRICE     = float(os.environ.get("SQUEEZE_MIN_PRICE", "3.0"))
+SQUEEZE_MIN_AVG_VOL   = float(os.environ.get("SQUEEZE_MIN_AVG_VOL", "500000"))
+SQUEEZE_SIZE_PCT      = float(os.environ.get("SQUEEZE_SIZE_PCT", str(MAX_POSITION_SIZE_PCT)))
+
+# ── Breakout screener params ──────────────────────────────────────────────────
+BREAKOUT_VOL_MULT_MIN = float(os.environ.get("BREAKOUT_VOL_MULT_MIN", "1.5"))
+BREAKOUT_MIN_PRICE    = float(os.environ.get("BREAKOUT_MIN_PRICE", "5.0"))
+BREAKOUT_MIN_AVG_VOL  = float(os.environ.get("BREAKOUT_MIN_AVG_VOL", "200000"))
+BREAKOUT_SIZE_PCT     = float(os.environ.get("BREAKOUT_SIZE_PCT", str(MAX_POSITION_SIZE_PCT)))
+
+# ── Earnings-momentum screener params ─────────────────────────────────────────
+EARNMOM_LOOKBACK_MIN      = int(os.environ.get("EARNMOM_LOOKBACK_MIN", "8"))
+EARNMOM_LOOKBACK_MAX      = int(os.environ.get("EARNMOM_LOOKBACK_MAX", "45"))
+EARNMOM_MIN_SURPRISE_PCT  = float(os.environ.get("EARNMOM_MIN_SURPRISE_PCT", "0.0"))
+EARNMOM_MIN_DRIFT_PCT     = float(os.environ.get("EARNMOM_MIN_DRIFT_PCT", "0.0"))
+EARNMOM_MIN_PRICE         = float(os.environ.get("EARNMOM_MIN_PRICE", "5.0"))
+EARNMOM_MIN_AVG_VOL       = float(os.environ.get("EARNMOM_MIN_AVG_VOL", "500000"))
+EARNMOM_SIZE_PCT          = float(os.environ.get("EARNMOM_SIZE_PCT", str(MAX_POSITION_SIZE_PCT)))
 
 # ── E4 Portable Alpha: idle cash → SPY ───────────────────────────────────────
 SPY_BASE_ENABLED      = os.environ.get("SPY_BASE_ENABLED", "true").lower() == "true"

@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Financial Modeling Prep (FMP) data fetcher.
 
@@ -10,11 +11,13 @@ Endpoints unavailable on this plan (economic calendar, news, gainers,
 actives, screener) return [] with a one-time warning rather than raising.
 """
 import datetime
-import time
-import requests
 import logging
+import time
+
 import pytz
-from core.config import FMP_API_KEY, ALPACA_API_KEY, ALPACA_SECRET_KEY
+import requests
+
+from core.config import ALPACA_API_KEY, ALPACA_SECRET_KEY, FMP_API_KEY
 
 log = logging.getLogger(__name__)
 _STABLE = "https://financialmodelingprep.com/stable"
@@ -95,10 +98,10 @@ def _alpaca_change_pct(symbol: str) -> float:
     """Daily change % via Alpaca IEX feed — for ETFs blocked on the FMP plan."""
     global _alpaca_data_client
     try:
+        from alpaca.data.enums import DataFeed
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
-        from alpaca.data.enums import DataFeed
         if _alpaca_data_client is None:
             _alpaca_data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
         now   = datetime.datetime.now(pytz.utc)
@@ -227,6 +230,55 @@ def get_52w_stats(symbol: str) -> dict:
     except Exception as e:
         log.error("52w stats %s fail: %s", symbol, e)
         return {}
+
+
+def get_insider_trading(
+    symbol: str | None = None,
+    transaction_type: str = "P-Purchase",
+    limit: int = 200,
+) -> list[dict]:
+    """Recent Form-4 insider transactions via /stable/insider-trading.
+
+    If *symbol* is given, returns that stock's filings only.
+    *transaction_type* defaults to 'P-Purchase' (open-market buys).
+    """
+    try:
+        params: dict = {"transactionType": transaction_type, "limit": limit}
+        if symbol:
+            params["symbol"] = symbol
+        data = _get(f"{_STABLE}/insider-trading", params)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        log.error("Insider trading fetch fail: %s", e)
+        return []
+
+
+def get_short_interest(symbol: str | None = None, limit: int = 200) -> list[dict]:
+    """Short interest data via /stable/short-interest."""
+    try:
+        params: dict = {"limit": limit}
+        if symbol:
+            params["symbol"] = symbol
+        data = _get(f"{_STABLE}/short-interest", params)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        log.error("Short interest fetch fail: %s", e)
+        return []
+
+
+def get_earnings_calendar(from_date: str | None = None, to_date: str | None = None) -> list[dict]:
+    """Earnings calendar events via /stable/earning_calendar."""
+    try:
+        params: dict = {}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        data = _get(f"{_STABLE}/earning_calendar", params)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        log.error("Earnings calendar fetch fail: %s", e)
+        return []
 
 
 def get_screener_universe(
