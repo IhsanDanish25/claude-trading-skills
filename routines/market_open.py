@@ -23,6 +23,11 @@ from kelly_sizing import KellySizer, stats_from_trades
 from core.earnings_screener import screen_earnings
 from core.pead_tracker import add_position as pead_track
 from core.spy_base import rebalance_to_spy, free_cash_for_pead, log_status as spy_log
+from core.meanrev_screener import screen_meanrev
+from core.insider_screener import screen_insider
+from core.squeeze_screener import screen_squeeze
+from core.breakout_screener import screen_breakout
+from core.earnings_momentum_screener import screen_earnings_momentum
 
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
@@ -355,6 +360,137 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today):
         log.info(f"SPY base: {spy_result['action']} {spy_result.get('qty', 0)} shares")
 
 
+def _run_fmp_strategy(broker, cb, pv, slots, held, already_bought_today,
+                      candidates, strategy_name, stop_pct=None, tp_pct=None):
+    """Shared execution logic for FMP-sourced screener strategies."""
+    if not candidates:
+        log.info(f"{strategy_name}: no candidates — done")
+        return
+
+    for c in candidates[:5]:
+        log.info(f"  • {c['symbol']} score={c.get('score', 'n/a')} "
+                 f"price=${c.get('price', 0):.2f} strategy={strategy_name}")
+
+    buys_taken = 0
+    use_stop = stop_pct or config.STOP_LOSS_PCT
+    use_tp = tp_pct or config.TAKE_PROFIT_PCT
+
+    for c in candidates[:slots]:
+        sym = c["symbol"]
+        price = c.get("price", 0)
+
+        if sym in held:
+            log.info(f"  ✗ {sym} SKIP — already holding")
+            continue
+        if sym in already_bought_today:
+            log.info(f"  ✗ {sym} SKIP — already bought today")
+            continue
+
+        size_pct = config.MAX_POSITION_SIZE_PCT
+        amount = pv * size_pct
+
+        log.info(f"{strategy_name} BUY {sym} | size={size_pct*100:.0f}% | ${amount:,.0f}")
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"✗ {sym} SKIP — cannot free ${amount:,.0f} from SPY base")
+                continue
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+            except TradingHalted as halt:
+                log.warning(f"✗ {sym} blocked by circuit breaker: {halt}")
+                continue
+
+            result = broker.buy(
+                sym,
+                dollar_amount=amount,
+                stop_loss_pct=use_stop,
+                take_profit_pct=use_tp,
+            )
+            if result.get("blocked"):
+                log.warning(f"✗ {sym} buy blocked: {result.get('reason')}")
+                continue
+            if not result.get("stop_attached"):
+                log.error(f"✗ {sym} bought but stop NOT attached — flattening")
+                broker.sell(sym, qty=result["qty"])
+                send_trade_alert(
+                    action="FLATTEN", ticker=sym, shares=result["qty"],
+                    price=result["price"],
+                    reason=f"{strategy_name} stop-loss attach failed — position rejected",
+                )
+                continue
+
+            log.info(f"✓ {strategy_name} {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                     f"SL={result['stop']} TP={result['target']}")
+            send_trade_alert(
+                action="BUY", ticker=sym, shares=result["qty"],
+                price=result["price"], stop=result["stop"], target=result["target"],
+                reason=f"{strategy_name} score={c.get('score', 'n/a')}",
+            )
+            _mark_bought(sym, result)
+            _append_trade_log({
+                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                "symbol": sym,
+                "side": "buy",
+                "qty": result.get("qty"),
+                "price": result.get("price"),
+                "stop": result.get("stop"),
+                "target": result.get("target"),
+                "strategy": strategy_name,
+                "exit_date": None,
+                "exit_price": None,
+                "pnl_pct": None,
+            })
+            buys_taken += 1
+        except Exception as e:
+            log.error(f"✗ {strategy_name} {sym} buy failed: {e}")
+
+    log.info(f"{strategy_name} complete | Buys taken: {buys_taken}")
+    spy_log(broker)
+    spy_result = rebalance_to_spy(broker)
+    if spy_result["action"] not in ("none", "disabled"):
+        log.info(f"SPY base: {spy_result['action']} {spy_result.get('qty', 0)} shares")
+
+
+def _run_meanrev(broker, cb, pv, slots, held, already_bought_today):
+    log.info("MEANREV: screening 80-stock S&P universe for RSI<30 + BB oversold...")
+    candidates = screen_meanrev()
+    log.info(f"MEANREV: {len(candidates)} candidates")
+    _run_fmp_strategy(broker, cb, pv, slots, held, already_bought_today,
+                      candidates, "meanrev", stop_pct=0.03, tp_pct=0.05)
+
+
+def _run_insider(broker, cb, pv, slots, held, already_bought_today):
+    log.info("INSIDER: screening FMP insider P-Purchase filings...")
+    candidates = screen_insider()
+    log.info(f"INSIDER: {len(candidates)} candidates")
+    _run_fmp_strategy(broker, cb, pv, slots, held, already_bought_today,
+                      candidates, "insider", stop_pct=0.04, tp_pct=0.08)
+
+
+def _run_squeeze(broker, cb, pv, slots, held, already_bought_today):
+    log.info("SQUEEZE: screening FMP short-interest for SI>15% + DTC>3...")
+    candidates = screen_squeeze()
+    log.info(f"SQUEEZE: {len(candidates)} candidates")
+    _run_fmp_strategy(broker, cb, pv, slots, held, already_bought_today,
+                      candidates, "squeeze", stop_pct=0.05, tp_pct=0.10)
+
+
+def _run_breakout(broker, cb, pv, slots, held, already_bought_today):
+    log.info("BREAKOUT: screening for 50-day resistance breaks on 1.5x volume...")
+    candidates = screen_breakout()
+    log.info(f"BREAKOUT: {len(candidates)} candidates")
+    _run_fmp_strategy(broker, cb, pv, slots, held, already_bought_today,
+                      candidates, "breakout", stop_pct=0.03, tp_pct=0.06)
+
+
+def _run_earnmom(broker, cb, pv, slots, held, already_bought_today):
+    log.info("EARNMOM: screening for post-earnings drift (8-45d)...")
+    candidates = screen_earnings_momentum()
+    log.info(f"EARNMOM: {len(candidates)} candidates")
+    _run_fmp_strategy(broker, cb, pv, slots, held, already_bought_today,
+                      candidates, "earnmom", stop_pct=0.04, tp_pct=0.08)
+
+
 def run():
     config.validate()
     now = datetime.datetime.now(ET)
@@ -425,12 +561,46 @@ def run():
         log.warning("Regime gate skipped: no SPY bars available — proceeding without gate")
 
     # ── STRATEGY ROUTER ───────────────────────────────────────────────────────
-    strategy = config.STRATEGY_MODE
-    log.info(f"Strategy mode: {strategy.upper()}")
+    strategies = config.STRATEGY_MODES
+    log.info(f"Strategy modes: {[s.upper() for s in strategies]}")
 
-    if strategy == "pead":
-        _run_pead(broker, cb, pv, slots, held, already_bought_today)
-        logger.banner(log, "MARKET OPEN COMPLETE (PEAD)")
+    _STRATEGY_RUNNERS = {
+        "pead": _run_pead,
+        "meanrev": _run_meanrev,
+        "insider": _run_insider,
+        "squeeze": _run_squeeze,
+        "breakout": _run_breakout,
+        "earnmom": _run_earnmom,
+    }
+
+    ran_non_vcp = False
+    for strat in strategies:
+        runner = _STRATEGY_RUNNERS.get(strat)
+        if runner:
+            runner(broker, cb, pv, slots, held, already_bought_today)
+            already_bought_today = _load_today_bought()
+            pos_count = broker.position_count()
+            slots = min(MAX_BUYS, config.MAX_OPEN_POSITIONS - pos_count)
+            ran_non_vcp = True
+            if slots <= 0:
+                log.info("No slots remaining — skipping remaining strategies")
+                break
+        elif strat == "vcp":
+            pass  # handled below
+        else:
+            log.warning(f"Unknown strategy mode: {strat}")
+
+    if ran_non_vcp and "vcp" not in strategies:
+        logger.banner(log, f"MARKET OPEN COMPLETE ({','.join(s.upper() for s in strategies)})")
+        return
+
+    if "vcp" not in strategies:
+        logger.banner(log, f"MARKET OPEN COMPLETE ({','.join(s.upper() for s in strategies)})")
+        return
+
+    if slots <= 0:
+        log.info("No slots for VCP — done")
+        logger.banner(log, "MARKET OPEN COMPLETE")
         return
 
     # ── VCP path (original) ───────────────────────────────────────────────────

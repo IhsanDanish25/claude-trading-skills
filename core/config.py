@@ -88,8 +88,11 @@ WATCHLIST = [
 ]
 
 # ── Strategy mode ─────────────────────────────────────────────────────────────
-# "vcp" = original VCP momentum (default), "pead" = earnings drift
+# Comma-separated list of strategies to run. Each entry is executed in order.
+# Valid modes: vcp, pead, meanrev, insider, squeeze, breakout, earnmom
+# Examples: "pead", "pead,meanrev", "vcp,breakout,insider"
 STRATEGY_MODE = os.environ.get("STRATEGY_MODE", "pead").lower()
+STRATEGY_MODES = [s.strip() for s in STRATEGY_MODE.split(",") if s.strip()]
 
 # ── PEAD params ───────────────────────────────────────────────────────────────
 PEAD_HOLD_DAYS        = int(os.environ.get("PEAD_HOLD_DAYS", "60"))
