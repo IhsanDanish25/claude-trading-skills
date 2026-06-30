@@ -88,8 +88,34 @@ WATCHLIST = [
 ]
 
 # ── Strategy mode ─────────────────────────────────────────────────────────────
-# "vcp" = original VCP momentum (default), "pead" = earnings drift
+# Comma-separated list of strategies to run in parallel each open.
+# Valid tokens: vcp, pead, meanrev, insider, squeeze, breakout, earnmom
+# Example: STRATEGY_MODE="pead,meanrev,breakout"
 STRATEGY_MODE = os.environ.get("STRATEGY_MODE", "pead").lower()
+STRATEGY_MODES: list[str] = [s.strip() for s in STRATEGY_MODE.split(",") if s.strip()]
+
+# ── Mean-rev params ──────────────────────────────────────────────────────────
+MEANREV_RSI_THRESHOLD = float(os.environ.get("MEANREV_RSI_THRESHOLD", "30.0"))
+MEANREV_SIZE_PCT      = float(os.environ.get("MEANREV_SIZE_PCT", "0.04"))
+MEANREV_STOP_PCT      = float(os.environ.get("MEANREV_STOP_PCT", "0.05"))
+
+# ── Insider params ───────────────────────────────────────────────────────────
+INSIDER_MIN_SCORE     = float(os.environ.get("INSIDER_MIN_SCORE", "3.0"))
+INSIDER_SIZE_PCT      = float(os.environ.get("INSIDER_SIZE_PCT", "0.04"))
+INSIDER_STOP_PCT      = float(os.environ.get("INSIDER_STOP_PCT", "0.08"))
+
+# ── Squeeze params ───────────────────────────────────────────────────────────
+SQUEEZE_MIN_SI_PCT    = float(os.environ.get("SQUEEZE_MIN_SI_PCT", "15.0"))
+SQUEEZE_SIZE_PCT      = float(os.environ.get("SQUEEZE_SIZE_PCT", "0.03"))
+SQUEEZE_STOP_PCT      = float(os.environ.get("SQUEEZE_STOP_PCT", "0.10"))
+
+# ── Breakout params ──────────────────────────────────────────────────────────
+BREAKOUT_SIZE_PCT     = float(os.environ.get("BREAKOUT_SIZE_PCT", "0.05"))
+BREAKOUT_STOP_PCT     = float(os.environ.get("BREAKOUT_STOP_PCT", "0.04"))
+
+# ── Earnings-momentum params ────────────────────────────────────────────────
+EARNMOM_SIZE_PCT      = float(os.environ.get("EARNMOM_SIZE_PCT", "0.04"))
+EARNMOM_STOP_PCT      = float(os.environ.get("EARNMOM_STOP_PCT", "0.08"))
 
 # ── PEAD params ───────────────────────────────────────────────────────────────
 PEAD_HOLD_DAYS        = int(os.environ.get("PEAD_HOLD_DAYS", "60"))

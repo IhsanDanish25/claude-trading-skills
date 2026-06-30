@@ -23,6 +23,11 @@ from kelly_sizing import KellySizer, stats_from_trades
 from core.earnings_screener import screen_earnings
 from core.pead_tracker import add_position as pead_track
 from core.spy_base import rebalance_to_spy, free_cash_for_pead, log_status as spy_log
+from core.meanrev_screener import screen_meanrev
+from core.insider_screener import screen_insider
+from core.squeeze_screener import screen_squeeze
+from core.breakout_screener import screen_breakout
+from core.earnings_momentum_screener import screen_earnings_momentum
 
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
@@ -355,6 +360,161 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today):
         log.info(f"SPY base: {spy_result['action']} {spy_result.get('qty', 0)} shares")
 
 
+def _buy_candidates(broker, cb, pv, slots, held, already_bought_today,
+                    candidates, strategy_name, size_pct, stop_pct) -> int:
+    """Shared buy loop for new strategy screeners. Returns number of buys taken."""
+    buys_taken = 0
+    for c in candidates[:slots]:
+        sym = c["symbol"]
+        price = c.get("price", 0)
+
+        if sym in held:
+            log.info(f"  ✗ {sym} SKIP — already holding")
+            continue
+        if sym in already_bought_today:
+            log.info(f"  ✗ {sym} SKIP — already bought today")
+            continue
+
+        amount = pv * size_pct
+        log.info(f"{strategy_name.upper()} BUY {sym} | ${price:.2f} | "
+                 f"size={size_pct*100:.0f}% | ${amount:,.0f}")
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"✗ {sym} SKIP — cannot free ${amount:,.0f} from SPY base")
+                continue
+
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+            except TradingHalted as halt:
+                log.warning(f"✗ {sym} blocked by circuit breaker: {halt}")
+                continue
+
+            result = broker.buy(
+                sym,
+                dollar_amount=amount,
+                stop_loss_pct=stop_pct,
+                take_profit_pct=config.TAKE_PROFIT_PCT,
+            )
+            if result.get("blocked"):
+                log.warning(f"✗ {sym} buy blocked: {result.get('reason')}")
+                continue
+            if not result.get("stop_attached"):
+                log.error(f"✗ {sym} bought but stop NOT attached — flattening")
+                broker.sell(sym, qty=result["qty"])
+                send_trade_alert(
+                    action="FLATTEN", ticker=sym, shares=result["qty"],
+                    price=result["price"],
+                    reason=f"{strategy_name} stop-loss attach failed — position rejected",
+                )
+                continue
+
+            log.info(f"✓ {strategy_name.upper()} {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                     f"SL={result['stop']} TP={result['target']}")
+            send_trade_alert(
+                action="BUY", ticker=sym, shares=result["qty"],
+                price=result["price"], stop=result["stop"],
+                target=result["target"],
+                reason=f"strategy={strategy_name}",
+            )
+            _mark_bought(sym, result)
+            _append_trade_log({
+                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                "symbol": sym, "side": "buy",
+                "qty": result.get("qty"), "price": result.get("price"),
+                "stop": result.get("stop"), "target": result.get("target"),
+                "strategy": strategy_name,
+                "exit_date": None, "exit_price": None, "pnl_pct": None,
+            })
+            buys_taken += 1
+        except Exception as e:
+            log.error(f"✗ {strategy_name.upper()} {sym} buy failed: {e}")
+    return buys_taken
+
+
+def _run_meanrev(broker, cb, pv, slots, held, already_bought_today):
+    log.info("MEANREV: screening 80-stock S&P universe for RSI<30 + BB oversold...")
+    candidates = screen_meanrev(rsi_threshold=config.MEANREV_RSI_THRESHOLD)
+    log.info(f"MEANREV: {len(candidates)} candidates")
+    if not candidates:
+        return
+    for c in candidates:
+        log.info(f"  • {c['symbol']} RSI={c['rsi']} price=${c['price']:.2f} "
+                 f"BB_lower={c['bb_lower']} SMA200={c['sma200']}")
+    buys = _buy_candidates(broker, cb, pv, slots, held, already_bought_today,
+                           candidates, "meanrev", config.MEANREV_SIZE_PCT,
+                           config.MEANREV_STOP_PCT)
+    log.info(f"MEANREV complete | Buys taken: {buys}")
+
+
+def _run_insider(broker, cb, pv, slots, held, already_bought_today):
+    log.info("INSIDER: screening for recent insider P-Purchase clusters...")
+    candidates = screen_insider(min_score=config.INSIDER_MIN_SCORE)
+    log.info(f"INSIDER: {len(candidates)} candidates")
+    if not candidates:
+        return
+    for c in candidates:
+        log.info(f"  • {c['symbol']} score={c['score']} cluster={c['cluster_count']} "
+                 f"value=${c['total_value']:,.0f} seniority={c['best_seniority']}")
+
+    # Insider screener doesn't fetch price; get it from FMP
+    from core.fmp import get_quote
+    for c in candidates:
+        if "price" not in c:
+            q = get_quote(c["symbol"])
+            c["price"] = q.get("price", 0)
+
+    buys = _buy_candidates(broker, cb, pv, slots, held, already_bought_today,
+                           candidates, "insider", config.INSIDER_SIZE_PCT,
+                           config.INSIDER_STOP_PCT)
+    log.info(f"INSIDER complete | Buys taken: {buys}")
+
+
+def _run_squeeze(broker, cb, pv, slots, held, already_bought_today):
+    log.info("SQUEEZE: screening for high short-interest + momentum...")
+    candidates = screen_squeeze(min_si_pct=config.SQUEEZE_MIN_SI_PCT)
+    log.info(f"SQUEEZE: {len(candidates)} candidates")
+    if not candidates:
+        return
+    for c in candidates:
+        log.info(f"  • {c['symbol']} SI={c['si_pct']}% DTC={c['days_to_cover']} "
+                 f"mom20d={c.get('momentum_20d', 0):+.1f}% price=${c.get('price', 0):.2f}")
+    buys = _buy_candidates(broker, cb, pv, slots, held, already_bought_today,
+                           candidates, "squeeze", config.SQUEEZE_SIZE_PCT,
+                           config.SQUEEZE_STOP_PCT)
+    log.info(f"SQUEEZE complete | Buys taken: {buys}")
+
+
+def _run_breakout(broker, cb, pv, slots, held, already_bought_today):
+    log.info("BREAKOUT: screening for 50-day resistance breaks with volume...")
+    candidates = screen_breakout(volume_mult=config.BREAKOUT_VOL_MULT)
+    log.info(f"BREAKOUT: {len(candidates)} candidates")
+    if not candidates:
+        return
+    for c in candidates:
+        log.info(f"  • {c['symbol']} price=${c['price']:.2f} resistance={c['resistance']:.2f} "
+                 f"break={c['breakout_pct']:+.1f}% relvol={c['rel_volume']}")
+    buys = _buy_candidates(broker, cb, pv, slots, held, already_bought_today,
+                           candidates, "breakout", config.BREAKOUT_SIZE_PCT,
+                           config.BREAKOUT_STOP_PCT)
+    log.info(f"BREAKOUT complete | Buys taken: {buys}")
+
+
+def _run_earnmom(broker, cb, pv, slots, held, already_bought_today):
+    log.info("EARNMOM: screening for post-earnings drift continuation...")
+    candidates = screen_earnings_momentum()
+    log.info(f"EARNMOM: {len(candidates)} candidates")
+    if not candidates:
+        return
+    for c in candidates:
+        log.info(f"  • {c['symbol']} surprise={c['surprise_pct']:+.1f}% "
+                 f"drift={c['drift_pct']:+.1f}% days={c['days_since_earnings']} "
+                 f"price=${c['price']:.2f}")
+    buys = _buy_candidates(broker, cb, pv, slots, held, already_bought_today,
+                           candidates, "earnmom", config.EARNMOM_SIZE_PCT,
+                           config.EARNMOM_STOP_PCT)
+    log.info(f"EARNMOM complete | Buys taken: {buys}")
+
+
 def run():
     config.validate()
     now = datetime.datetime.now(ET)
@@ -425,12 +585,40 @@ def run():
         log.warning("Regime gate skipped: no SPY bars available — proceeding without gate")
 
     # ── STRATEGY ROUTER ───────────────────────────────────────────────────────
-    strategy = config.STRATEGY_MODE
-    log.info(f"Strategy mode: {strategy.upper()}")
+    strategies = config.STRATEGY_MODES
+    log.info(f"Strategy modes: {[s.upper() for s in strategies]}")
 
-    if strategy == "pead":
-        _run_pead(broker, cb, pv, slots, held, already_bought_today)
-        logger.banner(log, "MARKET OPEN COMPLETE (PEAD)")
+    _STRATEGY_RUNNERS = {
+        "meanrev":  _run_meanrev,
+        "insider":  _run_insider,
+        "squeeze":  _run_squeeze,
+        "breakout": _run_breakout,
+        "earnmom":  _run_earnmom,
+    }
+
+    ran_any = False
+    for strat in strategies:
+        if strat == "pead":
+            _run_pead(broker, cb, pv, slots, held, already_bought_today)
+            already_bought_today = _load_today_bought()
+            slots = min(MAX_BUYS, config.MAX_OPEN_POSITIONS - broker.position_count())
+            ran_any = True
+        elif strat in _STRATEGY_RUNNERS:
+            _STRATEGY_RUNNERS[strat](broker, cb, pv, slots, held, already_bought_today)
+            already_bought_today = _load_today_bought()
+            slots = min(MAX_BUYS, config.MAX_OPEN_POSITIONS - broker.position_count())
+            ran_any = True
+        elif strat == "vcp":
+            pass  # handled below
+        else:
+            log.warning(f"Unknown strategy '{strat}' — skipping")
+
+    if "vcp" not in strategies and ran_any:
+        logger.banner(log, f"MARKET OPEN COMPLETE ({','.join(s.upper() for s in strategies)})")
+        return
+
+    if "vcp" not in strategies:
+        log.warning("No recognized strategies ran — done")
         return
 
     # ── VCP path (original) ───────────────────────────────────────────────────
