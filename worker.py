@@ -168,9 +168,9 @@ def startup_health_check() -> None:
             price = data[0].get("price", 0) if isinstance(data, list) else 0
             log.info("  FMP: CONNECTED ✓ (AAPL=$%.2f)", price)
         else:
-            log.warning("  FMP: empty response (may be rate-limited)")
+            log.warning("  FMP: empty response (may be rate-limited) — yfinance fallback auto-enabled")
     except Exception as e:
-        log.warning("  FMP: FAILED — %s (non-fatal, screener may degrade)", e)
+        log.warning("  FMP: FAILED — %s (yfinance fallback auto-enabled)", e)
 
     # Test heartbeat — hit localhost so it works before the Railway domain
     # propagates. Also logs the public URL for quick reference.

@@ -24,6 +24,7 @@ _cache: dict = {}
 _CACHE_TTL = 300
 _CACHE_MAX = 500
 _warned_unavailable: set = set()
+_fmp_fallback_active: bool = False  # Tracks if yfinance fallback is being used
 _alpaca_data_client = None
 
 
@@ -44,8 +45,11 @@ def _get(url: str, params: dict = None) -> dict | list:
     r = requests.get(url, params=params, timeout=15)
     if r.status_code == 429:
         # Rate-limited — degrade gracefully so the live loop never crashes.
+        # yfinance fallback will kick in for quote/bar calls
+        global _fmp_fallback_active
+        _fmp_fallback_active = True
         if "rate_limit_429" not in _warned_unavailable:
-            log.warning("FMP rate-limited (HTTP 429) — returning [] (neutral) until quota resets")
+            log.warning("FMP rate-limited (HTTP 429) — yfinance fallback ACTIVE for quotes/bars")
             _warned_unavailable.add("rate_limit_429")
         return []
     r.raise_for_status()
@@ -134,41 +138,17 @@ def get_market_breadth() -> dict:
         return {}
 
 
-def get_quote(symbol: str) -> dict:
-    try:
-        return _quote(symbol)
-    except Exception as e:
-        log.error("Quote %s fail: %s", symbol, e)
-        return {}
-
-
 def get_quotes(symbols: list[str]) -> dict:
-    """Per-symbol quotes via stable API."""
+    """Per-symbol quotes via FMP, falls back to yfinance on failure."""
     result: dict = {}
     for sym in symbols:
         try:
-            q = _quote(sym)
+            q = get_quote(sym)
             if q:
                 result[sym] = q
         except Exception as e:
             log.debug("Quote %s skip: %s", sym, e)
     return result
-
-
-def get_daily_bars(symbol: str, days: int = 60) -> list[dict]:
-    """Daily OHLCV bars, most-recent first."""
-    try:
-        today = datetime.date.today()
-        start = today - datetime.timedelta(days=int(days * 1.5))
-        data = _get(f"{_STABLE}/historical-price-eod/full", {
-            "symbol": symbol,
-            "from":   start.isoformat(),
-            "to":     today.isoformat(),
-        })
-        return data if isinstance(data, list) else data.get("historical", [])
-    except Exception as e:
-        log.error("Bars %s fail: %s", symbol, e)
-        return []
 
 
 def get_next_earnings(symbol: str) -> str | None:
@@ -252,3 +232,89 @@ def get_screener_universe(
     except Exception as e:
         log.warning("Screener failed: %s — returning []", e)
         return []
+
+
+# ── yfinance Fallback ──────────────────────────────────────────────────────────
+def _yfinance_quote(symbol: str) -> dict:
+    """Fallback quote via yfinance when FMP is rate-limited/unavailable."""
+    global _fmp_fallback_active
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(symbol)
+        info = ticker.fast_info.last_price or {}
+        # Normalize to match FMP shape
+        return {
+            "price": info if isinstance(info, (int, float)) else ticker.fast_info.last_price,
+            "changesPercentage": 0,  # yfinance free tier doesn't have change%
+            "yearHigh": ticker.info.get("fifty_two_week_high", 0),
+            "yearLow": ticker.info.get("fifty_two_week_low", 0),
+            "avgVolume": ticker.info.get("average_volume", 0),
+            "volume": ticker.info.get("volume", 0),
+            "marketCap": ticker.info.get("market_cap", 0),
+        }
+    except Exception as e:
+        log.debug("yfinance quote %s failed: %s", symbol, e)
+        return {}
+
+
+def _yfinance_bars(symbol: str, days: int = 60) -> list[dict]:
+    """Fallback OHLCV via yfinance when FMP is unavailable."""
+    global _fmp_fallback_active
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period=f"{days * 2}d")
+        if hist.empty:
+            return []
+        # Normalize to match FMP historical shape
+        bars = []
+        for dt, row in hist.iterrows():
+            bars.append({
+                "date": dt.strftime("%Y-%m-%d"),
+                "open": float(row["Open"]),
+                "high": float(row["High"]),
+                "low": float(row["Low"]),
+                "close": float(row["Close"]),
+                "volume": int(row["Volume"]),
+            })
+        return bars
+    except Exception as e:
+        log.debug("yfinance bars %s failed: %s", symbol, e)
+        return []
+
+
+# ── Public API with built-in fallback ─────────────────────────────────────────
+def get_quote(symbol: str) -> dict:
+    """Quote via FMP, falls back to yfinance on failure/rate-limit."""
+    global _fmp_fallback_active
+    try:
+        result = _quote(symbol)
+        if result:
+            _fmp_fallback_active = False
+            return result
+    except Exception as e:
+        log.warning("FMP quote %s failed: %s", symbol, e)
+
+    # FMP failed — try yfinance
+    _fmp_fallback_active = True
+    return _yfinance_quote(symbol)
+
+
+def get_daily_bars(symbol: str, days: int = 60) -> list[dict]:
+    """Daily OHLCV via FMP, falls back to yfinance on failure."""
+    global _fmp_fallback_active
+    try:
+        result = _get(f"{_STABLE}/historical-price-eod/full", {
+            "symbol": symbol,
+            "from": (datetime.date.today() - datetime.timedelta(days=int(days * 1.5))).isoformat(),
+            "to": datetime.date.today().isoformat(),
+        })
+        if isinstance(result, list) and result:
+            _fmp_fallback_active = False
+            return result
+    except Exception as e:
+        log.warning("FMP bars %s failed: %s", symbol, e)
+
+    # FMP failed — try yfinance
+    _fmp_fallback_active = True
+    return _yfinance_bars(symbol, days)
