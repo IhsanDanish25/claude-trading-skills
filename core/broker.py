@@ -302,25 +302,28 @@ class BrokerClient:
 
         Handles two cases:
           1. Standalone stop order (type=stop, side=sell) — replace directly.
-          2. OCO parent order (order_class=oco) — replace by id, which updates
-             both legs (take_profit limit + stop_loss stop) in one call.
-        Returns True only if the order was actually replaced on Alpaca."""
+          2. OCO child stop-loss leg (type=stop, returned as separate order) — replace.
+        Returns True only if the order was actually replaced on Alpaca.
+
+        Note: Alpaca doesn't expose stop_price on the OCO parent — the stop-loss
+        is a child order returned as type=stop. We match by type instead."""
         try:
             open_orders = self.get_open_orders()
-            # Filter for sell orders with stop_price - skip limit orders (take_profit legs)
+            # Match stop orders for this symbol (handles both standalone stops
+            # and OCO child stop-loss legs, which Alpaca returns as separate rows)
             candidates = []
             for o in open_orders:
                 if o.symbol != symbol:
                     continue
-                if "sell" not in str(getattr(o, "side", "")).lower():
+                if str(getattr(o, "side", "")).lower() != "sell":
                     continue
-                # Only consider orders that have a stop_price (stop-loss legs)
-                if getattr(o, "stop_price", None) is None:
+                order_type = str(getattr(o, "type", "")).lower()
+                if "stop" not in order_type:
                     continue
                 candidates.append(o)
 
             if not candidates:
-                log.warning("tighten_stop: no open stop/OCO order for %s", symbol)
+                log.warning("tighten_stop: no open stop order for %s", symbol)
                 return False
             order = candidates[0]
             old_stop = getattr(order, "stop_price", None)

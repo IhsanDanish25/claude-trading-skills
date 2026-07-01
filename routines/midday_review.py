@@ -149,6 +149,10 @@ def run():
                      f"(entry=${entry:.2f} stop=${stop} target=${target})")
             broker.attach_stop_target(p.symbol, qty, stop, target)
 
+        # Brief pause to let Alpaca propagate the new OCO orders before
+        # we try to update them in the review loop below.
+        time.sleep(2)
+
     if not positions:
         log.info("No positions — skip position review")
     else:
