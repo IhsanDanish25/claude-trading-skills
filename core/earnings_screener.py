@@ -205,6 +205,38 @@ def fetch_symbol_earnings(symbol: str, sleep: bool = True) -> list[dict] | None:
     return None  # do not cache — caller will retry next run
 
 
+def _fetch_fmp_earnings_calendar(start_iso: str, end_iso: str) -> list[dict] | None:
+    """Bulk earnings calendar from FMP for [start_iso, end_iso] — one API call
+    covers every symbol that reported in the window (vs. one call per symbol).
+
+    Returns raw FMP rows [{symbol, date, eps, epsEstimated, ...}], or None on
+    error/missing key so the caller can fall back to the per-symbol scan.
+    """
+    import os
+    import requests
+
+    api_key = os.environ.get("FMP_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        r = requests.get(
+            "https://financialmodelingprep.com/stable/earnings-calendar",
+            params={"from": start_iso, "to": end_iso, "apikey": api_key},
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, list):
+            log.warning("FMP earnings-calendar: unexpected response shape")
+            return None
+        log.info("FMP earnings-calendar: %d rows for %s..%s", len(data), start_iso, end_iso)
+        return data
+    except Exception as e:
+        log.warning("FMP bulk earnings-calendar fetch failed: %s — "
+                    "falling back to per-symbol scan", e)
+        return None
+
+
 def _liquidity(symbols: list[str], lookback: int = 20) -> dict[str, dict]:
     """Latest price + average daily volume per symbol via Alpaca IEX bars.
     Returns {symbol: {"price": float, "avg_volume": float}}; absent if no data."""
@@ -237,22 +269,29 @@ def screen_earnings(
     Returns candidates sorted by surprise magnitude (biggest first):
         {symbol, surprise_pct, actual_eps, estimated_eps, report_date, price}
 
-    Note: uses per-symbol disk cache (via earnings_data.get_symbol_earnings).
-    Delete cache files under backtest_harness/cache/earnings/ to force refresh.
+    Data source: FMP's bulk /stable/earnings-calendar endpoint (one API call
+    for the whole lookback window, restricted to the S&P 500 universe). Falls
+    back to the legacy per-symbol yfinance/FMP scan (via earnings_data disk
+    cache) only when FMP_API_KEY is unset or the bulk call fails — that path
+    is much slower on a cold cache (~1s/symbol x 503 symbols) so it should be
+    the exception, not the norm, in live (non-backtest) runs.
     """
-    from backtest_harness.earnings_data import get_symbol_earnings
-
     end = as_of or datetime.date.today()
     start = end - datetime.timedelta(days=lookback_days)
     start_iso, end_iso = start.isoformat(), end.isoformat()
 
     symbols = get_sp500_symbols()
+    sp500_set = set(symbols)
     best: dict[str, dict] = {}
-    for sym in symbols:
-        rows = get_symbol_earnings(sym)
-        for row in rows:
-            d = row.get("date", "")
-            sp = row.get("surprise_pct")
+
+    calendar = _fetch_fmp_earnings_calendar(start_iso, end_iso)
+    if calendar is not None:
+        for item in calendar:
+            sym = item.get("symbol")
+            if not sym or sym not in sp500_set:
+                continue
+            d = item.get("date", "")
+            sp = compute_surprise_pct(item.get("eps"), item.get("epsEstimated"))
             if not d or sp is None or sp < min_surprise_pct:
                 continue
             if not (start_iso <= d <= end_iso):
@@ -262,10 +301,31 @@ def screen_earnings(
                 best[sym] = {
                     "symbol": sym,
                     "surprise_pct": round(sp, 2),
-                    "actual_eps": row.get("reported_eps"),
-                    "estimated_eps": row.get("eps_estimate"),
+                    "actual_eps": item.get("eps"),
+                    "estimated_eps": item.get("epsEstimated"),
                     "report_date": d,
                 }
+    else:
+        from backtest_harness.earnings_data import get_symbol_earnings
+
+        for sym in symbols:
+            rows = get_symbol_earnings(sym)
+            for row in rows:
+                d = row.get("date", "")
+                sp = row.get("surprise_pct")
+                if not d or sp is None or sp < min_surprise_pct:
+                    continue
+                if not (start_iso <= d <= end_iso):
+                    continue
+                prev = best.get(sym)
+                if prev is None or d >= prev["report_date"]:
+                    best[sym] = {
+                        "symbol": sym,
+                        "surprise_pct": round(sp, 2),
+                        "actual_eps": row.get("reported_eps"),
+                        "estimated_eps": row.get("eps_estimate"),
+                        "report_date": d,
+                    }
 
     if not best:
         log.info("Earnings screen: 0 EPS beats >= %.0f%% in %s..%s", min_surprise_pct, start, end)
