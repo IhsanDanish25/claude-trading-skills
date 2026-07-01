@@ -109,8 +109,10 @@ def run():
     log.info(f"Open positions: {len(positions)}")
 
     # ── Repair: ensure every position has a stop order ──────────────────────
-    # Cancel all existing sell orders first (they hold qty and block new OCOs),
-    # then re-attach fresh stop/target protection on every position.
+    # Only cancel orphaned orders (limiting old positions we no longer hold).
+    # NEVER cancel existing OCO protection on positions we currently hold —
+    # the cancel+reattach cycle can race against tighten_stop and cause "no
+    # open stop order" failures when Alpaca re-propagates the new OCO.
     if positions:
         open_orders = broker.get_open_orders()
         if open_orders:
@@ -118,19 +120,15 @@ def run():
             cancelled = 0
             for o in open_orders:
                 try:
+                    # Only cancel orders for symbols we NO LONGER hold
                     if o.symbol not in position_symbols:
                         broker.trade.cancel_order_by_id(o.id)
                         log.info(f"  Cancelled orphan order: {o.symbol} {o.side}")
                         cancelled += 1
-                    elif "sell" in str(o.side).lower():
-                        broker.trade.cancel_order_by_id(o.id)
-                        log.info(f"  Cancelled existing sell order: {o.symbol} {o.type}")
-                        cancelled += 1
                 except Exception as e:
                     log.warning(f"  Cancel order fail: {e}")
             if cancelled:
-                import time as _time
-                _time.sleep(1)
+                time.sleep(1)
 
         for p in positions:
             entry = float(p.avg_entry_price)
