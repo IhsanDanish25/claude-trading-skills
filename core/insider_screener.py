@@ -33,7 +33,7 @@ from core.config import (
     INSIDER_MIN_PRICE, INSIDER_MIN_DOLLAR, INSIDER_LOOKBACK_DAYS,
     INSIDER_LIMIT, SP80_UNIVERSE,
 )
-from core.fmp import _get, _stable
+from core.fmp import _get, _STABLE as _stable
 
 log = logging.getLogger(__name__)
 
@@ -123,10 +123,10 @@ def screen() -> list[dict]:
 
     # Fetch all transactions for universe symbols in one batch call
     log.info(f"Insider screen: fetching P-Purchases via FMP /stable/ (last "
-            f"{INSIDER_LOOKBACK_DAYS}d, universe={len(S&P80_UNIVERSE)})")
+            f"{INSIDER_LOOKBACK_DAYS}d, universe={len(SP80_UNIVERSE)})")
 
     all_transactions: list[dict] = []
-    for sym in S&P80_UNIVERSE:
+    for sym in SP80_UNIVERSE:
         try:
             data = _get(f"{_stable}/insider-trading", {
                 "symbol":     sym,

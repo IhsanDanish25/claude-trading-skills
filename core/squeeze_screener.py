@@ -31,7 +31,7 @@ from core.config import (
     SQUEEZE_MIN_PRICE, SQUEEZE_MIN_SI_PCT, SQUEEZE_MIN_DTC,
     SQUEEZE_MIN_MOMENTUM, SQUEEZE_LIMIT,
 )
-from core.fmp import _get, _stable
+from core.fmp import _get, _STABLE as _stable
 
 log = logging.getLogger(__name__)
 

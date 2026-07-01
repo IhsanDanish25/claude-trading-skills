@@ -28,7 +28,7 @@ import datetime
 from core.config import SP80_UNIVERSE, MEANREV_STOP_PCT, MEANREV_MIN_PRICE
 from core.config import MEANREV_RSI_THRESHOLD, MEANREV_BB_THRESHOLD
 from core.config import MEANREV_MIN_AVG_VOLUME, MEANREV_LIMIT
-from core.fmp import _get, _stable
+from core.fmp import _get, _STABLE as _stable
 
 log = logging.getLogger(__name__)
 
@@ -142,8 +142,8 @@ def screen() -> list[dict]:
                       avg_volume, bb_position, score}
     """
     log.info(f"MeanRev screen: fetching {_N_BARS} days for "
-            f"{len(S&P80_UNIVERSE)} symbols via FMP /stable/")
-    bars_map = _fetch_bars_batch(S&P80_UNIVERSE)
+            f"{len(SP80_UNIVERSE)} symbols via FMP /stable/")
+    bars_map = _fetch_bars_batch(SP80_UNIVERSE)
     log.info(f"  Got bars for {len(bars_map)} symbols")
 
     candidates: list[dict] = []

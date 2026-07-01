@@ -24,30 +24,36 @@ from core.earnings_screener import screen_earnings
 from core.pead_tracker import add_position as pead_track
 from core.spy_base import rebalance_to_spy, free_cash_for_pead, log_status as spy_log
 
-# Strategy screeners — fail gracefully if FMP unavailable
+log = logger.setup("market_open")
+ET  = pytz.timezone("America/New_York")
+
+# Strategy screeners — fail gracefully if FMP unavailable, but log the real
+# cause so an import bug doesn't masquerade as "FMP unavailable" forever.
 try:
     from core.meanrev_screener import screen as screen_meanrev
-except Exception:
+except Exception as e:
+    log.error("MeanRev screener import failed: %s", e)
     screen_meanrev = None
 try:
     from core.insider_screener import screen as screen_insider
-except Exception:
+except Exception as e:
+    log.error("Insider screener import failed: %s", e)
     screen_insider = None
 try:
     from core.squeeze_screener import screen as screen_squeeze
-except Exception:
+except Exception as e:
+    log.error("Squeeze screener import failed: %s", e)
     screen_squeeze = None
 try:
     from core.breakout_screener import screen as screen_breakout
-except Exception:
+except Exception as e:
+    log.error("Breakout screener import failed: %s", e)
     screen_breakout = None
 try:
     from core.earnings_momentum_screener import screen as screen_earnmom
-except Exception:
+except Exception as e:
+    log.error("EarnMom screener import failed: %s", e)
     screen_earnmom = None
-
-log = logger.setup("market_open")
-ET  = pytz.timezone("America/New_York")
 
 
 def _build_breaker(broker: BrokerClient) -> CircuitBreaker:
@@ -387,7 +393,7 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today):
 def _run_meanrev(broker, cb, pv, slots, held, already_bought_today):
     """Mean Reversion: RSI<30 + Bollinger oversold + above SMA200. Hold ~14d."""
     if screen_meanrev is None:
-        log.warning("MeanRev: screener unavailable (FMP?) — skipping")
+        log.warning("MeanRev: screener not loaded — see import error above — skipping")
         return
     log.info("MeanRev: screening RSI < 30 + Bollinger Band oversold...")
     candidates = screen_meanrev()
@@ -460,7 +466,7 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today):
 def _run_insider(broker, cb, pv, slots, held, already_bought_today):
     """Insider P-Purchases: CEO/CFO conviction + cluster + $ value. Hold ~30d."""
     if screen_insider is None:
-        log.warning("Insider: screener unavailable (FMP?) — skipping")
+        log.warning("Insider: screener not loaded — see import error above — skipping")
         return
     log.info("Insider: screening P-Purchases via FMP insider-trading...")
     candidates = screen_insider()
@@ -532,7 +538,7 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today):
 def _run_squeeze(broker, cb, pv, slots, held, already_bought_today):
     """Short Squeeze: SI>15% + DTC>3 + bullish momentum. Hold ~21d."""
     if screen_squeeze is None:
-        log.warning("Squeeze: screener unavailable (FMP?) — skipping")
+        log.warning("Squeeze: screener not loaded — see import error above — skipping")
         return
     log.info("Squeeze: screening short interest via FMP...")
     candidates = screen_squeeze()
@@ -606,7 +612,7 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today):
 def _run_breakout(broker, cb, pv, slots, held, already_bought_today):
     """Breakout: price above 50d resistance + 1.5x volume confirmation. Hold ~21d."""
     if screen_breakout is None:
-        log.warning("Breakout: screener unavailable (FMP?) — skipping")
+        log.warning("Breakout: screener not loaded — see import error above — skipping")
         return
     log.info("Breakout: screening for 50d resistance clears via FMP...")
     candidates = screen_breakout()
@@ -680,7 +686,7 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today):
 def _run_earnmom(broker, cb, pv, slots, held, already_bought_today):
     """Earnings Momentum: beat 8-45d ago, still drifting up. Hold ~35d."""
     if screen_earnmom is None:
-        log.warning("EarnMom: screener unavailable (FMP?) — skipping")
+        log.warning("EarnMom: screener not loaded — see import error above — skipping")
         return
     log.info("EarnMom: screening earnings beats that still have momentum drift...")
     candidates = screen_earnmom()

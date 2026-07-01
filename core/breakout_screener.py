@@ -31,7 +31,7 @@ from core.config import (
     BREAKOUT_MIN_PRICE, BREAKOUT_VOL_MULT, BREAKOUT_MIN_AVG_VOLUME,
     BREAKOUT_LIMIT, SP80_UNIVERSE,
 )
-from core.fmp import _get, _stable
+from core.fmp import _get, _STABLE as _stable
 
 log = logging.getLogger(__name__)
 
@@ -106,14 +106,14 @@ def screen() -> list[dict]:
                       clearance_pct, breakout_score}
     """
     log.info(f"Breakout screen: fetching {_N_BARS} days for "
-            f"breakout candidates, universe={len(S&P80_UNIVERSE)}")
+            f"breakout candidates, universe={len(SP80_UNIVERSE)}")
 
     today = datetime.date.today()
     start = today - datetime.timedelta(days=_N_BARS * 2)
     candidates: list[dict] = []
     fetched = 0
 
-    for sym in S&P80_UNIVERSE:
+    for sym in SP80_UNIVERSE:
         try:
             data = _get(f"{_stable}/historical-price-eod/full", {
                 "symbol": sym,

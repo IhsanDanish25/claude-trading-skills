@@ -34,7 +34,7 @@ from core.config import (
     EARNMOM_LOOKBACK_DAYS, EARNMOM_MAX_DAYS_AGO, EARNMOM_MIN_DRIFT_PCT,
     EARNMOM_LIMIT, SP80_UNIVERSE,
 )
-from core.fmp import _get, _stable
+from core.fmp import _get, _STABLE as _stable
 
 log = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ def screen() -> list[dict]:
     # FMP earning_calendar returns ALL future + past earnings for all symbols.
     # So we fetch once for the whole universe.
     log.info(f"EarnMom screen: fetching earnings calendar via FMP /stable/ "
-            f"(from={cutoff}, universe={len(S&P80_UNIVERSE)})")
+            f"(from={cutoff}, universe={len(SP80_UNIVERSE)})")
 
     try:
         data = _get(f"{_stable}/earning_calendar", {
@@ -147,7 +147,7 @@ def screen() -> list[dict]:
         if not isinstance(row, dict):
             continue
         sym = row.get("symbol")
-        if not sym or sym not in set(S&P80_UNIVERSE):
+        if not sym or sym not in set(SP80_UNIVERSE):
             continue
 
         # Only consider rows with actual reported EPS (not estimates)
