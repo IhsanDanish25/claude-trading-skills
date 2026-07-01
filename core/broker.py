@@ -309,6 +309,15 @@ class BrokerClient:
         is a child order returned as type=stop. We match by type instead."""
         try:
             open_orders = self.get_open_orders()
+            log.debug(f"tighten_stop: {len(open_orders)} open orders total")
+            # Log all orders for this symbol for debugging
+            for o in open_orders:
+                if o.symbol == symbol:
+                    log.debug(f"  Order: id={o.id} type={o.type} side={o.side} "
+                              f"order_class={getattr(o, 'order_class', 'n/a')} "
+                              f"stop_price={getattr(o, 'stop_price', 'n/a')} "
+                              f"limit_price={getattr(o, 'limit_price', 'n/a')}")
+
             # Match stop orders for this symbol (handles both standalone stops
             # and OCO child stop-loss legs, which Alpaca returns as separate rows)
             candidates = []
