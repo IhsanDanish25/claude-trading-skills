@@ -307,15 +307,18 @@ class BrokerClient:
         Returns True only if the order was actually replaced on Alpaca."""
         try:
             open_orders = self.get_open_orders()
-            candidates = [
-                o for o in open_orders
-                if o.symbol == symbol
-                and "sell" in str(getattr(o, "side", "")).lower()
-                and (
-                    "oco" in str(getattr(o, "order_class", "")).lower()
-                    or "stop" in str(getattr(o, "type", "")).lower()
-                )
-            ]
+            # Filter for sell orders with stop_price - skip limit orders (take_profit legs)
+            candidates = []
+            for o in open_orders:
+                if o.symbol != symbol:
+                    continue
+                if "sell" not in str(getattr(o, "side", "")).lower():
+                    continue
+                # Only consider orders that have a stop_price (stop-loss legs)
+                if getattr(o, "stop_price", None) is None:
+                    continue
+                candidates.append(o)
+
             if not candidates:
                 log.warning("tighten_stop: no open stop/OCO order for %s", symbol)
                 return False
