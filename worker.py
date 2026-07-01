@@ -117,6 +117,19 @@ def startup_health_check() -> None:
     else:
         log.warning("  ANTHROPIC_MODELS: NOT SET (will use default: claude-opus-4-7)")
 
+    strategy_mode = os.environ.get("STRATEGY_MODE", "")
+    if strategy_mode:
+        modes = [s.strip() for s in strategy_mode.split(",") if s.strip()]
+        log.info("  STRATEGY_MODE: %s (%d strategies)", ", ".join(modes), len(modes))
+    else:
+        log.info("  STRATEGY_MODE: pead (default)")
+
+    notify_to = os.environ.get("NOTIFY_TO", "")
+    if notify_to:
+        log.info("  NOTIFY_TO: SET")
+    else:
+        log.warning("  NOTIFY_TO: NOT SET (email alerts disabled)")
+
     missing = [k for k, v in required.items() if not v]
     if missing:
         log.error("HEALTH CHECK FAILED: missing env vars: %s", ", ".join(missing))
@@ -172,6 +185,18 @@ def startup_health_check() -> None:
         log.info("  HEARTBEAT URL: %s", public_url)
     except Exception as e:
         log.warning("  HEARTBEAT: FAILED — %s (non-fatal)", e)
+
+    # Log the schedule so operators can verify at a glance
+    log.info("SCHEDULE (all times ET, Mon-Fri):")
+    schedule_labels = [
+        ("06:00", "pre_market"),
+        ("09:35", "market_open"),
+        ("12:00", "midday_review"),
+        ("15:00", "market_close"),
+        ("16:00", "weekly_review (Fri only)"),
+    ]
+    for time_str, label in schedule_labels:
+        log.info("  %s  %s", time_str, label)
 
     log.info("HEALTH CHECK COMPLETE")
     log.info("=" * 50)
