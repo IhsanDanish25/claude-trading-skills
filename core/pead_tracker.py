@@ -2,7 +2,7 @@
 PEAD position tracker — stores entry dates + metadata for time-based exits.
 
 File: state/pead_positions.json
-Format: {symbol: {entry_date, entry_price, surprise_pct, hold_days}}
+Format: {symbol: {entry_date, entry_price, surprise_pct, hold_days, strategy}}
 """
 from __future__ import annotations
 
@@ -15,6 +15,16 @@ from core.config import STATE_DIR, PEAD_HOLD_DAYS
 
 log = logging.getLogger(__name__)
 PEAD_FILE = os.path.join(STATE_DIR, "pead_positions.json")
+
+# ── Strategy defaults ─────────────────────────────────────────────────────────
+_STRATEGY_HOLD_DAYS = {
+    "pead":   PEAD_HOLD_DAYS,
+    "meanrev": 14,
+    "insider": 30,
+    "squeeze": 21,
+    "breakout": 21,
+    "earnmom":  35,
+}
 
 
 def _load() -> dict:
@@ -32,17 +42,23 @@ def _save(data: dict) -> None:
 
 
 def add_position(symbol: str, entry_price: float,
-                 surprise_pct: float, report_date: str) -> None:
+                 surprise_pct: float, report_date: str,
+                 strategy: str = "pead",
+                 hold_days: int | None = None) -> None:
+    """Register a new position with optional strategy tag and custom hold_days."""
+    hold_days = hold_days or _STRATEGY_HOLD_DAYS.get(strategy, PEAD_HOLD_DAYS)
     data = _load()
     data[symbol] = {
-        "entry_date": datetime.date.today().isoformat(),
-        "entry_price": entry_price,
-        "surprise_pct": surprise_pct,
-        "report_date": report_date,
-        "hold_days": PEAD_HOLD_DAYS,
+        "entry_date":    datetime.date.today().isoformat(),
+        "entry_price":   entry_price,
+        "surprise_pct":  surprise_pct,
+        "report_date":   report_date,
+        "hold_days":     hold_days,
+        "strategy":      strategy,
     }
     _save(data)
-    log.info(f"PEAD tracked: {symbol} surprise={surprise_pct:.1f}% hold={PEAD_HOLD_DAYS}d")
+    log.info(f"Position tracked: {symbol} strategy={strategy} hold={hold_days}d "
+             f"surprise={surprise_pct:.1f}%")
 
 
 def remove_position(symbol: str) -> None:
@@ -50,7 +66,17 @@ def remove_position(symbol: str) -> None:
     if symbol in data:
         del data[symbol]
         _save(data)
-        log.info(f"PEAD untracked: {symbol}")
+        log.info(f"Position untracked: {symbol}")
+
+
+def update_position(symbol: str, **kwargs) -> None:
+    """Update arbitrary fields on an existing position entry."""
+    data = _load()
+    if symbol not in data:
+        log.warning("update_position: %s not in tracker", symbol)
+        return
+    data[symbol].update(kwargs)
+    _save(data)
 
 
 def get_expired(today: datetime.date | None = None) -> list[dict]:
@@ -64,17 +90,23 @@ def get_expired(today: datetime.date | None = None) -> list[dict]:
         hold = info.get("hold_days", PEAD_HOLD_DAYS)
         if age >= hold:
             expired.append({
-                "symbol": sym,
-                "entry_date": info["entry_date"],
+                "symbol":      sym,
+                "entry_date":  info["entry_date"],
                 "entry_price": info["entry_price"],
-                "age_days": age,
-                "hold_days": hold,
+                "age_days":    age,
+                "hold_days":   hold,
+                "strategy":    info.get("strategy", "pead"),
             })
     return expired
 
 
 def get_all() -> dict:
     return _load()
+
+
+def get_by_symbol(symbol: str) -> dict | None:
+    data = _load()
+    return data.get(symbol)
 
 
 def position_age(symbol: str, today: datetime.date | None = None) -> int | None:

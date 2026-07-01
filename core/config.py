@@ -87,9 +87,11 @@ WATCHLIST = [
     "CELH","ENPH","FSLR","ON","AEHR","SMCI","AXON","COCO","DUOL","PINS"
 ]
 
-# ── Strategy mode ─────────────────────────────────────────────────────────────
-# "vcp" = original VCP momentum (default), "pead" = earnings drift
-STRATEGY_MODE = os.environ.get("STRATEGY_MODE", "pead").lower()
+# ── Strategy mode (comma-separated, run in order listed) ─────────────────────
+# Supported: pead, meanrev, insider, squeeze, breakout, earnmom
+# Example: STRATEGY_MODE=pead,meanrev,insider,squeeze,breakout,earnmom
+_STRATEGY_RAW = os.environ.get("STRATEGY_MODE", "pead").lower()
+STRATEGY_MODES = [s.strip() for s in _STRATEGY_RAW.split(",") if s.strip()]
 
 # ── PEAD params ───────────────────────────────────────────────────────────────
 PEAD_HOLD_DAYS        = int(os.environ.get("PEAD_HOLD_DAYS", "60"))
@@ -100,10 +102,91 @@ PEAD_MIN_PRICE        = float(os.environ.get("PEAD_MIN_PRICE", "10.0"))
 PEAD_MIN_AVG_VOLUME   = float(os.environ.get("PEAD_MIN_AVG_VOLUME", "500000"))
 PEAD_SIZE_PCT         = float(os.environ.get("PEAD_SIZE_PCT", "0.05"))
 
+# ── MeanRev params (RSI < 30 + Bollinger oversold + above SMA200) ─────────────
+MEANREV_HOLD_DAYS        = int(os.environ.get("MEANREV_HOLD_DAYS", "14"))
+MEANREV_STOP_PCT         = float(os.environ.get("MEANREV_STOP_PCT", "0.05"))
+MEANREV_SIZE_PCT         = float(os.environ.get("MEANREV_SIZE_PCT", "0.03"))
+MEANREV_MIN_PRICE        = float(os.environ.get("MEANREV_MIN_PRICE", "10.0"))
+MEANREV_RSI_THRESHOLD    = float(os.environ.get("MEANREV_RSI_THRESHOLD", "30.0"))
+MEANREV_BB_THRESHOLD     = float(os.environ.get("MEANREV_BB_THRESHOLD", "0.0"))
+# 0.0 = price at lower Bollinger Band; negative = below lower band
+MEANREV_MIN_AVG_VOLUME   = float(os.environ.get("MEANREV_MIN_AVG_VOLUME", "500000"))
+MEANREV_LIMIT            = int(os.environ.get("MEANREV_LIMIT", "5"))
+
+# ── Insider params (FMP P-Purchase, scored by seniority + cluster + $ value) ─
+INSIDER_HOLD_DAYS       = int(os.environ.get("INSIDER_HOLD_DAYS", "30"))
+INSIDER_STOP_PCT        = float(os.environ.get("INSIDER_STOP_PCT", "0.08"))
+INSIDER_SIZE_PCT        = float(os.environ.get("INSIDER_SIZE_PCT", "0.04"))
+INSIDER_MIN_PRICE       = float(os.environ.get("INSIDER_MIN_PRICE", "5.0"))
+INSIDER_MIN_DOLLAR      = float(os.environ.get("INSIDER_MIN_DOLLAR", "100000"))
+INSIDER_LOOKBACK_DAYS   = int(os.environ.get("INSIDER_LOOKBACK_DAYS", "30"))
+INSIDER_LIMIT           = int(os.environ.get("INSIDER_LIMIT", "5"))
+
+# ── Squeeze params (SI > 15% + DTC > 3 + momentum) ──────────────────────────
+SQUEEZE_HOLD_DAYS       = int(os.environ.get("SQUEEZE_HOLD_DAYS", "21"))
+SQUEEZE_STOP_PCT        = float(os.environ.get("SQUEEZE_STOP_PCT", "0.10"))
+SQUEEZE_SIZE_PCT        = float(os.environ.get("SQUEEZE_SIZE_PCT", "0.03"))
+SQUEEZE_MIN_PRICE       = float(os.environ.get("SQUEEZE_MIN_PRICE", "5.0"))
+SQUEEZE_MIN_SI_PCT      = float(os.environ.get("SQUEEZE_MIN_SI_PCT", "15.0"))
+SQUEEZE_MIN_DTC         = float(os.environ.get("SQUEEZE_MIN_DTC", "3.0"))
+SQUEEZE_MIN_MOMENTUM    = float(os.environ.get("SQUEEZE_MIN_MOMENTUM", "5.0"))
+# minimum 20-day momentum % to consider stock has fuel for squeeze
+SQUEEZE_LIMIT           = int(os.environ.get("SQUEEZE_LIMIT", "5"))
+
+# ── Breakout params (above 50-day resistance + 1.5x volume) ─────────────────
+BREAKOUT_HOLD_DAYS       = int(os.environ.get("BREAKOUT_HOLD_DAYS", "21"))
+BREAKOUT_STOP_PCT        = float(os.environ.get("BREAKOUT_STOP_PCT", "0.06"))
+BREAKOUT_SIZE_PCT        = float(os.environ.get("BREAKOUT_SIZE_PCT", "0.04"))
+BREAKOUT_MIN_PRICE       = float(os.environ.get("BREAKOUT_MIN_PRICE", "10.0"))
+BREAKOUT_VOL_MULT        = float(os.environ.get("BREAKOUT_VOL_MULT", "1.5"))
+BREAKOUT_MIN_AVG_VOLUME  = float(os.environ.get("BREAKOUT_MIN_AVG_VOLUME", "500000"))
+BREAKOUT_LIMIT           = int(os.environ.get("BREAKOUT_LIMIT", "5"))
+
+# ── Earnings Momentum params (beat 8-45 days ago, still drifting up) ────────
+EARNMOM_HOLD_DAYS        = int(os.environ.get("EARNMOM_HOLD_DAYS", "35"))
+EARNMOM_STOP_PCT         = float(os.environ.get("EARNMOM_STOP_PCT", "0.08"))
+EARNMOM_SIZE_PCT         = float(os.environ.get("EARNMOM_SIZE_PCT", "0.04"))
+EARNMOM_MIN_PRICE        = float(os.environ.get("EARNMOM_MIN_PRICE", "10.0"))
+EARNMOM_MIN_AVG_VOLUME   = float(os.environ.get("EARNMOM_MIN_AVG_VOLUME", "500000"))
+EARNMOM_MIN_SURPRISE_PCT = float(os.environ.get("EARNMOM_MIN_SURPRISE_PCT", "5.0"))
+EARNMOM_LOOKBACK_DAYS    = int(os.environ.get("EARNMOM_LOOKBACK_DAYS", "60"))
+EARNMOM_MAX_DAYS_AGO     = int(os.environ.get("EARNMOM_MAX_DAYS_AGO", "45"))
+EARNMOM_MIN_DRIFT_PCT    = float(os.environ.get("EARNMOM_MIN_DRIFT_PCT", "2.0"))
+# stock must be up at least this much since earnings beat
+EARNMOM_LIMIT            = int(os.environ.get("EARNMOM_LIMIT", "5"))
+
 # ── E4 Portable Alpha: idle cash → SPY ───────────────────────────────────────
 SPY_BASE_ENABLED      = os.environ.get("SPY_BASE_ENABLED", "true").lower() == "true"
-SPY_CASH_RESERVE_PCT  = float(os.environ.get("SPY_CASH_RESERVE_PCT", "0.10"))  # keep 10% cash buffer
-SPY_REBALANCE_BAND    = float(os.environ.get("SPY_REBALANCE_BAND", "0.05"))    # rebalance if off by 5%+
+SPY_CASH_RESERVE_PCT  = float(os.environ.get("SPY_CASH_RESERVE_PCT", "0.10"))
+SPY_REBALANCE_BAND    = float(os.environ.get("SPY_REBALANCE_BAND", "0.05"))
 
 # ── Timezone ──────────────────────────────────────────────────────────────────
 TIMEZONE = "America/New_York"
+
+# ── S&P 500 universe (top 80 for FMP-limited screeners) ─────────────────────
+# Curated 80 symbols covering all major sectors — reasonable universe for
+# FMP /stable/ endpoints that are slower than Alpaca IEX.
+SP80_UNIVERSE = [
+    # Technology
+    "AAPL","MSFT","NVDA","AVGO","AMD","META","GOOGL","AMZN","ADBE","CRM",
+    "ORCL","ACN","CSCO","IBM","INTC","QCOM","TXN","NOW","INTU","AMAT",
+    # Consumer
+    "NFLX","TSLA","HD","MCD","NKE","SBUX","TGT","LOW","UPS","DG",
+    # Healthcare
+    "LLY","JNJ","UNH","PFE","ABBV","MRK","BMY","GILD","AMGN","ISRG",
+    # Financials
+    "JPM","BAC","WFC","GS","MS","BLK","C","AXP","SCHW","USB",
+    # Industrials
+    "CAT","GE","RTX","HON","BA","LMT","DE","MMM","ADP","PCAR",
+    # Energy
+    "XOM","CVX","COP","EOG","SLB","PSX","MPC","VLO","OXY","HAL",
+    # Utilities / Real estate / Materials
+    "NEE","DUK","SO","SPG","PLD","AMT","CCI","EQIX","LIN","REIT",
+    # Communication
+    "DIS","CMCSA","CHTR","TMUS","NFLX","PYPL","SNAP","TWTR",
+    # Health tech / Biotech
+    "DXCM","HUM","CI","ELV","CNC","ZLAB","REGN","BIIB","MRNA",
+    # Misc
+    "V","MA","ADP","IDXX","ODFL","FAST","CPRT","ADI",
+]
+SP80_UNIVERSE = sorted(list(set(SP80_UNIVERSE)))  # de-dup

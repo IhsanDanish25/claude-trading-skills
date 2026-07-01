@@ -24,6 +24,28 @@ from core.earnings_screener import screen_earnings
 from core.pead_tracker import add_position as pead_track
 from core.spy_base import rebalance_to_spy, free_cash_for_pead, log_status as spy_log
 
+# Strategy screeners — fail gracefully if FMP unavailable
+try:
+    from core.meanrev_screener import screen as screen_meanrev
+except Exception:
+    screen_meanrev = None
+try:
+    from core.insider_screener import screen as screen_insider
+except Exception:
+    screen_insider = None
+try:
+    from core.squeeze_screener import screen as screen_squeeze
+except Exception:
+    screen_squeeze = None
+try:
+    from core.breakout_screener import screen as screen_breakout
+except Exception:
+    screen_breakout = None
+try:
+    from core.earnings_momentum_screener import screen as screen_earnmom
+except Exception:
+    screen_earnmom = None
+
 log = logger.setup("market_open")
 ET  = pytz.timezone("America/New_York")
 
@@ -32,8 +54,8 @@ def _build_breaker(broker: BrokerClient) -> CircuitBreaker:
     return CircuitBreaker(
         get_account=broker.get_account,
         get_positions=broker.get_positions,
-        max_open_positions=3,
-        max_position_pct=0.05,
+        max_open_positions=config.MAX_OPEN_POSITIONS,
+        max_position_pct=config.MAX_POSITION_SIZE_PCT,
         max_daily_loss=0.03,
     )
 
@@ -355,6 +377,379 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today):
         log.info(f"SPY base: {spy_result['action']} {spy_result.get('qty', 0)} shares")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Strategy runner stubs — one per strategy mode
+# Each follows the same contract as _run_pead:
+#   broker, cb, pv, slots, held, already_bought_today → None
+# Each calls config.{STRATEGY}_SIZE_PCT, .{STRATEGY}_STOP_PCT, .{STRATEGY}_HOLD_DAYS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_meanrev(broker, cb, pv, slots, held, already_bought_today):
+    """Mean Reversion: RSI<30 + Bollinger oversold + above SMA200. Hold ~14d."""
+    if screen_meanrev is None:
+        log.warning("MeanRev: screener unavailable (FMP?) — skipping")
+        return
+    log.info("MeanRev: screening RSI < 30 + Bollinger Band oversold...")
+    candidates = screen_meanrev()
+    log.info(f"MeanRev: {len(candidates)} candidates")
+    if not candidates:
+        return
+
+    for c in candidates:
+        sym = c["symbol"]
+        price = c["price"]
+        size_pct = config.MEANREV_SIZE_PCT
+        amount = pv * size_pct
+
+        if sym in held:
+            continue
+        if sym in already_bought_today:
+            continue
+
+        log.info(f"MeanRev BUY {sym} | RSI={c['rsi']} BBpos={c['bb_position']:.0f}% "
+                 f"momentum={c.get('momentum_pct', 0):+.1f}% | ${amount:,.0f}")
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"  ✗ {sym} SKIP — cannot free cash from SPY base")
+                continue
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+            except TradingHalted as halt:
+                log.warning(f"  ✗ {sym} blocked by circuit breaker: {halt}")
+                continue
+            result = broker.buy(
+                sym, dollar_amount=amount,
+                stop_loss_pct=config.MEANREV_STOP_PCT,
+                take_profit_pct=0.99,   # time-managed, no hard target
+            )
+            if result.get("blocked"):
+                log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
+                continue
+            if not result.get("stop_attached"):
+                log.error(f"  ✗ {sym} stop NOT attached — flattening")
+                broker.sell(sym, qty=result["qty"])
+                continue
+
+            log.info(f"  ✓ MeanRev {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                     f"SL={result['stop']} (hold {config.MEANREV_HOLD_DAYS}d)")
+
+            pead_track(sym, result["price"],
+                       surprise_pct=c.get("rsi", 0),
+                       report_date=datetime.date.today().isoformat(),
+                       strategy="meanrev",
+                       hold_days=config.MEANREV_HOLD_DAYS)
+            send_trade_alert(
+                action="BUY", ticker=sym, shares=result["qty"],
+                price=result["price"], stop=result["stop"], target=None,
+                reason=(f"MeanRev RSI={c['rsi']} BB={c['bb_position']:.0f}%"
+                        f" momentum={c.get('momentum_pct', 0):+.1f}%"),
+            )
+            _mark_bought(sym, result)
+            _append_trade_log({
+                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                "symbol": sym, "side": "buy", "qty": result.get("qty"),
+                "price": result.get("price"), "stop": result.get("stop"),
+                "target": None, "strategy": "meanrev",
+                "rsi": c["rsi"], "bb_position": c["bb_position"],
+                "exit_date": None, "exit_price": None, "pnl_pct": None,
+            })
+        except Exception as e:
+            log.error(f"  ✗ MeanRev {sym} failed: {e}")
+
+
+def _run_insider(broker, cb, pv, slots, held, already_bought_today):
+    """Insider P-Purchases: CEO/CFO conviction + cluster + $ value. Hold ~30d."""
+    if screen_insider is None:
+        log.warning("Insider: screener unavailable (FMP?) — skipping")
+        return
+    log.info("Insider: screening P-Purchases via FMP insider-trading...")
+    candidates = screen_insider()
+    log.info(f"Insider: {len(candidates)} candidates")
+    if not candidates:
+        return
+
+    for c in candidates:
+        sym = c["symbol"]
+        size_pct = config.INSIDER_SIZE_PCT
+        amount = pv * size_pct
+
+        if sym in held:
+            continue
+        if sym in already_bought_today:
+            continue
+
+        log.info(f"Insider BUY {sym} | score={c['insider_score']:.0f} "
+                 f"txns={c['n_transactions']} total=${c['total_dollar']:,.0f} | ${amount:,.0f}")
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"  ✗ {sym} SKIP — cannot free cash")
+                continue
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+            except TradingHalted as halt:
+                log.warning(f"  ✗ {sym} circuit breaker: {halt}")
+                continue
+            result = broker.buy(
+                sym, dollar_amount=amount,
+                stop_loss_pct=config.INSIDER_STOP_PCT,
+                take_profit_pct=0.99,
+            )
+            if result.get("blocked"):
+                log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
+                continue
+            if not result.get("stop_attached"):
+                broker.sell(sym, qty=result["qty"])
+                continue
+
+            log.info(f"  ✓ Insider {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                     f"SL={result['stop']} (hold {config.INSIDER_HOLD_DAYS}d)")
+
+            pead_track(sym, result["price"],
+                       surprise_pct=c.get("insider_score", 0),
+                       report_date=datetime.date.today().isoformat(),
+                       strategy="insider",
+                       hold_days=config.INSIDER_HOLD_DAYS)
+            send_trade_alert(
+                action="BUY", ticker=sym, shares=result["qty"],
+                price=result["price"], stop=result["stop"], target=None,
+                reason=(f"Insider score={c['insider_score']:.0f}"
+                        f" {c['n_transactions']} purchases"),
+            )
+            _mark_bought(sym, result)
+            _append_trade_log({
+                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                "symbol": sym, "side": "buy", "qty": result.get("qty"),
+                "price": result.get("price"), "stop": result.get("stop"),
+                "target": None, "strategy": "insider",
+                "insider_score": c["insider_score"],
+                "total_dollar": c["total_dollar"],
+                "exit_date": None, "exit_price": None, "pnl_pct": None,
+            })
+        except Exception as e:
+            log.error(f"  ✗ Insider {sym} failed: {e}")
+
+
+def _run_squeeze(broker, cb, pv, slots, held, already_bought_today):
+    """Short Squeeze: SI>15% + DTC>3 + bullish momentum. Hold ~21d."""
+    if screen_squeeze is None:
+        log.warning("Squeeze: screener unavailable (FMP?) — skipping")
+        return
+    log.info("Squeeze: screening short interest via FMP...")
+    candidates = screen_squeeze()
+    log.info(f"Squeeze: {len(candidates)} candidates")
+    if not candidates:
+        return
+
+    for c in candidates:
+        sym = c["symbol"]
+        size_pct = config.SQUEEZE_SIZE_PCT
+        amount = pv * size_pct
+
+        if sym in held:
+            continue
+        if sym in already_bought_today:
+            continue
+
+        log.info(f"Squeeze BUY {sym} | SI={c['short_interest_pct']:.1f}%"
+                 f" DTC={c['days_to_cover']:.1f}d mom={c['momentum_pct']:+.1f}% "
+                 f"score={c['score']:.0f} | ${amount:,.0f}")
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"  ✗ {sym} SKIP — cannot free cash")
+                continue
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+            except TradingHalted as halt:
+                log.warning(f"  ✗ {sym} circuit breaker: {halt}")
+                continue
+            result = broker.buy(
+                sym, dollar_amount=amount,
+                stop_loss_pct=config.SQUEEZE_STOP_PCT,
+                take_profit_pct=0.99,
+            )
+            if result.get("blocked"):
+                log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
+                continue
+            if not result.get("stop_attached"):
+                broker.sell(sym, qty=result["qty"])
+                continue
+
+            log.info(f"  ✓ Squeeze {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                     f"SL={result['stop']} (hold {config.SQUEEZE_HOLD_DAYS}d)")
+
+            pead_track(sym, result["price"],
+                       surprise_pct=c.get("score", 0),
+                       report_date=datetime.date.today().isoformat(),
+                       strategy="squeeze",
+                       hold_days=config.SQUEEZE_HOLD_DAYS)
+            send_trade_alert(
+                action="BUY", ticker=sym, shares=result["qty"],
+                price=result["price"], stop=result["stop"], target=None,
+                reason=(f"Squeeze SI={c['short_interest_pct']:.1f}%"
+                        f" DTC={c['days_to_cover']:.1f}d mom={c['momentum_pct']:+.1f}%"),
+            )
+            _mark_bought(sym, result)
+            _append_trade_log({
+                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                "symbol": sym, "side": "buy", "qty": result.get("qty"),
+                "price": result.get("price"), "stop": result.get("stop"),
+                "target": None, "strategy": "squeeze",
+                "si_pct": c["short_interest_pct"],
+                "days_to_cover": c["days_to_cover"],
+                "momentum_pct": c["momentum_pct"],
+                "exit_date": None, "exit_price": None, "pnl_pct": None,
+            })
+        except Exception as e:
+            log.error(f"  ✗ Squeeze {sym} failed: {e}")
+
+
+def _run_breakout(broker, cb, pv, slots, held, already_bought_today):
+    """Breakout: price above 50d resistance + 1.5x volume confirmation. Hold ~21d."""
+    if screen_breakout is None:
+        log.warning("Breakout: screener unavailable (FMP?) — skipping")
+        return
+    log.info("Breakout: screening for 50d resistance clears via FMP...")
+    candidates = screen_breakout()
+    log.info(f"Breakout: {len(candidates)} candidates")
+    if not candidates:
+        return
+
+    for c in candidates:
+        sym = c["symbol"]
+        size_pct = config.BREAKOUT_SIZE_PCT
+        amount = pv * size_pct
+
+        if sym in held:
+            continue
+        if sym in already_bought_today:
+            continue
+
+        log.info(f"Breakout BUY {sym} | price=${c['price']:.2f} "
+                 f"clearance={c['clearance_pct']:+.2f}% vol={c['volume_ratio']}x "
+                 f"ATR={c['atr_pct']:.1f}% score={c['score']:.0f} | ${amount:,.0f}")
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"  ✗ {sym} SKIP — cannot free cash")
+                continue
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+            except TradingHalted as halt:
+                log.warning(f"  ✗ {sym} circuit breaker: {halt}")
+                continue
+            result = broker.buy(
+                sym, dollar_amount=amount,
+                stop_loss_pct=config.BREAKOUT_STOP_PCT,
+                take_profit_pct=0.99,
+            )
+            if result.get("blocked"):
+                log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
+                continue
+            if not result.get("stop_attached"):
+                broker.sell(sym, qty=result["qty"])
+                continue
+
+            log.info(f"  ✓ Breakout {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                     f"SL={result['stop']} (hold {config.BREAKOUT_HOLD_DAYS}d)")
+
+            pead_track(sym, result["price"],
+                       surprise_pct=c.get("score", 0),
+                       report_date=datetime.date.today().isoformat(),
+                       strategy="breakout",
+                       hold_days=config.BREAKOUT_HOLD_DAYS)
+            send_trade_alert(
+                action="BUY", ticker=sym, shares=result["qty"],
+                price=result["price"], stop=result["stop"], target=None,
+                reason=(f"Breakout clearance={c['clearance_pct']:+.2f}%"
+                        f" vol={c['volume_ratio']}x ATR={c['atr_pct']:.1f}%"),
+            )
+            _mark_bought(sym, result)
+            _append_trade_log({
+                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                "symbol": sym, "side": "buy", "qty": result.get("qty"),
+                "price": result.get("price"), "stop": result.get("stop"),
+                "target": None, "strategy": "breakout",
+                "clearance_pct": c["clearance_pct"],
+                "volume_ratio": c["volume_ratio"],
+                "atr_pct": c["atr_pct"],
+                "exit_date": None, "exit_price": None, "pnl_pct": None,
+            })
+        except Exception as e:
+            log.error(f"  ✗ Breakout {sym} failed: {e}")
+
+
+def _run_earnmom(broker, cb, pv, slots, held, already_bought_today):
+    """Earnings Momentum: beat 8-45d ago, still drifting up. Hold ~35d."""
+    if screen_earnmom is None:
+        log.warning("EarnMom: screener unavailable (FMP?) — skipping")
+        return
+    log.info("EarnMom: screening earnings beats that still have momentum drift...")
+    candidates = screen_earnmom()
+    log.info(f"EarnMom: {len(candidates)} candidates")
+    if not candidates:
+        return
+
+    for c in candidates:
+        sym = c["symbol"]
+        size_pct = config.EARNMOM_SIZE_PCT
+        amount = pv * size_pct
+
+        if sym in held:
+            continue
+        if sym in already_bought_today:
+            continue
+
+        log.info(f"EarnMom BUY {sym} | surprise={c['surprise_pct']:+.1f}% "
+                 f"age={c['age_days']}d drift={c['drift_pct']:+.1f}% score={c['score']:.0f} | ${amount:,.0f}")
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"  ✗ {sym} SKIP — cannot free cash")
+                continue
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+            except TradingHalted as halt:
+                log.warning(f"  ✗ {sym} circuit breaker: {halt}")
+                continue
+            result = broker.buy(
+                sym, dollar_amount=amount,
+                stop_loss_pct=config.EARNMOM_STOP_PCT,
+                take_profit_pct=0.99,
+            )
+            if result.get("blocked"):
+                log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
+                continue
+            if not result.get("stop_attached"):
+                broker.sell(sym, qty=result["qty"])
+                continue
+
+            log.info(f"  ✓ EarnMom {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                     f"SL={result['stop']} (hold {config.EARNMOM_HOLD_DAYS}d)")
+
+            pead_track(sym, result["price"],
+                       surprise_pct=c.get("surprise_pct", 0),
+                       report_date=c.get("report_date", datetime.date.today().isoformat()),
+                       strategy="earnmom",
+                       hold_days=config.EARNMOM_HOLD_DAYS)
+            send_trade_alert(
+                action="BUY", ticker=sym, shares=result["qty"],
+                price=result["price"], stop=result["stop"], target=None,
+                reason=(f"EarnMom surprise={c['surprise_pct']:+.1f}%"
+                        f" drift={c['drift_pct']:+.1f}% age={c['age_days']}d"),
+            )
+            _mark_bought(sym, result)
+            _append_trade_log({
+                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                "symbol": sym, "side": "buy", "qty": result.get("qty"),
+                "price": result.get("price"), "stop": result.get("stop"),
+                "target": None, "strategy": "earnmom",
+                "surprise_pct": c["surprise_pct"],
+                "drift_pct": c["drift_pct"],
+                "age_days": c["age_days"],
+                "exit_date": None, "exit_price": None, "pnl_pct": None,
+            })
+        except Exception as e:
+            log.error(f"  ✗ EarnMom {sym} failed: {e}")
+
+
 def run():
     config.validate()
     now = datetime.datetime.now(ET)
@@ -425,16 +820,46 @@ def run():
         log.warning("Regime gate skipped: no SPY bars available — proceeding without gate")
 
     # ── STRATEGY ROUTER ───────────────────────────────────────────────────────
-    strategy = config.STRATEGY_MODE
-    log.info(f"Strategy mode: {strategy.upper()}")
+    # Run each strategy in priority order (PEAD → MEANREV → INSIDER → SQUEEZE →
+    # BREAKOUT → EARNMOM). Each runner consumes from the shared `slots` pool.
+    # Held-set and already_bought_today accumulate across runners so the same
+    # symbol is never double-bought within a single run.
+    STRATEGY_HANDLERS = {
+        "pead":    _run_pead,
+        "meanrev": _run_meanrev,
+        "insider": _run_insider,
+        "squeeze": _run_squeeze,
+        "breakout": _run_breakout,
+        "earnmom": _run_earnmom,
+    }
+    log.info(f"Strategy modes: {[s.upper() for s in config.STRATEGY_MODES]}")
 
-    if strategy == "pead":
-        _run_pead(broker, cb, pv, slots, held, already_bought_today)
-        logger.banner(log, "MARKET OPEN COMPLETE (PEAD)")
-        return
+    for strategy in config.STRATEGY_MODES:
+        if slots <= 0:
+            log.info(f"No slots remaining — stopping strategy loop")
+            break
 
-    # ── VCP path (original) ───────────────────────────────────────────────────
-    universe = build_universe()
+        handler = STRATEGY_HANDLERS.get(strategy)
+        if handler is None:
+            log.warning(f"Unknown strategy '{strategy}' — skipping")
+            continue
+
+        log.info(f"=== {strategy.upper()} RUNNER ===")
+        try:
+            handler(broker, cb, pv, slots, held, already_bought_today)
+        except Exception as e:
+            log.error(f"Strategy {strategy.upper()} runner raised: {e}")
+
+    log.info("All strategy runners complete")
+
+    # Rebalance idle cash back into SPY
+    spy_log(broker)
+    spy_result = rebalance_to_spy(broker)
+    if spy_result["action"] not in ("none", "disabled"):
+        log.info(f"SPY base: {spy_result['action']} {spy_result.get('qty', 0)} shares")
+
+    logger.banner(log, "MARKET OPEN COMPLETE")
+    return
     log.info(f"Universe: {len(universe)} symbols → screening...")
     candidates = screen(universe)
     log.info(f"Got {len(candidates)} candidates")
