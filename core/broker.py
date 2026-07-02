@@ -2,42 +2,66 @@
 Alpaca broker client — paper + live unified interface.
 """
 from __future__ import annotations
-import logging
-import datetime
-import time
-import pytz
 
+import datetime
+import logging
+import time
+
+import pytz
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
-    MarketOrderRequest,
+    GetOrdersRequest,
     LimitOrderRequest,
+    MarketOrderRequest,
+    ReplaceOrderRequest,
     StopLossRequest,
     TakeProfitRequest,
-    GetOrdersRequest,
-    ClosePositionRequest,
-    ReplaceOrderRequest,
 )
+
 try:
     from alpaca.trading.requests import GetPortfolioHistoryRequest
 except ImportError:
     GetPortfolioHistoryRequest = None
-from alpaca.trading.enums import (
-    OrderSide, TimeInForce, QueryOrderStatus, OrderClass
-)
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import (
-    StockBarsRequest, StockLatestQuoteRequest, StockLatestTradeRequest,
+    StockBarsRequest,
+    StockLatestQuoteRequest,
+    StockLatestTradeRequest,
 )
 from alpaca.data.timeframe import TimeFrame
+from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
 
 from core.config import (
-    ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL,
-    PAPER_TRADE, MAX_POSITION_SIZE_PCT, MAX_OPEN_POSITIONS,
-    STOP_LOSS_PCT, TAKE_PROFIT_PCT,
+    ALPACA_API_KEY,
+    ALPACA_BASE_URL,
+    ALPACA_SECRET_KEY,
+    MAX_OPEN_POSITIONS,
+    MAX_POSITION_SIZE_PCT,
+    PAPER_TRADE,
+    STOP_LOSS_PCT,
+    TAKE_PROFIT_PCT,
 )
+from core.notifier import send_error_alert
 
 log = logging.getLogger(__name__)
 ET  = pytz.timezone("America/New_York")
+
+# Alpaca error code for "insufficient qty available" — raised when an OCO
+# submission is rejected because the symbol's shares are already reserved
+# by another open order.
+_INSUFFICIENT_QTY_CODE = 40310000
+_CANCEL_POLL_TIMEOUT = 5.0   # seconds to wait for cancelled orders to clear
+_CANCEL_POLL_INTERVAL = 0.5
+_OCO_RETRY_WAIT = 2.0        # seconds to wait before a single 40310000 retry
+
+
+def _is_insufficient_qty_error(e: Exception) -> bool:
+    try:
+        if getattr(e, "code", None) == _INSUFFICIENT_QTY_CODE:
+            return True
+    except Exception:
+        pass
+    return str(_INSUFFICIENT_QTY_CODE) in str(e)
 
 
 class BrokerClient:
@@ -84,6 +108,57 @@ class BrokerClient:
     def cancel_all_orders(self):
         self.trade.cancel_orders()
         log.info("All orders cancelled")
+
+    def _open_orders_for(self, symbol: str) -> list:
+        try:
+            return [o for o in self.get_open_orders() if o.symbol == symbol]
+        except Exception as e:
+            log.warning(f"  list open orders for {symbol} failed: {e}")
+            return []
+
+    def _find_oco_legs(self, symbol: str):
+        """Return (stop_leg, target_leg) for an existing OCO on symbol, or
+        (None, None) if no complete OCO is currently open. Alpaca returns each
+        OCO leg as its own order row (not nested under a parent), distinguished
+        by order_class='oco' plus type — same convention tighten_stop relies on."""
+        stop_leg = target_leg = None
+        for o in self._open_orders_for(symbol):
+            if str(getattr(o, "side", "")).lower() != "sell":
+                continue
+            if "oco" not in str(getattr(o, "order_class", "")).lower():
+                continue
+            order_type = str(getattr(o, "type", "")).lower()
+            if "stop" in order_type:
+                stop_leg = o
+            elif "limit" in order_type:
+                target_leg = o
+        return stop_leg, target_leg
+
+    def _cancel_symbol_orders(self, symbol: str,
+                               timeout: float = _CANCEL_POLL_TIMEOUT,
+                               interval: float = _CANCEL_POLL_INTERVAL) -> bool:
+        """Cancel every open order for symbol and poll until Alpaca releases
+        the reserved shares (or timeout). Returns True once no open orders
+        remain for the symbol."""
+        open_orders = self._open_orders_for(symbol)
+        if not open_orders:
+            return True
+        for o in open_orders:
+            try:
+                self.trade.cancel_order_by_id(o.id)
+                log.info(f"  Cancelled order {str(o.id)[:8]} ({symbol} {o.side} "
+                         f"{o.type}) to release shares")
+            except Exception as e:
+                log.warning(f"  Cancel order {o.id} ({symbol}) failed: {e}")
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(interval)
+            if not self._open_orders_for(symbol):
+                return True
+        log.warning(f"  Timed out waiting for {symbol} orders to cancel — "
+                    f"shares may still be reserved")
+        return False
 
     # ── Market data ───────────────────────────────────────────────────────────
     def get_bars(self, symbols: list, timeframe: TimeFrame, days: int = 60):
@@ -142,21 +217,66 @@ class BrokerClient:
         position (unlike two independent full-qty SELL orders, where the first
         reserves the shares and the second is rejected).
 
+        A symbol's shares can already be tied up by some other open order (a
+        stale plain SELL LIMIT, a leftover bracket leg, etc.) — submitting a
+        fresh OCO on top of that is rejected by Alpaca with error 40310000
+        ("insufficient qty available"). To avoid that:
+          1. Skip entirely if a matching OCO (same stop, target, qty) is
+             already open for the symbol — no need to churn orders.
+          2. Otherwise cancel every open order for the symbol and poll until
+             Alpaca confirms the shares are released, then submit.
+          3. If Alpaca still rejects with 40310000, wait and retry once more.
+          4. If it still fails, log an ERROR and send an alert email — this
+             position would otherwise be left with no protection.
+
         OCO is atomic, so both legs attach together or neither does. Returns
         (stop_attached, target_attached) — both the same bool — to preserve the
         caller contract."""
-        try:
-            self.trade.submit_order(LimitOrderRequest(
-                symbol=symbol, qty=qty, side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC, order_class=OrderClass.OCO,
-                take_profit=TakeProfitRequest(limit_price=target),
-                stop_loss=StopLossRequest(stop_price=stop),
-            ))
-            log.info(f"  ↳ OCO attached: stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]")
-            return True, True
-        except Exception as e:
-            log.error(f"  ↳ OCO attach FAILED [{symbol}]: {e}")
-            return False, False
+        stop_leg, target_leg = self._find_oco_legs(symbol)
+        if stop_leg is not None and target_leg is not None:
+            leg_qty = int(float(getattr(stop_leg, "qty", 0)
+                                 or getattr(target_leg, "qty", 0) or 0))
+            stop_price = getattr(stop_leg, "stop_price", None)
+            target_price = getattr(target_leg, "limit_price", None)
+            if (stop_price is not None and abs(float(stop_price) - stop) <= 0.01
+                    and target_price is not None and abs(float(target_price) - target) <= 0.01
+                    and leg_qty == qty):
+                log.info(f"  ↳ OCO already correct for {symbol} "
+                         f"(stop=${stop:.2f} target=${target:.2f} x{qty}) — skip")
+                return True, True
+
+        attempts = 2
+        last_err: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            self._cancel_symbol_orders(symbol)
+            try:
+                self.trade.submit_order(LimitOrderRequest(
+                    symbol=symbol, qty=qty, side=OrderSide.SELL,
+                    time_in_force=TimeInForce.GTC, order_class=OrderClass.OCO,
+                    take_profit=TakeProfitRequest(limit_price=target),
+                    stop_loss=StopLossRequest(stop_price=stop),
+                ))
+                log.info(f"  ↳ OCO attached: stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]")
+                return True, True
+            except Exception as e:
+                last_err = e
+                if _is_insufficient_qty_error(e) and attempt < attempts:
+                    log.warning(f"  ↳ OCO attach {symbol} hit 40310000 (insufficient qty) "
+                                f"— re-cancelling and retrying (attempt {attempt}/{attempts})")
+                    time.sleep(_OCO_RETRY_WAIT)
+                    continue
+                break
+
+        log.error(f"  ↳ OCO attach FAILED [{symbol}]: {last_err}")
+        if last_err is not None and _is_insufficient_qty_error(last_err):
+            try:
+                send_error_alert(
+                    routine="attach_stop_target",
+                    error=f"{symbol}: OCO attach failed after cancel + retry — {last_err}",
+                )
+            except Exception as notify_err:
+                log.error(f"  ↳ failed to send alert email for {symbol}: {notify_err}")
+        return False, False
 
     def buy(self, symbol: str, dollar_amount: float = None, shares: int = None,
             stop_loss_pct: float = STOP_LOSS_PCT,
@@ -297,13 +417,19 @@ class BrokerClient:
         self.trade.close_all_positions(cancel_orders=True)
         log.warning("ALL POSITIONS CLOSED")
 
-    def tighten_stop(self, symbol: str, new_stop: float) -> bool:
+    def tighten_stop(self, symbol: str, new_stop: float, target: float | None = None) -> bool:
         """Replace the open stop-loss for symbol with a tighter stop price.
 
-        Handles two cases:
+        Handles three cases:
           1. Standalone stop order (type=stop, side=sell) — replace directly.
           2. OCO child stop-loss leg (type=stop, returned as separate order) — replace.
-        Returns True only if the order was actually replaced on Alpaca.
+          3. No stop order at all — e.g. the position's shares are held by a
+             plain SELL LIMIT (no stop_price), which happens when an earlier
+             OCO attach was skipped or rejected. Replacing has nothing to
+             target, so cancel whatever's open and rebuild a full OCO with the
+             tightened stop instead of leaving the position unprotected.
+        Returns True only if the stop was actually tightened on Alpaca (either
+        by replace, or by a full OCO rebuild).
 
         Note: Alpaca doesn't expose stop_price on the OCO parent — the stop-loss
         is a child order returned as type=stop. We match by type instead."""
@@ -332,8 +458,9 @@ class BrokerClient:
                 candidates.append(o)
 
             if not candidates:
-                log.warning("tighten_stop: no open stop order for %s", symbol)
-                return False
+                log.warning("tighten_stop: no open stop order for %s — "
+                            "rebuilding full OCO instead of leaving it unprotected", symbol)
+                return self._rebuild_oco_stop(symbol, new_stop, target)
             order = candidates[0]
             old_stop = getattr(order, "stop_price", None)
             old_label = f"${old_stop:.2f}" if isinstance(old_stop, (int, float)) else str(old_stop or "?")
@@ -346,6 +473,36 @@ class BrokerClient:
         except Exception as e:
             log.error("tighten_stop %s failed: %s", symbol, e)
             return False
+
+    def _rebuild_oco_stop(self, symbol: str, new_stop: float, target: float | None) -> bool:
+        """No stop leg found for symbol's open orders — cancel whatever is
+        open (releasing the shares) and place a fresh OCO with the tightened
+        stop, so the position is never left with only a take-profit or a
+        plain sell order and no downside protection."""
+        pos = self.get_position(symbol)
+        if pos is None:
+            log.warning("tighten_stop: no position in %s to rebuild OCO for", symbol)
+            return False
+        qty = int(float(pos.qty))
+        if qty < 1:
+            return False
+
+        if target is None:
+            _, target_leg = self._find_oco_legs(symbol)
+            target_price = getattr(target_leg, "limit_price", None) if target_leg else None
+            if target_price is not None:
+                target = float(target_price)
+            else:
+                entry = float(pos.avg_entry_price)
+                target = round(entry * (1 + TAKE_PROFIT_PCT), 2)
+                log.warning("tighten_stop: no target supplied/found for %s — "
+                            "defaulting to entry-based target $%.2f", symbol, target)
+
+        stop_attached, _ = self.attach_stop_target(symbol, qty, new_stop, target)
+        if stop_attached:
+            log.info("tighten_stop: rebuilt OCO for %s — stop $%.2f / target $%.2f",
+                      symbol, new_stop, target)
+        return stop_attached
 
     def get_portfolio_history(self, period: str = "1W"):
         try:

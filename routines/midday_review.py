@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 MIDDAY REVIEW ROUTINE — 12:00 PM ET, Mon-Fri
 ─────────────────────────────────────────────
@@ -8,20 +9,25 @@ MIDDAY REVIEW ROUTINE — 12:00 PM ET, Mon-Fri
 4. Check for new high-quality setups (post-open volume data)
 5. Cancel stale open orders
 """
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import json
 import datetime
+import json
 import time
+
 import pytz
-from core import logger, config
-from core.broker   import BrokerClient
-from core.fmp      import get_quotes, get_market_breadth
-from core.analyst  import review_open_positions, analyze_market_regime, score_vcp_candidates
+
+from core import config, logger
+from core.analyst import analyze_market_regime, review_open_positions, score_vcp_candidates
+from core.broker import BrokerClient
+from core.edge import circuit_breaker_tripped, compute_trail_stop, should_pyramid
+from core.fmp import get_market_breadth, get_quotes
 from core.screener import screen
-from core.edge     import should_pyramid, compute_trail_stop, circuit_breaker_tripped
-from core.spy_base import rebalance_to_spy, log_status as spy_log
+from core.spy_base import log_status as spy_log
+from core.spy_base import rebalance_to_spy
 
 log = logger.setup("midday")
 ET  = pytz.timezone("America/New_York")
@@ -109,10 +115,11 @@ def run():
     log.info(f"Open positions: {len(positions)}")
 
     # ── Repair: ensure every position has a stop order ──────────────────────
-    # Only cancel orphaned orders (limiting old positions we no longer hold).
-    # NEVER cancel existing OCO protection on positions we currently hold —
-    # the cancel+reattach cycle can race against tighten_stop and cause "no
-    # open stop order" failures when Alpaca re-propagates the new OCO.
+    # First cancel orphaned orders (for positions we no longer hold). Held
+    # positions are handled by attach_stop_target itself, which skips the
+    # cancel+resubmit cycle entirely when a matching OCO is already open, and
+    # only cancels+rebuilds when the existing order(s) don't already provide
+    # correct protection (e.g. a stale plain SELL LIMIT holding the shares).
     if positions:
         open_orders = broker.get_open_orders()
         if open_orders:
@@ -184,7 +191,7 @@ def run():
                     broker.sell(sym, qty=trim_qty)
                     log.info(f"  💰 {sym}: partial profit — sold {trim_qty}/{qty} at +{pnl_pct:.1f}%")
                     new_trail_stop = round(current * (1 - config.TRAIL_STOP_PCT), 2)
-                    broker.tighten_stop(sym, new_trail_stop)
+                    broker.tighten_stop(sym, new_trail_stop, target=target)
                     log.info(f"  🔒 {sym}: trailing stop → ${new_trail_stop} on remaining {qty - trim_qty}")
                     qty -= trim_qty
                 except Exception as e:
@@ -194,7 +201,7 @@ def run():
             if config.TRAIL_INTRADAY and current > entry:
                 new_stop = compute_trail_stop(current, entry, stop)
                 if new_stop > stop:
-                    if broker.tighten_stop(sym, new_stop):
+                    if broker.tighten_stop(sym, new_stop, target=target):
                         log.info(f"  🔒 {sym}: intraday trail stop ${stop} → ${new_stop}")
                         stop = new_stop
 
@@ -228,6 +235,8 @@ def run():
 
         _save_pyramided(pyramided)
 
+        target_by_symbol = {p["symbol"]: p["target"] for p in pos_data}
+
         log.info("── Claude: position review")
         decisions = review_open_positions(pos_data, regime["regime"])
 
@@ -247,9 +256,9 @@ def run():
                     log.error(f"  ✗ Sell {sym} failed: {e}")
 
             elif action == "TIGHTEN_STOP" and new_stop:
-                ok = broker.tighten_stop(sym, float(new_stop))
+                ok = broker.tighten_stop(sym, float(new_stop), target=target_by_symbol.get(sym))
                 if not ok:
-                    log.warning("  %s: tighten_stop failed — no open stop order found", sym)
+                    log.warning("  %s: tighten_stop failed — could not replace or rebuild OCO", sym)
 
     slots = config.MAX_OPEN_POSITIONS - broker.position_count()
 
@@ -290,7 +299,7 @@ def run():
 
     positions_after = broker.get_positions()
     total_unrealized = sum(float(p.unrealized_pl or 0) for p in positions_after)
-    log.info(f"── Midday summary")
+    log.info("── Midday summary")
     log.info(f"  Positions: {len(positions_after)}")
     log.info(f"  Total unrealized P&L: ${total_unrealized:+,.2f}")
 
