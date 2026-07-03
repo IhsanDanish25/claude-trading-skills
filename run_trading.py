@@ -124,10 +124,22 @@ class TradingHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     
+    def do_HEAD(self):
+        if self.path == "/" or self.path == "/dashboard":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+        elif self.path in ["/health", "/api/skills"]:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+        else:
+            self.send_json({"error": "Not found"}, 404)
+
     def do_GET(self):
         if self.path == "/" or self.path == "/dashboard":
             self.send_html(generate_dashboard())
-        
+
         elif self.path == "/health":
             skills = load_skills()
             self.send_json({
