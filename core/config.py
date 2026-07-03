@@ -7,9 +7,13 @@ import sys
 try:
     from dotenv import load_dotenv
     # Load .env from repo root regardless of working directory.
-    # Existing env vars take precedence (override=False is the default).
+    # override=True makes the local .env authoritative so a stale or wrong
+    # ALPACA_API_KEY exported in the shell (or inherited from a polluted launch
+    # environment) can't silently shadow the correct key and cause 401s. This is
+    # a no-op on Railway, where .env is gitignored and never present in the
+    # nixpacks image — Railway's injected secrets remain the only source there.
     _dotenv = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
-    load_dotenv(_dotenv)
+    load_dotenv(_dotenv, override=True)
 except ImportError:
     pass
 
