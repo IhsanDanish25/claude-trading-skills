@@ -3,9 +3,11 @@ VCP (Volatility Contraction Pattern) screener — ALPACA-ONLY.
 No FMP calls = no rate limits. Uses Alpaca IEX bars (free).
 """
 from __future__ import annotations
+import datetime
 import logging
 import statistics
-import datetime
+
+import pytz
 
 from core.config import WATCHLIST, MIN_PRICE, MAX_PRICE, ET
 
