@@ -190,7 +190,8 @@ def screen() -> list[dict]:
 
             # ── Momentum filter: already in a dip, not a crash ─────────────
             momentum = _momentum_pct(bars)
-            bb_position = (price - bb_lower) / (bb_upper - bb_lower) if bb_upper != bb_lower else 0.0
+            bb_range = bb_upper - bb_lower
+            bb_position = (price - bb_lower) / bb_range if bb_range > 0 else 0.0
 
             # Score: lower RSI = higher score
             score = max(0, MEANREV_RSI_THRESHOLD - rsi)

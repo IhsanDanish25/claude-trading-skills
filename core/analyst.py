@@ -43,7 +43,10 @@ def _ask(system: str, user: str, max_tokens: int = 1024) -> str:
                 system=system,
                 messages=[{"role": "user", "content": user}],
             )
-            return msg.content[0].text
+            for block in msg.content:
+                if block.type == "text":
+                    return block.text
+            raise RuntimeError("Claude returned no text block in response")
         except anthropic.NotFoundError:
             log.warning("Model %s not available, trying next", model)
             continue

@@ -151,7 +151,7 @@ def screen() -> list[dict]:
             if price < BREAKOUT_MIN_PRICE:
                 continue
 
-            avg_vol = _avg_volume(bars[:20])
+            avg_vol = _avg_volume(bars[-20:])
             if avg_vol < BREAKOUT_MIN_AVG_VOLUME:
                 continue
 

@@ -114,7 +114,7 @@ def startup_health_check() -> None:
     }
     for name, val in required.items():
         if val:
-            log.info("  %s: SET (%s...%s)", name, val[:4], val[-4:])
+            log.info("  %s: SET ✓", name)
         else:
             log.error("  %s: MISSING", name)
 
@@ -237,7 +237,7 @@ def startup_rebalance() -> None:
         max_pct = 5.0
 
         broker = BrokerClient()
-        plan = build_plan(broker, target_positions, max_pct, keep_symbols=None)
+        plan = build_plan(broker, target_positions, max_pct)
 
         for line in format_plan(plan):
             if line:
