@@ -6,10 +6,12 @@ Format: {symbol: {entry_date, entry_price, surprise_pct, hold_days, strategy}}
 """
 from __future__ import annotations
 
-import json
-import os
 import datetime
+import json
 import logging
+import os
+import tempfile
+import threading
 
 from core.config import (
     STATE_DIR, PEAD_HOLD_DAYS,
@@ -19,6 +21,7 @@ from core.config import (
 
 log = logging.getLogger(__name__)
 PEAD_FILE = os.path.join(STATE_DIR, "pead_positions.json")
+_pead_lock = threading.Lock()
 
 # ── Strategy defaults ─────────────────────────────────────────────────────────
 # Source of truth is config.py; values here match those defaults.
@@ -33,17 +36,26 @@ _STRATEGY_HOLD_DAYS = {
 
 
 def _load() -> dict:
-    try:
-        with open(PEAD_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, ValueError):
-        return {}
+    with _pead_lock:
+        try:
+            with open(PEAD_FILE) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+        except json.JSONDecodeError as e:
+            log.warning("PEAD state corrupted (%s), resetting: %s", PEAD_FILE, e)
+            return {}
 
 
 def _save(data: dict) -> None:
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(PEAD_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    with _pead_lock:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", dir=STATE_DIR, delete=False, suffix=".tmp"
+        )
+        with tmp:
+            json.dump(data, tmp, indent=2)
+        os.replace(tmp.name, PEAD_FILE)
 
 
 def add_position(symbol: str, entry_price: float,
