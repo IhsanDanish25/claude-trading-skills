@@ -35,6 +35,7 @@ from core.config import (
     PAPER_TRADE, MAX_POSITION_SIZE_PCT, MAX_OPEN_POSITIONS,
     STOP_LOSS_PCT, TAKE_PROFIT_PCT,
 )
+from core.safe_oco_attach import safe_attach_oco
 
 log = logging.getLogger(__name__)
 ET  = pytz.timezone("America/New_York")
@@ -151,14 +152,20 @@ class BrokerClient:
 
         OCO is atomic, so both legs attach together or neither does. Returns
         (stop_attached, target_attached) — both the same bool — to preserve the
-        caller contract."""
-        try:
+        caller contract.
+
+        Submission is wrapped in safe_attach_oco, which retries once a stale
+        sell order for this symbol is cancelled if Alpaca rejects the order
+        with error 40310000 ("insufficient qty available for order")."""
+        def _submit():
             self.trade.submit_order(LimitOrderRequest(
                 symbol=symbol, qty=qty, side=OrderSide.SELL,
                 time_in_force=TimeInForce.GTC, order_class=OrderClass.OCO,
                 take_profit=TakeProfitRequest(limit_price=target),
                 stop_loss=StopLossRequest(stop_price=stop),
             ))
+        try:
+            safe_attach_oco(self, symbol, qty, stop, target, _submit)
             log.info(f"  ↳ OCO attached: stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]")
             return True, True
         except Exception as e:
