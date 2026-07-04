@@ -261,7 +261,21 @@ JSON only:
             messages=[{"role": "user", "content": prompt}]
         )
         text = response.content[0].text.strip()
-        result = json.loads(text[text.find("{"):text.rfind("}")+1])
+        # Parse JSON by brace-depth so stray closing braces don't truncate.
+        start = text.find("{")
+        if start == -1:
+            raise ValueError("No JSON object in Claude response")
+        depth = 0
+        for i, ch in enumerate(text[start:]):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    result = json.loads(text[start:start + i + 1])
+                    break
+        else:
+            raise ValueError("Unmatched braces in Claude response")
         decision = str(result.get("decision", "")).upper()
         confidence = result.get("confidence", 0)
         if decision not in ("BUY", "SKIP") or not isinstance(confidence, (int, float)) \
@@ -412,6 +426,13 @@ def run():
     for vcp in vcps:
         if traded >= MAX_TRADES_PER_RUN:
             break
+
+        # Re-check circuit breaker after each position closes (mid-loop safety)
+        ok, _ = daily_pnl_circuit_breaker(client, state)
+        if not ok:
+            logger.warning("Circuit breaker tripped mid-loop — halting at %d trades", traded)
+            break
+
         ticker = vcp.get("symbol") or vcp.get("ticker", "")
         if not ticker: continue
 
@@ -493,8 +514,15 @@ def run():
                 logger.error("%s: stop attach failed — closing position to avoid "
                              "unprotected exposure", ticker)
                 try:
-                    client.close_position(ticker, ClosePositionRequest(qty=str(filled)))
-                    logger.info("%s: position closed", ticker)
+                    # Fetch current position qty — `filled` is only the partial fill,
+                    # not the full residual the market will give us.
+                    pos = client.get_open_position(ticker)
+                    close_qty = int(float(pos.qty)) if pos else 0
+                    if close_qty > 0:
+                        client.close_position(ticker, ClosePositionRequest(qty=str(close_qty)))
+                        logger.info("%s: emergency close x%s", ticker, close_qty)
+                    else:
+                        logger.info("%s: no residual position to close", ticker)
                 except Exception as e:
                     logger.critical("%s: EMERGENCY CLOSE FAILED (%s) — MANUAL "
                                     "INTERVENTION REQUIRED", ticker, e)
