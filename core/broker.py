@@ -69,8 +69,15 @@ class BrokerClient:
     def get_position(self, symbol: str):
         try:
             return self.trade.get_open_position(symbol)
-        except Exception:
-            return None
+        except Exception as e:
+            # Distinguish "no position" from real errors that callers need to handle.
+            # 404 = Alpaca confirming zero position → treat as absent (safe default).
+            # Anything else (network, rate-limit, auth) → surface to caller.
+            err_str = str(e).lower()
+            if "404" in err_str or "not found" in err_str or "does not exist" in err_str:
+                return None
+            log.warning("get_position %s: unexpected error %r", symbol, e)
+            raise
 
     def position_count(self) -> int:
         return len(self.get_positions())
@@ -129,7 +136,7 @@ class BrokerClient:
                     return mid
         except Exception as e:
             log.warning("get_price quote failed for %s: %s", symbol, e)
-        if last is not None:
+        if last is not None and last > 0:
             return last
         raise RuntimeError(f"no usable price for {symbol}")
 
@@ -201,12 +208,19 @@ class BrokerClient:
             )
             return {"blocked": True, "reason": "position_size_cap"}
 
+        MIN_ORDER_PRICE = 1.00  # reject sub-dollar stocks to prevent unrealistic share counts
+
         if dollar_amount:
-            qty = max(1, int(dollar_amount / ref_price))
+            qty = max(1, int(dollar_amount / ref_price)) if ref_price >= MIN_ORDER_PRICE else 0
         elif shares:
             qty = shares
         else:
-            qty = max(1, int(remaining_cap / ref_price))
+            qty = max(1, int(remaining_cap / ref_price)) if ref_price >= MIN_ORDER_PRICE else 0
+
+        if qty < 1:
+            log.warning("BUY %s BLOCKED — ref_price $%.4f below $%.2f minimum",
+                        symbol, ref_price, MIN_ORDER_PRICE)
+            return {"blocked": True, "reason": "min_price"}
 
         order_value = qty * ref_price
         if order_value > remaining_cap:
@@ -230,14 +244,18 @@ class BrokerClient:
         ))
         log.info(f"BUY {symbol} x{qty} (market) submitted [{str(order.id)[:8]}]")
 
-        # 2. Poll for the actual fill price (up to ~5s)
+        # 2. Poll for the actual fill price (up to ~5s); exit early if market closed
+        market_open = self.is_market_open()
         fill_price = None
         filled_qty = qty
-        for _ in range(10):
+        for i in range(10):
+            if not market_open and i > 0:
+                log.warning("Market closed — aborting fill poll for %s", symbol)
+                break
             try:
                 o = self.trade.get_order_by_id(order.id)
             except Exception as e:
-                log.warning(f"poll order {symbol} failed: {e}")
+                log.warning("poll order %s failed: %s", symbol, e)
                 break
             if o.filled_avg_price:
                 fill_price = float(o.filled_avg_price)
@@ -348,18 +366,28 @@ class BrokerClient:
             return False
 
     def get_portfolio_history(self, period: str = "1W"):
-        try:
-            if GetPortfolioHistoryRequest is None:
-                log.warning("GetPortfolioHistoryRequest not available in this alpaca-py version")
-                return None
-            req = GetPortfolioHistoryRequest(period=period, timeframe="1D")
-            try:
-                return self.trade.get_portfolio_history(history_filter=req)
-            except TypeError:
-                return self.trade.get_portfolio_history(req)
-        except Exception as e:
-            log.error("Portfolio history fail: %s", e)
+        """Try both API signatures regardless of exception type."""
+        if GetPortfolioHistoryRequest is None:
+            log.warning("GetPortfolioHistoryRequest not available in this alpaca-py version")
             return None
+        req = GetPortfolioHistoryRequest(period=period, timeframe="1D")
+        signatures = [
+            [("history_filter", req)],
+            [("positional", req)],
+        ]
+        for sig_args in signatures:
+            try:
+                if sig_args[0][0] == "history_filter":
+                    return self.trade.get_portfolio_history(history_filter=req)
+                else:
+                    return self.trade.get_portfolio_history(req)
+            except TypeError:
+                continue
+            except Exception as e:
+                log.warning("get_portfolio_history: %s", e)
+                raise
+        log.error("get_portfolio_history: both signatures exhausted")
+        return None
 
     # ── Market status ─────────────────────────────────────────────────────────
     def is_market_open(self) -> bool:
