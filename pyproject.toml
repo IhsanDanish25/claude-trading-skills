@@ -18,6 +18,9 @@ dependencies = [
     "scipy>=1.13.1",
     "yfinance>=0.2.0",
     "streamlit>=1.28.0",
+    "alpaca-py>=0.20.0",
+    "anthropic>=0.116.0",
+    "finvizfinance>=1.3.0",
 ]
 
 [project.optional-dependencies]

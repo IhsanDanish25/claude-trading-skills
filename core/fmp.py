@@ -241,10 +241,12 @@ def _yfinance_quote(symbol: str) -> dict:
     try:
         import yfinance as yf
         ticker = yf.Ticker(symbol)
-        info = ticker.fast_info.last_price or {}
+        price = ticker.fast_info.last_price
+        if not isinstance(price, (int, float)):
+            price = 0.0
         # Normalize to match FMP shape
         return {
-            "price": info if isinstance(info, (int, float)) else ticker.fast_info.last_price,
+            "price": price,
             "changesPercentage": 0,  # yfinance free tier doesn't have change%
             "yearHigh": ticker.info.get("fifty_two_week_high", 0),
             "yearLow": ticker.info.get("fifty_two_week_low", 0),

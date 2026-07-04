@@ -6,12 +6,10 @@ from __future__ import annotations
 import logging
 import statistics
 import datetime
-import pytz
 
-from core.config import WATCHLIST, MIN_PRICE, MAX_PRICE
+from core.config import WATCHLIST, MIN_PRICE, MAX_PRICE, ET
 
 log = logging.getLogger(__name__)
-ET = pytz.timezone("America/New_York")
 
 _data_client = None
 

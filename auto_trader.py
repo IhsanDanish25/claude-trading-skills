@@ -1,11 +1,24 @@
-#!/usr/bin/env python3
-"""Auto Trader — FTD + VCP + Claude analysis + Congress/Buffett insider tracking."""
+"""
+Auto Trader — FTD + VCP + Claude analysis + Congress/Buffett insider tracking.
+
+Migrated to alpaca-py SDK (replaces deprecated alpaca_trade_api).
+All order lifecycle and account calls use the modern TradingClient API.
+"""
 import os, json, logging, urllib.request, re, sys, time
 from pathlib import Path
 from datetime import datetime, date
 import anthropic
-import alpaca_trade_api as tradeapi
-from alpaca_trade_api.rest import APIError
+
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import (
+    LimitOrderRequest, ClosePositionRequest,
+)
+from alpaca.trading.enums import (
+    OrderSide, TimeInForce,
+)
+from alpaca.data.requests import StockLatestTradeRequest
+
+from core.config import ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL, PAPER_TRADE
 
 # Auto-connect chain: verify Alpaca credentials on startup
 sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
@@ -14,13 +27,9 @@ from alpaca_auto_connect import run_chain as alpaca_auto_connect  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-def _load_dotenv(path):
-    """Load KEY=VALUE pairs from .env, overriding ambient env.
 
-    The repo .env is the source of truth for credentials; stale keys
-    inherited from a launcher env block have caused 401s here before.
-    No-op when .env is absent (e.g. Railway, where env vars are canonical).
-    """
+def _load_dotenv(path):
+    """Load KEY=VALUE pairs from .env, overriding ambient env."""
     if not path.exists():
         return
     for line in path.read_text().splitlines():
@@ -32,10 +41,7 @@ def _load_dotenv(path):
 
 _load_dotenv(Path(__file__).parent / ".env")
 
-ALPACA_KEY    = os.environ.get("ALPACA_API_KEY", "")
-ALPACA_SECRET = os.environ.get("ALPACA_SECRET_KEY", "")
-ALPACA_URL    = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
 DRY_RUN = os.environ.get("AUTO_TRADER_DRY_RUN", "0") == "1"
 RISK_PCT      = 0.01
@@ -45,20 +51,25 @@ MAX_TRADES_PER_RUN = 2
 STOP_LOSS_PCT = 0.07        # 7% trailing-style stop
 LIMIT_BUFFER_PCT = 0.005    # marketable-limit entry: cap slippage at 0.5%
 CONFIDENCE_MIN = 7
-DAILY_LOSS_CIRCUIT_PCT = 0.03   # skip trading if equity is down >3% on the day
+DAILY_LOSS_CIRCUIT_PCT = 0.03
 MAX_DATA_AGE_DAYS = int(os.environ.get("AUTO_TRADER_MAX_DATA_AGE_DAYS", "3"))
 FILL_WAIT_SECS = 45
 STATE_FILE = Path(__file__).parent / ".auto_trader_state.json"
 DASHBOARD_DIR = Path(__file__).parent / "examples/daily-market-dashboard/knowledge"
 
+
 def connect_alpaca():
-    api = tradeapi.REST(ALPACA_KEY, ALPACA_SECRET, ALPACA_URL)
-    acct = api.get_account()
-    logger.info("Alpaca | Cash: $%.2f | %s", float(acct.cash), "PAPER" if "paper" in ALPACA_URL else "LIVE")
-    return api, acct
+    """Build a TradingClient and log account info."""
+    client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=PAPER_TRADE)
+    acct = client.get_account()
+    mode = "PAPER" if PAPER_TRADE else "LIVE"
+    logger.info("Alpaca [%s] | Cash: $%.2f | Equity: $%.2f",
+                mode, float(acct.cash), float(acct.equity))
+    return client, acct
+
 
 def verify_anthropic(client):
-    """Fail fast on a bad Anthropic key instead of silently SKIPping every trade."""
+    """Fail fast on a bad Anthropic key."""
     try:
         client.models.list(limit=1)
         return True
@@ -67,8 +78,7 @@ def verify_anthropic(client):
                      "console.anthropic.com and update .env. Aborting.")
         return False
     except Exception as e:
-        # Network blip or old SDK — don't block; claude_analyze fails safe anyway
-        logger.warning("Anthropic pre-flight check inconclusive: %s", e)
+        logger.warning("Anthropic pre-flight inconclusive: %s", e)
         return True
 
 def _data_age_days(path):
@@ -283,13 +293,12 @@ def save_state(state):
     except Exception as e:
         logger.warning("Could not write state: %s", e)
 
-def daily_pnl_circuit_breaker(api, state):
+def daily_pnl_circuit_breaker(client, state):
     """Return (ok, pct_change) — ok=False means we should NOT trade today."""
     today = date.today().isoformat()
-    acct = api.get_account()
+    acct = client.get_account()
     equity = float(acct.equity)
     last_equity = float(acct.last_equity)
-    # last_equity is end-of-previous-day from Alpaca; today's change is (equity - last_equity) / last_equity
     if last_equity <= 0:
         return True, 0.0
     change = (equity - last_equity) / last_equity
@@ -299,46 +308,52 @@ def daily_pnl_circuit_breaker(api, state):
         return False, change
     return True, change
 
-def wait_for_fill(api, order_id, timeout=FILL_WAIT_SECS, poll=3):
+def wait_for_fill(client, order_id, timeout=FILL_WAIT_SECS, poll=3):
     """Block until the order fills (or dies/times out). Returns filled qty."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        o = api.get_order(order_id)
-        if o.status == "filled":
-            return int(float(o.filled_qty))
-        if o.status in ("canceled", "expired", "rejected", "done_for_day"):
-            logger.warning("Order %s ended %s (filled %s)", order_id, o.status, o.filled_qty)
-            return int(float(o.filled_qty or 0))
+        try:
+            o = client.get_order_by_id(order_id)
+            if o.status.value == "filled":
+                return int(float(o.filled_qty or 0))
+            if o.status.value in ("canceled", "expired", "rejected", "done_for_day"):
+                logger.warning("Order %s ended %s (filled %s)", order_id, o.status.value, o.filled_qty)
+                return int(float(o.filled_qty or 0))
+        except Exception as e:
+            logger.warning("poll order %s failed: %s", order_id, e)
+            break
         time.sleep(poll)
     logger.warning("Order %s not filled in %ds, canceling", order_id, timeout)
     try:
-        api.cancel_order(order_id)
+        client.cancel_order_by_id(order_id)
     except Exception:
         pass
     try:
-        o = api.get_order(order_id)
+        o = client.get_order_by_id(order_id)
         return int(float(o.filled_qty or 0))
     except Exception:
         return 0
 
-def attach_stop(api, ticker, qty, stop_price, parent_order_id, attempts=3):
+def attach_stop(client, ticker, qty, stop_price, parent_order_id, attempts=3):
     """Attach a GTC stop-loss to a filled position. Returns order or None."""
     if DRY_RUN:
         logger.info("  [DRY-RUN] would attach stop @ $%.2f for %s", stop_price, ticker)
         return None
     for attempt in range(1, attempts + 1):
         try:
-            sl = api.submit_order(
-                symbol=ticker,
-                qty=qty,
-                side="sell",
-                type="stop",
-                stop_price=round(stop_price, 2),
-                time_in_force="gtc",
-                client_order_id=f"sl-{parent_order_id}",
+            from alpaca.trading.requests import StopOrderRequest
+            stop_order = client.submit_order(
+                StopOrderRequest(
+                    symbol=ticker,
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    stop_price=round(stop_price, 2),
+                    time_in_force=TimeInForce.GTC,
+                    client_order_id=f"sl-{parent_order_id}",
+                )
             )
-            logger.info("  ↳ Stop-loss attached @ $%.2f (ID:%s)", stop_price, sl.id)
-            return sl
+            logger.info("  ↳ Stop-loss attached @ $%.2f (ID:%s)", stop_price, stop_order.id)
+            return stop_order
         except Exception as e:
             logger.error("  ↳ Stop-loss attach FAILED for %s (attempt %d/%d): %s",
                          ticker, attempt, attempts, e)
@@ -357,12 +372,13 @@ def run():
         logger.error("Alpaca auto-connect failed (exit %d). Aborting.", chain_rc)
         return
 
-    api, acct = connect_alpaca()
+    client, _ = connect_alpaca()
+    data_client = _make_data_client()
     claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     if not verify_anthropic(claude_client):
         return
 
-    if not api.get_clock().is_open:
+    if not client.get_clock().is_open:
         logger.info("Market CLOSED. No trades."); return
 
     state = load_state()
@@ -370,7 +386,7 @@ def run():
     today_bought = set(state.get(today, {}).get("tickers_bought", []))
 
     # Daily loss circuit breaker
-    ok, change = daily_pnl_circuit_breaker(api, state)
+    ok, change = daily_pnl_circuit_breaker(client, state)
     if not ok:
         logger.info("Daily P&L %.2f%%. Skipping all trades.", change * 100)
         return
@@ -403,21 +419,21 @@ def run():
         if ticker in today_bought:
             logger.info("%s: already bought today, skip", ticker); continue
 
-        # Skip if we already hold it. Only a definitive "position does not
-        # exist" means we can buy — any other error must NOT look like "flat".
+        # Skip if we already hold it.
         try:
-            api.get_position(ticker)
+            client.get_open_position(ticker)
             logger.info("%s: already holding, skip", ticker); continue
-        except APIError as e:
-            if "does not exist" not in str(e).lower():
+        except Exception as e:
+            err_str = str(e)
+            if "does not exist" not in err_str.lower():
                 logger.error("%s: position check failed (%s), skip for safety", ticker, e)
                 continue
-        except Exception as e:
-            logger.error("%s: position check failed (%s), skip for safety", ticker, e)
-            continue
+            # "does not exist" → no position, good to buy
 
         try:
-            price = float(api.get_latest_trade(ticker).price)
+            price = _latest_price(data_client, ticker)
+            if not price:
+                logger.error("%s price failed: no data", ticker); continue
         except Exception as e:
             logger.error("%s price failed: %s", ticker, e); continue
 
@@ -433,7 +449,7 @@ def run():
 
         # Re-fetch cash each iteration so trade N is sized on post-trade-(N-1) cash
         try:
-            cash = float(api.get_account().cash)
+            cash = float(client.get_account().cash)
         except Exception as e:
             logger.error("Account refresh failed: %s", e); break
 
@@ -452,7 +468,6 @@ def run():
             logger.info("[DRY-RUN] would BUY %d %s @ limit $%.2f | Stop $%.2f | Claude:%s/10 | Insider:%s",
                         shares, ticker, limit_price, stop,
                         analysis.get("confidence"), analysis.get("insider_signal"))
-            # Persist state in dry-run too, so re-runs behave consistently
             today_bought.add(ticker)
             state.setdefault(today, {})["tickers_bought"] = sorted(today_bought)
             save_state(state)
@@ -460,11 +475,12 @@ def run():
             continue
 
         try:
-            # Marketable limit: fills like a market order but caps slippage
-            order = api.submit_order(symbol=ticker, qty=shares, side="buy",
-                                     type="limit", limit_price=limit_price,
-                                     time_in_force="day")
-            filled = wait_for_fill(api, order.id)
+            order_req = LimitOrderRequest(
+                symbol=ticker, qty=shares, side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY, limit_price=limit_price,
+            )
+            order = client.submit_order(order_req)
+            filled = wait_for_fill(client, str(order.id))
             if filled < 1:
                 logger.warning("%s: no fill, nothing to protect, moving on", ticker)
                 continue
@@ -472,20 +488,17 @@ def run():
                         filled, ticker, limit_price, stop,
                         analysis.get("confidence"), analysis.get("insider_signal"), order.id)
 
-            # Attach GTC stop-loss for the actually-filled quantity
-            sl = attach_stop(api, ticker, filled, stop, order.id)
+            sl = attach_stop(client, ticker, filled, stop, str(order.id))
             if sl is None:
-                # Never leave an unprotected position: flatten it
                 logger.error("%s: stop attach failed — closing position to avoid "
                              "unprotected exposure", ticker)
                 try:
-                    api.close_position(ticker)
+                    client.close_position(ticker, ClosePositionRequest(qty=str(filled)))
                     logger.info("%s: position closed", ticker)
                 except Exception as e:
                     logger.critical("%s: EMERGENCY CLOSE FAILED (%s) — MANUAL "
                                     "INTERVENTION REQUIRED", ticker, e)
 
-            # Persist state so re-runs won't re-buy this ticker today
             today_bought.add(ticker)
             state.setdefault(today, {})["tickers_bought"] = sorted(today_bought)
             save_state(state)
@@ -495,6 +508,26 @@ def run():
             logger.error("%s order failed: %s", ticker, e)
 
     logger.info("=== %d trade(s) placed ===", traded)
+
+
+# ── Helpers for alpaca-py SDK ──────────────────────────────────────────────
+
+def _make_data_client():
+    """Build a StockHistoricalDataClient for latest-trade queries."""
+    from alpaca.data.historical import StockHistoricalDataClient
+    return StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+
+
+def _latest_price(data_client, symbol: str) -> float:
+    """Return the last trade price for symbol via IEX feed."""
+    try:
+        req = StockLatestTradeRequest(symbol_or_symbols=symbol)
+        trade_data = data_client.get_stock_latest_trade(req)
+        trade = trade_data[symbol]
+        return float(trade.price)
+    except Exception:
+        return 0.0
+
 
 if __name__ == "__main__":
     run()

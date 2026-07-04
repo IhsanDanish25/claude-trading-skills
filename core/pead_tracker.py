@@ -11,19 +11,24 @@ import os
 import datetime
 import logging
 
-from core.config import STATE_DIR, PEAD_HOLD_DAYS
+from core.config import (
+    STATE_DIR, PEAD_HOLD_DAYS,
+    MEANREV_HOLD_DAYS, INSIDER_HOLD_DAYS,
+    SQUEEZE_HOLD_DAYS, BREAKOUT_HOLD_DAYS, EARNMOM_HOLD_DAYS,
+)
 
 log = logging.getLogger(__name__)
 PEAD_FILE = os.path.join(STATE_DIR, "pead_positions.json")
 
 # ── Strategy defaults ─────────────────────────────────────────────────────────
+# Source of truth is config.py; values here match those defaults.
 _STRATEGY_HOLD_DAYS = {
-    "pead":   PEAD_HOLD_DAYS,
-    "meanrev": 14,
-    "insider": 30,
-    "squeeze": 21,
-    "breakout": 21,
-    "earnmom":  35,
+    "pead":     PEAD_HOLD_DAYS,
+    "meanrev":  MEANREV_HOLD_DAYS,
+    "insider":  INSIDER_HOLD_DAYS,
+    "squeeze":  SQUEEZE_HOLD_DAYS,
+    "breakout": BREAKOUT_HOLD_DAYS,
+    "earnmom":  EARNMOM_HOLD_DAYS,
 }
 
 
