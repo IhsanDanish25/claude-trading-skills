@@ -154,9 +154,18 @@ def _run_satellite_strategy(key: str, store, universe, start_equity: float,
     spy_rets = [(b["equity"] / a["equity"] - 1) for a, b in zip(spy_curve[:-1], spy_curve[1:])] if spy_curve else []
     gate_report = None
     if len(strat_rets) == len(spy_rets) and len(strat_rets) >= 2:
+        # Overfit gate needs an in-sample/out-of-sample split. These strategies
+        # have FIXED parameters (nothing is fit to the data), so a chronological
+        # 50/50 split of the equity curve is the right test: does the edge that
+        # showed up in the first half survive into the unseen second half, or was
+        # it a one-regime fluke? is_return = earlier (train), oos_return = later.
+        from validation_gates import total_return
+        half = len(strat_rets) // 2
+        is_return = total_return(strat_rets[:half])
+        oos_return = total_return(strat_rets[half:])
         gate_report = run_gates(
             strat_daily_returns=strat_rets, spy_daily_returns=spy_rets,
-            n_trades=len(pf.trades), is_return=None, oos_return=None,
+            n_trades=len(pf.trades), is_return=is_return, oos_return=oos_return,
         )
 
     png_path = os.path.join(out_dir, f"equity_curve_{key}.png")
@@ -187,8 +196,12 @@ def _run_satellite_strategy(key: str, store, universe, start_equity: float,
         "spy_buy_hold": spy,
         "trade_stats": tstats,
         "p_value": round(gate_report.p_value, 4) if gate_report else None,
+        "overfit_ratio": (round(gate_report.overfit_ratio, 3)
+                          if gate_report and gate_report.overfit_ratio != float("inf")
+                          else None),
         "gates": gate_report.gates if gate_report else None,
         "trustworthy": gate_report.trustworthy if gate_report else None,
+        "beats_field": gate_report.beats_field if gate_report else None,
         "equity_curve": pf.equity_curve,
         "trades": pf.trades,
     }

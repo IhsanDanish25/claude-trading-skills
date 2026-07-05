@@ -49,20 +49,22 @@ cache (yfinance, 6y, `2020-10-13 → 2026-07-02`). See §2.6 for the full
 | Strategy | Status | Window | Trades | Sharpe | Win rate | p-value | Gates passed | Verdict |
 |---|---|---|---|---|---|---|---|---|
 | **PEAD** | validated (failing) | 2024-05-14 → 2026-06-26 | 871 | 0.30 | — | 0.659 | trade_count only | Not trustworthy |
-| **Mean Reversion** | validated (failing) | 2020-10-13 → 2026-07-02 | 347 | 0.87 | 51.6% | 0.039 | trade_count, significant | Significant but not trustworthy (overfit gate not evaluated) |
-| **Breakout** | validated (failing) | 2020-10-13 → 2026-07-02 | 376 | 0.58 | 48.4% | 0.164 | trade_count | Not significant |
-| **Earnings Momentum** | validated (failing) | 2020-10-13 → 2026-07-02 | 217 | 0.96 | 53.9% | 0.022 | trade_count, significant | Significant but not trustworthy (overfit gate not evaluated) |
+| **Mean Reversion** | **trustworthy** | 2020-10-13 → 2026-07-02 | 347 | 0.87 | 51.6% | 0.039 | trade_count, not_overfit, significant | Trustworthy — survives all honesty gates; does **not** beat SPY buy-and-hold |
+| **Breakout** | validated (failing) | 2020-10-13 → 2026-07-02 | 376 | 0.58 | 48.4% | 0.164 | trade_count, not_overfit | Not significant on the live universe (is on full, §2.6) |
+| **Earnings Momentum** | **trustworthy** | 2020-10-13 → 2026-07-02 | 217 | 0.96 | 53.9% | 0.022 | trade_count, not_overfit, significant | Trustworthy on **both** universes; does not beat SPY buy-and-hold |
 | **Insider Buying** | blocked, paid tier | — | — | — | — | — | — | Untested — FMP `/stable/insider-trading` is a **paid-tier** endpoint (402/403 on the free plan), not a network issue |
 | **Short Squeeze** | blocked, paid tier | — | — | — | — | — | — | Untested — FMP `/stable/short-interest` not on the free plan (404/403) |
 
-**No backtestable strategy clears `trustworthy`.** With the standard cache all
-three satellite strategies now clear the 50-trade floor, and Mean Reversion +
-Earnings Momentum clear significance (p<0.05) on the live universe — a real
-change from the 30-symbol result, where thin samples (12–27 trades) made every
-number a coin flip. They still can't reach `trustworthy` because the satellite
-runner calls `run_gates` with no in-sample/out-of-sample split, so `not_overfit`
-never evaluates (shows as failing) — a runner limitation, not a strategy verdict
-(see §2.5). Insider and Squeeze remain untested (paid FMP tier, §2.5).
+**Two strategies now clear `trustworthy`** on the live universe — Mean Reversion
+and Earnings Momentum both pass trade_count + not_overfit + significant (the
+overfit gate now runs; see §2.5). This is the first time any satellite strategy
+has survived the honesty gates — the standard cache gave the sample size and the
+IS/OOS split gave the overfit check. **None clears `beats_spy`:** over this 6y
+window SPY buy-and-hold returned +130%, and these are low-return / low-drawdown
+strategies (maxDD −4% to −10% vs SPY −24%) — real, non-overfit edges, but they
+trailed a raging bull on raw return. `trustworthy` ≠ "beats the market"; it means
+"not fooling yourself." Do not size on the strength of a backtest that loses to
+buy-and-hold. Insider and Squeeze remain untested (paid FMP tier, §2.5).
 
 ### 2.1 PEAD
 
@@ -83,22 +85,23 @@ never evaluates (shows as failing) — a runner limitation, not a strategy verdi
 
 - Source: `backtest_harness/satellite_signals.py` (offline replica of
   `core/meanrev_screener.py` math) walked over the standard cache.
-- Result (live universe): **347 trades, Sharpe 0.87, 51.6% win, p=0.039** —
-  clears trade_count and significance. The prior 30-symbol run gave only 13
-  trades / p=0.142; the difference is sample size, not a rule change. It still
-  does not `beat_spy` and can't reach `trustworthy` (overfit gate not
-  evaluated, §2.5). A tradeable-looking edge that needs the overfit split
-  before sizing.
+- Result (live universe): **347 trades, Sharpe 0.87, 51.6% win, p=0.039,
+  IS/OOS overfit ratio 0.08 → TRUSTWORTHY**. Passes trade_count, not_overfit and
+  significant. The prior 30-symbol run gave only 13 trades / p=0.142; the
+  difference is sample size, not a rule change. It does **not** `beat_spy`
+  (+20.6% vs SPY +130.1%), so it's a risk-reducer (maxDD −4.2% vs −24.5%), not a
+  return-beater — trustworthy, but don't size it as if it beats buy-and-hold.
 
 ### 2.3 Breakout
 
 - Source: same harness / standard cache as Mean Reversion.
 - Result (live universe): **376 trades, Sharpe 0.58, 48.4% win, p=0.164** —
-  clears trade_count but misses significance on the live universe. It *does*
-  reach significance on the full 520-symbol universe (p=0.039, §2.6), so it is
-  no longer the flatly-negative result the 30-symbol run suggested (−0.38
-  Sharpe) — that was a small-sample artifact. Still not trustworthy; treat as
-  opt-in until it clears significance on the universe you actually trade.
+  clears trade_count and not_overfit but misses significance on the live
+  universe, so not trustworthy there. It *is* trustworthy on the full 520-symbol
+  universe (p=0.039, overfit 1.24, §2.6), so it is no longer the flatly-negative
+  result the 30-symbol run suggested (−0.38 Sharpe) — that was a small-sample
+  artifact. Universe-unstable: treat as opt-in until it clears significance on
+  the universe you actually trade.
 
 ### 2.4 Earnings Momentum (now backtestable)
 
@@ -111,22 +114,24 @@ never evaluates (shows as failing) — a runner limitation, not a strategy verdi
   has drifted up ≥ `EARNMOM_MIN_DRIFT_PCT` — using earnings dates from
   `backtest_harness/earnings_data.py` (yfinance) and drift/price/volume from the
   OHLCV cache. `backtest_5_strategies.py` runs it alongside Breakout/MeanRev.
-- Result (live universe): **217 trades, Sharpe 0.96, 53.9% win, p=0.022** —
-  clears trade_count and significance, the best-looking of the three satellite
-  strategies. Still fails `beats_spy` and can't reach `trustworthy` (overfit
-  gate not evaluated). On the 30-symbol cache it was 12 trades / p=0.523 — the
-  jump to significance is the standard cache doing its job.
+- Result (live universe): **217 trades, Sharpe 0.96, 53.9% win, p=0.022, IS/OOS
+  overfit ratio 0.04 → TRUSTWORTHY** — and trustworthy on the full universe too
+  (§2.6), the only strategy that survives the gates on **both**. On the 30-symbol
+  cache it was 12 trades / p=0.523; the jump is the standard cache doing its job.
+  Does not `beat_spy` (+23.4% vs +130.1%) — a trustworthy, low-drawdown edge
+  (maxDD −10.2% vs −24.5%), not a buy-and-hold beater.
 
 ### 2.5 Gate wiring, Insider Buying & Short Squeeze
 
-- **`not_overfit` is never evaluated by the satellite runner.**
-  `backtest_5_strategies.py` calls `run_gates(..., is_return=None,
-  oos_return=None)`, so the overfit gate has no in-sample/out-of-sample split to
-  score and reports `inf` (failing). This means **no satellite strategy can
-  reach `trustworthy` today regardless of its edge** — a runner limitation to
-  fix (split the window and pass the two returns) before any satellite strategy
-  can be promoted. PEAD (§2.1) does pass real IS/OOS numbers and still fails, so
-  this is not hiding a winner.
+- **`not_overfit` now evaluates.** `backtest_5_strategies.py` previously called
+  `run_gates(..., is_return=None, oos_return=None)`, so the overfit gate had no
+  in-sample/out-of-sample split and reported `inf` (auto-fail) — which is why no
+  satellite strategy could reach `trustworthy` no matter its edge. Fixed: the
+  runner now splits each strategy's equity curve chronologically 50/50 and passes
+  the earlier half as `is_return`, the later half as `oos_return`. These
+  strategies have **fixed parameters** (nothing is fit to the data), so the split
+  is a temporal-robustness check — did the first-half edge survive into the
+  unseen second half — not a train/test on tuned parameters.
 - **Insider Buying / Short Squeeze** need FMP fundamental endpoints that are
   **paid-tier**, not network-blocked: `/stable/insider-trading` returns 402 and
   `/stable/short-interest` returns 404/403 on the free plan (confirmed against
@@ -141,24 +146,17 @@ never evaluates (shows as failing) — a runner limitation, not a strategy verdi
 Same standard cache, all cached non-ETF symbols (not just the 103 production
 trades) — more statistical power, but tests names production never scans:
 
-| Strategy | Trades | Sharpe | Win rate | p-value | Gates |
-|---|---|---|---|---|---|
-| Breakout | 568 | 0.86 | 53.7% | 0.039 | trade_count, significant |
-| Mean Reversion | 619 | 0.69 | 51.2% | 0.099 | trade_count |
-| Earnings Momentum | 341 | 0.85 | 49.3% | 0.043 | trade_count, significant |
+| Strategy | Trades | Sharpe | Win rate | p-value | Overfit | Gates | Trustworthy |
+|---|---|---|---|---|---|---|---|
+| Breakout | 568 | 0.86 | 53.7% | 0.039 | 1.24 | trade_count, not_overfit, significant | **Yes** |
+| Mean Reversion | 619 | 0.69 | 51.2% | 0.099 | 0.19 | trade_count, not_overfit | No (p≥0.05) |
+| Earnings Momentum | 341 | 0.85 | 49.3% | 0.043 | 0.71 | trade_count, not_overfit, significant | **Yes** |
 
-Significance flips between universes (Breakout significant on full but not live;
-MeanRev the reverse) — a reminder that none of these is a robust, universe-stable
-edge yet. Earnings Momentum is the only one significant on **both**.
-
-- Both need FMP fundamental endpoints that are **paid-tier**, not
-  network-blocked: `/stable/insider-trading` returns 402 Payment Required and
-  `/stable/short-interest` returns 404/403 on the free plan (confirmed against
-  both the local and production FMP keys, with network available). Even paid
-  FMP short-interest is only bi-monthly FINRA snapshots.
-- Treat their live code paths as **unvalidated**. Anyone enabling them via
-  `STRATEGY_MODE` before a real backtest exists is running unvalidated logic
-  with real capital.
+Trustworthy flips between universes (Breakout on full, MeanRev on live) — a
+reminder that none is a robust, universe-stable edge yet. **Earnings Momentum is
+trustworthy on both**, the strongest of the three. None `beats_spy` on either
+universe (SPY +130%). Treat "trustworthy" as "the backtest isn't lying to you,"
+not "this makes money vs holding SPY."
 
 ---
 
