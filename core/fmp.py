@@ -27,6 +27,21 @@ _warned_unavailable: set = set()
 _fmp_fallback_active: bool = False  # Tracks if yfinance fallback is being used
 _alpaca_data_client = None
 
+# FMP free tier: 250 calls/day. Warn at 80% utilisation, error at 88%.
+# Resets at midnight ET. These live in module scope so they persist across
+# the ~10-minute scheduler ticks without a separate state file.
+_FMP_DAY = datetime.date.today()
+_FMP_CALLS_TODAY = 0
+# Hard-stop threshold: stop making FMP calls before we hit the 250 limit so
+# the yfinance fallback always has budget headroom.
+_FMP_HALT_AT = 220
+# Public read-only view for callers that need to budget their own calls.
+# Usage: from core import fmp; fmp.fmp_remaining_calls() -> int
+def fmp_remaining_calls() -> int:
+    """Approximate FMP calls remaining today (approximate because cache hits
+    don't count against the limit, but we can't predict cache hits in advance)."""
+    return max(0, _FMP_HALT_AT - _FMP_CALLS_TODAY)
+
 
 def _get(url: str, params: dict = None) -> dict | list:
     """GET with 5-min TTL cache. url must be a full URL."""
@@ -35,6 +50,19 @@ def _get(url: str, params: dict = None) -> dict | list:
         return []
     params = params or {}
     params["apikey"] = FMP_API_KEY
+
+    global _FMP_CALLS_TODAY, _FMP_DAY
+    today = datetime.date.today()
+    if today != _FMP_DAY:
+        _FMP_DAY = today
+        _FMP_CALLS_TODAY = 0
+    _FMP_CALLS_TODAY += 1
+    if _FMP_CALLS_TODAY >= _FMP_HALT_AT:
+        log.error("FMP budget EXHAUSTED (%d calls) — switch to yfinance fallback", _FMP_CALLS_TODAY)
+        return []
+    if _FMP_CALLS_TODAY >= 200 and _FMP_CALLS_TODAY % 10 == 0:
+        log.warning("FMP approaching daily limit (%d/%d calls) — yfinance fallback will activate",
+                    _FMP_CALLS_TODAY, 250)
 
     cache_key = (url, frozenset(params.items()))
     now = time.time()
