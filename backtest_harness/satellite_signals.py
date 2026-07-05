@@ -12,6 +12,7 @@ enters at the next trading day's open after D, so there is no look-ahead.
 """
 from __future__ import annotations
 
+import bisect
 import datetime
 import math
 
@@ -28,6 +29,9 @@ from core.config import (
     MEANREV_MIN_AVG_VOLUME,
     MEANREV_MIN_PRICE,
     MEANREV_RSI_THRESHOLD,
+    PEAD_MIN_AVG_VOLUME,
+    PEAD_MIN_PRICE,
+    PEAD_MIN_SURPRISE_PCT,
 )
 
 _EARNMOM_MIN_AGE = 8   # drift phase starts day 8 (gap-fill done, thesis confirmed)
@@ -265,6 +269,89 @@ def get_historical_earnmom_signals(
 
     out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
     return out
+
+
+def get_historical_pead_signals(
+    store, symbols: list[str], start_date, end_date,
+) -> list[dict]:
+    """PEAD (Post-Earnings Announcement Drift) signals.
+
+    Entry: first trading day after an earnings beat (surprise >= PEAD_MIN_SURPRISE_PCT).
+    Filters (same as live): price >= PEAD_MIN_PRICE, 20d avg volume >= PEAD_MIN_AVG_VOLUME.
+    Exit: time-based at 60 days OR flat 15% stop (no take-profit).
+    No trailing stop for PEAD — flat stop only.
+
+    Uses backtest_harness/earnings_data.py (yfinance, disk-cached) for earnings dates.
+
+    Returns rows in the surprise format expected by earnings_engine.run_earnings_simulation:
+    {symbol, date (report date), surprise_pct (for ranking)}. The engine maps each
+    report date → first trading day strictly after → enters at that day's open.
+    De-duped: one entry per symbol per earnings date.
+    """
+    from backtest_harness import earnings_data
+
+    start = start_date if isinstance(start_date, datetime.date) else datetime.date.fromisoformat(start_date)
+    end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
+    cal = store.trading_calendar("SPY")
+    out: list[dict] = []
+
+    for sym in symbols:
+        earnings = earnings_data.get_symbol_earnings(sym)
+        bars = store.series.get(sym, [])
+        if len(bars) < 21:
+            continue
+        closes = [b["close"] for b in bars]
+        volumes = [b["volume"] for b in bars]
+        dates = [b["date"] for b in bars]
+
+        for e in earnings:
+            sp = e.get("surprise_pct")
+            rd = (e.get("date") or "")[:10]
+            if sp is None or not rd or sp < PEAD_MIN_SURPRISE_PCT:
+                continue
+            rd_date = datetime.date.fromisoformat(rd)
+            if not (start <= rd_date <= end):
+                continue
+            # Map report date -> first trading day entry
+            idx = bisect.bisect_right(cal, rd_date)
+            if idx >= len(cal):
+                continue
+            entry_d = cal[idx]
+            if not (start <= entry_d <= end):
+                continue
+
+            # Price filter on entry day (must have data through entry_d-1)
+            entry_d_iso = entry_d.isoformat()
+            bar_idx = next((i for i, d in enumerate(dates) if d >= entry_d_iso), None)
+            if bar_idx is None:
+                continue
+            price = closes[bar_idx]
+            if price < PEAD_MIN_PRICE:
+                continue
+            avg_vol = _avg(volumes[max(0, bar_idx - 19):bar_idx + 1])
+            if avg_vol < PEAD_MIN_AVG_VOLUME:
+                continue
+
+            out.append({
+                "symbol": sym,
+                "date": rd,                  # report date — engine maps to entry day
+                "surprise_pct": round(float(sp), 2),
+                # "entry_date" stored in engine's Lot.entry_date as the mapped trading day
+            })
+
+    out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
+
+    # De-dup: only one entry per symbol per earnings date
+    seen: set[tuple] = set()
+    deduped: list[dict] = []
+    for r in out:
+        key = (r["symbol"], r["date"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
+
+    return deduped
 
 
 def get_historical_meanrev_signals(
