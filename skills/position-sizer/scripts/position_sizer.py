@@ -197,7 +197,7 @@ def calculate_position(params: SizingParameters, min_trades: int = 20) -> dict:
 
     is_kelly_mode = params.win_rate is not None
     has_entry = params.entry_price is not None
-    insufficient_trades = is_kelly_mode and params.n_trades > 0 and params.n_trades < min_trades
+    insufficient_trades = is_kelly_mode and params.n_trades < min_trades
 
     result: dict = {
         "schema_version": "1.0",
@@ -224,7 +224,7 @@ def calculate_position(params: SizingParameters, min_trades: int = 20) -> dict:
             result["recommended_risk_budget_pct"] = budget_pct
             result["note"] = f"Tail-risk fallback: only {params.n_trades} closed trades < {min_trades} minimum."
         else:
-            risk_per_share = params.entry_price - params.stop_price if params.stop_price else 0
+            risk_per_share = (params.entry_price - params.stop_price) if params.stop_price else params.entry_price
             shares = int(budget / risk_per_share) if risk_per_share else 0
             result["final_recommended_shares"] = shares
             result["final_position_value"] = round(shares * params.entry_price, 2)
