@@ -24,9 +24,12 @@ def _is_insufficient_qty_error(exc: Exception) -> bool:
     return any(marker in msg for marker in _INSUFFICIENT_QTY_MARKERS)
 
 
-def _cancel_open_sell_orders(broker, symbol: str) -> int:
+def cancel_open_sell_orders(broker, symbol: str) -> int:
     """Cancel open SELL orders for symbol that could be locking shares needed
-    by the OCO attach. Returns the number actually cancelled."""
+    by an OCO attach or a clean position close. Returns the number actually
+    cancelled. Public so callers outside this module (e.g. an ad hoc close
+    script) can reuse the same cancel-first safety before closing a position,
+    instead of duplicating the Alpaca open-orders filtering logic."""
     try:
         open_orders = broker.get_open_orders()
     except Exception as e:
@@ -73,6 +76,6 @@ def safe_attach_oco(broker, symbol: str, qty: int, stop: float, target: float,
                 "%s — cancelling stale sell orders and retrying",
                 symbol, attempt, max_retries, stop, target, e,
             )
-            _cancel_open_sell_orders(broker, symbol)
+            cancel_open_sell_orders(broker, symbol)
             if retry_delay:
                 time.sleep(retry_delay)
