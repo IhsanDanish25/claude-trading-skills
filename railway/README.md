@@ -51,3 +51,19 @@ Set on each service (Railway → service → Variables):
 > **Paper vs live:** live/paper is decided by `ALPACA_PAPER_TRADE` (not the
 > base URL). Keep the keys, base URL, and this flag consistent — a paper key
 > (`PK…`) with `ALPACA_PAPER_TRADE=false` will 401 against the live endpoint.
+
+## Health checks
+
+There is no `/health` route on either service — don't monitor that path, it
+will silently 200 on `web` without checking anything real.
+
+| Service | Real health path | Returns |
+|---|---|---|
+| `web` | `/_stcore/health` | Streamlit's built-in health endpoint |
+| `worker` | `/` (its own `$PORT`) | JSON heartbeat, e.g. `{"last_tick": "..."}` — set by `worker.py`'s heartbeat server |
+
+Because both services share this repo's single `railway.toml`, do not add a
+`[deploy] healthcheckPath` there — it would apply to both services, and
+`/_stcore/health` doesn't exist on `worker`. Set `healthcheckPath` per-service
+in the Railway dashboard instead if you want Railway's own deploy healthcheck
+to gate promotion.
