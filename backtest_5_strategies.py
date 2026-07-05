@@ -204,24 +204,36 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--start-equity", type=float, default=100_000.0)
     ap.add_argument("--slippage-bps", type=float, default=10.0)
+    ap.add_argument("--universe", choices=["full", "live"], default="full",
+                    help="'full' = every cached non-ETF symbol (S&P 500 power set); "
+                         "'live' = only the SP80_UNIVERSE symbols production trades")
+    ap.add_argument("--out-dir", default=None,
+                    help="output directory (default: backtests/five_strategies_<date>)")
     args = ap.parse_args()
 
     from backtest_harness import data
 
-    universe_symbols = sorted(f[:-5] for f in os.listdir(data.CACHE_DIR) if f.endswith(".json"))
+    # list_cached_symbols() picks up both {SYM}.json and the gzipped standard
+    # cache {SYM}.json.gz.
+    universe_symbols = data.list_cached_symbols()
     series = {s: data.load_cached(s) for s in universe_symbols}
     series = {s: b for s, b in series.items() if b}
     if "SPY" not in series:
-        log.error("No cached SPY bars at backtest_harness/cache/SPY.json — aborting.")
+        log.error("No cached SPY bars in backtest_harness/cache/ — aborting.")
         return 1
     store = data.BarStore(series)
     data.install_store(store)
 
     universe = build_universe(store)
-    log.info("Universe: %d cached symbols (excl. index/sector ETFs): %s", len(universe), universe)
+    if args.universe == "live":
+        from core.config import SP80_UNIVERSE
+        live = set(SP80_UNIVERSE)
+        universe = [s for s in universe if s in live]
+    log.info("Universe (%s): %d cached symbols (excl. index/sector ETFs)",
+             args.universe, len(universe))
 
     today = datetime.date.today().isoformat()
-    out_dir = os.path.join(REPO, "backtests", f"five_strategies_{today}")
+    out_dir = args.out_dir or os.path.join(REPO, "backtests", f"five_strategies_{today}")
     os.makedirs(out_dir, exist_ok=True)
 
     results: dict[str, dict] = {}

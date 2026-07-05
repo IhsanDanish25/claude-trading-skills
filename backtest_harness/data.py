@@ -9,6 +9,7 @@ composite get point-in-time data with no look-ahead.
 from __future__ import annotations
 
 import datetime
+import gzip
 import json
 import logging
 import math
@@ -41,8 +42,22 @@ def _cache_path(symbol: str) -> str:
     return os.path.join(CACHE_DIR, f"{symbol.upper()}.json")
 
 
+def _cache_path_gz(symbol: str) -> str:
+    return os.path.join(CACHE_DIR, f"{symbol.upper()}.json.gz")
+
+
 def load_cached(symbol: str) -> list[dict]:
-    """Return cached bars oldest->newest, or [] if not cached."""
+    """Return cached bars oldest->newest, or [] if not cached.
+
+    Prefers the gzipped standard cache ({SYM}.json.gz); falls back to a plain
+    {SYM}.json. Same {"bars": [...]} payload either way, so the two coexist."""
+    gz = _cache_path_gz(symbol)
+    if os.path.exists(gz):
+        try:
+            with gzip.open(gz, "rt") as f:
+                return json.load(f).get("bars", [])
+        except (ValueError, OSError):
+            return []
     p = _cache_path(symbol)
     if not os.path.exists(p):
         return []
@@ -53,8 +68,25 @@ def load_cached(symbol: str) -> list[dict]:
         return []
 
 
+def list_cached_symbols() -> list[str]:
+    """Every symbol present in the flat cache dir (.json or .json.gz)."""
+    out: set[str] = set()
+    for fn in os.listdir(CACHE_DIR):
+        if fn.endswith(".json.gz"):
+            out.add(fn[:-8])
+        elif fn.endswith(".json"):
+            out.add(fn[:-5])
+    return sorted(out)
+
+
 def _save_cached(symbol: str, bars: list[dict]) -> None:
     with open(_cache_path(symbol), "w") as f:
+        json.dump({"symbol": symbol.upper(), "bars": bars}, f)
+
+
+def save_cached_gz(symbol: str, bars: list[dict]) -> None:
+    """Write bars to the gzipped standard cache ({SYM}.json.gz)."""
+    with gzip.open(_cache_path_gz(symbol), "wt") as f:
         json.dump({"symbol": symbol.upper(), "bars": bars}, f)
 
 
