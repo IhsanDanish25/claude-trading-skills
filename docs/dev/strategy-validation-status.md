@@ -52,8 +52,8 @@ cache (yfinance, 6y, `2020-10-13 → 2026-07-02`). See §2.6 for the full
 | **Mean Reversion** | **trustworthy** | 2020-10-13 → 2026-07-02 | 347 | 0.87 | 51.6% | 0.039 | trade_count, not_overfit, significant | Trustworthy — survives all honesty gates; does **not** beat SPY buy-and-hold |
 | **Breakout** | validated (failing) | 2020-10-13 → 2026-07-02 | 376 | 0.58 | 48.4% | 0.164 | trade_count, not_overfit | Not significant on the live universe (is on full, §2.6) |
 | **Earnings Momentum** | **trustworthy** | 2020-10-13 → 2026-07-02 | 217 | 0.96 | 53.9% | 0.022 | trade_count, not_overfit, significant | Trustworthy on **both** universes; does not beat SPY buy-and-hold |
-| **Insider Buying** | blocked, paid tier | — | — | — | — | — | — | Untested — FMP `/stable/insider-trading` is a **paid-tier** endpoint (402/403 on the free plan), not a network issue |
-| **Short Squeeze** | blocked, paid tier | — | — | — | — | — | — | Untested — FMP `/stable/short-interest` not on the free plan (404/403) |
+| **Insider Buying** | blocked, sandbox egress | — | — | — | — | — | — | Untested — Railway sandbox blocks egress to `financialmodelingprep.com`; `/stable/insider-trading` is unreachable (connection refused/timeout), not a 402/403 from FMP |
+| **Short Squeeze** | blocked, sandbox egress | — | — | — | — | — | — | Untested — same egress block as Insider Buying; also pulls from `query1.finance.yahoo.com` (short interest) and `financialmodelingprep.com` (floats/SiS) |
 
 **Two strategies now clear `trustworthy`** on the live universe — Mean Reversion
 and Earnings Momentum both pass trade_count + not_overfit + significant (the
@@ -132,11 +132,12 @@ buy-and-hold. Insider and Squeeze remain untested (paid FMP tier, §2.5).
   strategies have **fixed parameters** (nothing is fit to the data), so the split
   is a temporal-robustness check — did the first-half edge survive into the
   unseen second half — not a train/test on tuned parameters.
-- **Insider Buying / Short Squeeze** need FMP fundamental endpoints that are
-  **paid-tier**, not network-blocked: `/stable/insider-trading` returns 402 and
-  `/stable/short-interest` returns 404/403 on the free plan (confirmed against
-  both the local and production FMP keys, with network available). Even paid FMP
-  short-interest is only bi-monthly FINRA snapshots.
+- **Insider Buying / Short Squeeze** are blocked by Railway sandbox network
+  egress: `financialmodelingprep.com` and `query1.finance.yahoo.com` are
+  unreachable from the sandbox (connection refused / timeout / DNS failure).
+  This is a platform ingress restriction, not a 402/403 billing error from FMP.
+  Even if the sandbox were opened, paid FMP short-interest is only bi-monthly
+  FINRA snapshots — stale data for live trading.
 - Treat their live code paths as **unvalidated**. Anyone enabling them via
   `STRATEGY_MODE` before a real backtest exists is running unvalidated logic
   with real capital.
