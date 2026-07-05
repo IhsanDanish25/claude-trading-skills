@@ -37,7 +37,7 @@ from core.config import (
     EARNMOM_LIMIT, SP80_UNIVERSE,
 )
 from core import clock
-from core.fmp import _get, _STABLE as _stable
+from core.fmp import _get, _STABLE as _stable, fmp_remaining_calls
 
 log = logging.getLogger(__name__)
 
@@ -175,6 +175,20 @@ def screen() -> list[dict]:
     log.info(f"EarnMom screen: fetching per-symbol earnings via FMP /stable/earnings "
             f"(from={cutoff_s}, universe={len(SP80_UNIVERSE)})")
 
+    # ── FMP budget guard ────────────────────────────────────────────────────────
+    # EarnMom makes up to 3 FMP calls per symbol (earnings + quote + drift).
+    # Check there's enough budget before starting so we don't exhaust mid-loop.
+    remaining = fmp_remaining_calls()
+    needed = len(SP80_UNIVERSE) * 3   # worst case (earnings + quote + drift per sym)
+    if remaining < needed:
+        log.warning(
+            "EarnMom SKIPPED: FMP budget %d remaining, need ~%d calls. "
+            "EarnMom will run after other strategies exhaust fewer calls, "
+            "or increase FMP tier.", remaining, needed
+        )
+        return []
+    log.info("EarnMom: FMP budget %d remaining, need ~%d — proceeding", remaining, needed)
+
     earnings_by_sym: dict[str, dict] = {}
     for sym in SP80_UNIVERSE:
         try:
@@ -236,11 +250,11 @@ def screen() -> list[dict]:
             except (ValueError, TypeError):
                 continue
 
-            # 8-45 day drift window
+            # 8-45 day drift window — filter BEFORE expensive _fetch_drift call
             if not (8 <= age_days <= EARNMOM_MAX_DAYS_AGO):
                 continue
 
-            # Price and volume
+            # Early price filter avoids another FMP quote call for sub-$10 stocks
             try:
                 quote = _get(f"{_stable}/quote", {"symbol": sym})
                 if isinstance(quote, list) and quote:
@@ -255,7 +269,7 @@ def screen() -> list[dict]:
             if price < EARNMOM_MIN_PRICE:
                 continue
 
-            # ── Price drift since beat ──────────────────────────────────────
+            # ── Price drift since beat (most expensive FMP call — do last) ──
             drift_pct, avg_vol = _fetch_drift(sym, report_date)
             if avg_vol < EARNMOM_MIN_AVG_VOLUME:
                 continue
