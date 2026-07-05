@@ -55,13 +55,17 @@ except Exception as e:
     screen_earnmom = None
 
 
-def _build_breaker(broker: BrokerClient) -> CircuitBreaker:
+def _build_breaker(broker: BrokerClient, day_start_equity: float) -> CircuitBreaker:
+    """day_start_equity: pre-market open equity from market_open.py's load_day_start_value(),
+    NOT the broker's live equity. Prevents tick-time drift from corrupting the daily-loss
+    baseline. See circuit_breaker.py for the bug fixed here."""
     return CircuitBreaker(
         get_account=broker.get_account,
         get_positions=broker.get_positions,
         max_open_positions=config.MAX_OPEN_POSITIONS,
         max_position_pct=config.MAX_POSITION_SIZE_PCT,
-        max_daily_loss=0.03,
+        max_daily_loss=config.CIRCUIT_BREAKER_PCT,
+        day_start_equity=day_start_equity,
     )
 
 DAY_START_PATH = os.path.join(config.STATE_DIR, "day_start_value.json")
@@ -723,7 +727,8 @@ def run():
     logger.banner(log, f"MARKET OPEN ROUTINE — fired {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
 
     broker = BrokerClient()
-    cb = _build_breaker(broker)
+    day_start = load_day_start_value(pv)
+    cb = _build_breaker(broker, day_start)
 
     reconciled = _reconcile_closed_trades(broker)
     if reconciled:
