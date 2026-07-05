@@ -9,7 +9,7 @@ import statistics
 
 import pytz
 
-from core.config import WATCHLIST, MIN_PRICE, MAX_PRICE, ET
+from core.config import WATCHLIST, MIN_PRICE, MAX_PRICE
 
 log = logging.getLogger(__name__)
 
