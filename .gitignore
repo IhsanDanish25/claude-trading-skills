@@ -42,6 +42,7 @@ state/
 
 # Backtest runtime caches (generated data, hundreds of files)
 backtest_harness/cache/
+cache/
 
 # CI artifacts
 htmlcov/
