@@ -26,7 +26,9 @@ Also fetches current FMP quote for price and volume drift confirmation.
 from __future__ import annotations
 
 import datetime
+import json
 import logging
+import os
 
 from core.config import (
     EARNMOM_HOLD_DAYS, EARNMOM_STOP_PCT, EARNMOM_SIZE_PCT,
@@ -34,9 +36,51 @@ from core.config import (
     EARNMOM_LOOKBACK_DAYS, EARNMOM_MAX_DAYS_AGO, EARNMOM_MIN_DRIFT_PCT,
     EARNMOM_LIMIT, SP80_UNIVERSE,
 )
+from core import clock
 from core.fmp import _get, _STABLE as _stable
 
 log = logging.getLogger(__name__)
+
+# Live daily cache for /stable/earnings (earnings only change quarterly, so one
+# fetch per symbol per day is plenty and keeps us well under the FMP quota).
+_EARN_CACHE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cache", "earnings_live")
+
+
+def _load_symbol_earnings(sym: str) -> list[dict]:
+    """Full reported-earnings history for one symbol via FMP /stable/earnings.
+
+    NOTE: /stable/earnings must be called with NO `limit` param — the free tier
+    returns full history that way (limit>=8 triggers 402). The old code hit the
+    404 /stable/earning_calendar endpoint, which is why earnmom was a silent
+    no-op live.
+
+    Backtest: call straight through (engine5 patches _get to serve point-in-time
+    rows). Live: serve from a per-day disk cache, refreshing once per day.
+    """
+    if clock.is_backtest():
+        raw = _get(f"{_stable}/earnings", {"symbol": sym})
+        return raw if isinstance(raw, list) else []
+
+    today_s = clock.today().isoformat()
+    path = os.path.join(_EARN_CACHE_DIR, f"{sym.upper()}.json")
+    try:
+        with open(path) as f:
+            cached = json.load(f)
+        if cached.get("fetched") == today_s:
+            return cached.get("earnings", [])
+    except (OSError, ValueError):
+        pass
+
+    raw = _get(f"{_stable}/earnings", {"symbol": sym})
+    rows = raw if isinstance(raw, list) else []
+    try:
+        os.makedirs(_EARN_CACHE_DIR, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({"fetched": today_s, "earnings": rows}, f)
+    except OSError as e:
+        log.debug("earnmom cache write %s failed: %s", sym, e)
+    return rows
 
 _N_BARS = 60     # need ~45 for drift + 20 for avg volume
 
@@ -48,7 +92,7 @@ def _fetch_drift(sym: str, beat_date: str) -> tuple[float, float]:
     Returns (drift_pct, avg_volume_20d). Drift is measured from beat_date close
     to most recent close. If too few bars, returns (0.0, 0.0).
     """
-    today = datetime.date.today()
+    today = clock.today()
     start = today - datetime.timedelta(days=_N_BARS * 2)
     try:
         data = _get(f"{_stable}/historical-price-eod/full", {
@@ -71,7 +115,10 @@ def _fetch_drift(sym: str, beat_date: str) -> tuple[float, float]:
                 })
             except (TypeError, ValueError):
                 continue
-        rows.reverse()  # oldest first
+        # Oldest-first, independent of source ordering. Live FMP returns
+        # newest-first; the backtest harness serves oldest-first. Sorting by
+        # date (rather than a blind reverse) is correct for both.
+        rows.sort(key=lambda r: r["date"] or "")
 
         # Find bar on or after beat_date
         beat_price = None
@@ -116,67 +163,61 @@ def screen() -> list[dict]:
     Candidate shape: {symbol, price, report_date, surprise_pct, age_days,
                       drift_pct, avg_volume, earnmom_score}
     """
-    today = datetime.date.today()
+    today = clock.today()
     cutoff = today - datetime.timedelta(days=EARNMOM_LOOKBACK_DAYS)
+    cutoff_s, today_s = cutoff.isoformat(), today.isoformat()
     candidates: list[dict] = []
     fetched = 0
 
-    # FMP earning_calendar returns ALL future + past earnings for all symbols.
-    # So we fetch once for the whole universe.
-    log.info(f"EarnMom screen: fetching earnings calendar via FMP /stable/ "
-            f"(from={cutoff}, universe={len(SP80_UNIVERSE)})")
+    # Per-symbol /stable/earnings (the /earning_calendar batch endpoint is 404 on
+    # our FMP tier). For each symbol keep the most recent REPORTED quarter within
+    # the lookback window and derive the surprise % from actual vs. estimate.
+    log.info(f"EarnMom screen: fetching per-symbol earnings via FMP /stable/earnings "
+            f"(from={cutoff_s}, universe={len(SP80_UNIVERSE)})")
 
-    try:
-        data = _get(f"{_stable}/earning_calendar", {
-            "from": cutoff.isoformat(),
-            "to":   today.isoformat(),
-        })
-    except Exception as e:
-        log.warning("FMP earning_calendar: %s", e)
-        return []
-
-    if not isinstance(data, list):
-        log.warning("EarnMom: earning_calendar returned %s", type(data))
-        return []
-
-    log.info(f"  Got {len(data)} earnings events")
-
-    # Filter to past earnings (has actual reported EPS) for universe symbols
     earnings_by_sym: dict[str, dict] = {}
-    for row in data:
-        if not isinstance(row, dict):
-            continue
-        sym = row.get("symbol")
-        if not sym or sym not in set(SP80_UNIVERSE):
-            continue
-
-        # Only consider rows with actual reported EPS (not estimates)
-        actual_eps = row.get("epsd") or row.get("epfd")
-        if actual_eps is None:
-            continue
+    for sym in SP80_UNIVERSE:
         try:
-            actual_eps = float(actual_eps)
-        except (TypeError, ValueError):
+            rows = _load_symbol_earnings(sym)
+        except Exception as e:  # noqa: BLE001
+            log.debug("EarnMom earnings %s: %s", sym, e)
             continue
 
-        date_str = row.get("date")
-        if not date_str:
-            continue
-
-        # Save the most-recently-reported beat for this symbol
-        existing = earnings_by_sym.get(sym)
-        if existing is None or date_str > existing["report_date"]:
-            surprise_raw = row.get("surprisePercentage") or row.get("surprise_pct")
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            actual_eps = row.get("epsActual")
+            if actual_eps is None:
+                continue
+            date_str = row.get("date")
+            if not date_str:
+                continue
+            date_str = date_str[:10]
+            # point-in-time window: reported on/before 'today', within lookback
+            if not (cutoff_s <= date_str <= today_s):
+                continue
             try:
-                surprise_pct = float(surprise_raw) if surprise_raw is not None else 0.0
+                actual_eps = float(actual_eps)
             except (TypeError, ValueError):
+                continue
+
+            est_raw = row.get("epsEstimated")
+            try:
+                estimate = float(est_raw) if est_raw is not None else None
+            except (TypeError, ValueError):
+                estimate = None
+            if estimate is not None and abs(estimate) > 1e-9:
+                surprise_pct = (actual_eps - estimate) / abs(estimate) * 100.0
+            else:
                 surprise_pct = 0.0
 
-            earnings_by_sym[sym] = {
-                "report_date":  date_str,
-                "actual_eps":    actual_eps,
-                "surprise_pct":  surprise_pct,
-            }
+            existing = earnings_by_sym.get(sym)
+            if existing is None or date_str > existing["report_date"]:
+                earnings_by_sym[sym] = {
+                    "report_date":  date_str,
+                    "actual_eps":    actual_eps,
+                    "surprise_pct":  round(surprise_pct, 4),
+                }
 
     log.info(f"  Filtered to {len(earnings_by_sym)} symbols with reported beats in window")
 
