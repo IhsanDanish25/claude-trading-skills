@@ -19,7 +19,6 @@ from core import composite
 from core.universe import build_universe
 from circuit_breaker import CircuitBreaker, TradingHalted
 from regime_gate import classify
-from kelly_sizing import KellySizer, stats_from_trades
 from core.earnings_screener import screen_earnings
 from core.pead_tracker import add_position as pead_track
 from core.spy_base import rebalance_to_spy, free_cash_for_pead, log_status as spy_log
@@ -69,33 +68,6 @@ DAY_START_PATH = os.path.join(config.STATE_DIR, "day_start_value.json")
 TODAY_BOUGHT_PATH = os.path.join(config.STATE_DIR, "today_bought.json")
 TRADE_LOG_PATH = os.path.join(config.STATE_DIR, "trade_log.jsonl")
 MAX_BUYS       = 3
-KELLY_WINDOW_TRADES = 100
-
-
-def _load_trade_returns(n: int = KELLY_WINDOW_TRADES) -> list[float]:
-    """Last n closed-trade return decimals from state/trade_log.jsonl.
-
-    Entries with a null pnl (still open, or close-event not yet recorded) are
-    skipped — only realized trades contribute to Kelly stats.
-    """
-    if not os.path.exists(TRADE_LOG_PATH):
-        return []
-    out: list[float] = []
-    try:
-        with open(TRADE_LOG_PATH) as f:
-            lines = f.readlines()
-        for line in lines[-n:]:
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            pnl = rec.get("pnl_pct")
-            if pnl is None:
-                continue
-            out.append(float(pnl) / 100.0)
-    except OSError as e:
-        log.warning(f"trade_log read failed (non-blocking): {e}")
-    return out
 
 
 def _append_trade_log(entry: dict) -> None:
@@ -107,24 +79,13 @@ def _append_trade_log(entry: dict) -> None:
         log.warning(f"trade_log append failed: {e}")
 
 
-def _compute_kelly_shadow(equity: float) -> tuple[float, str]:
-    """Quarter-Kelly shadow. Returns (fraction, reason). fraction is what Kelly
-    WOULD size — the live code does NOT use it. Logs only."""
-    sizer = KellySizer(kelly_fraction=0.25, max_position_pct=0.05)
-    rets = _load_trade_returns()
-    n = len(rets)
-    wr, aw, al, _ = stats_from_trades(rets)
-    res = sizer.size(equity, win_rate=wr, avg_win=aw, avg_loss=al, n_trades=n)
-    return res.fraction, res.reason
-
-
 def _reconcile_closed_trades(broker) -> int:
     """For each buy row in trade_log.jsonl with pnl_pct=null, look up the matching
     closed SELL order on Alpaca. If found, fill exit_price/exit_date/pnl_pct in
     place and rewrite the JSONL. Returns the number of rows reconciled today.
 
-    Called at the top of run() so the rolling-100 stats used by the Kelly shadow
-    reflect realized exits from yesterday and earlier.
+    Called at the top of run() so trade_log.jsonl reflects realized exits from
+    yesterday and earlier before anything else reads it.
     """
     if not os.path.exists(TRADE_LOG_PATH):
         return 0
