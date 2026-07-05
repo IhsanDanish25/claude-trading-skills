@@ -45,7 +45,7 @@ what its headline Sharpe looks like.
 | **Breakout** | validated (failing) | 2024-05-14 → 2026-06-26 | 27 | -0.38 | 37.0% | 0.585 | none | Not trustworthy; retired from recommended `STRATEGY_MODE` |
 | **Insider Buying** | blocked, paid tier | — | — | — | — | — | — | Untested — FMP `/stable/insider-trading` is a **paid-tier** endpoint (402/403 on the free plan), not a network issue |
 | **Short Squeeze** | blocked, paid tier | — | — | — | — | — | — | Untested — FMP `/stable/short-interest` not on the free plan (404/403) |
-| **Earnings Momentum** | backtestable | see §2.4 | — | — | — | — | — | **No longer blocked** — now generated point-in-time; re-run on the standard cache for canonical numbers |
+| **Earnings Momentum** | validated (failing) | 2024-05-14 → 2026-06-26 | 12 | 0.44 | 41.7% | 0.523 | none | Not trustworthy — only 12 trades, far below the 50-trade floor |
 
 **None of the currently backtestable strategies (PEAD, Mean Reversion,
 Breakout, Earnings Momentum) clear `trustworthy`.** Earnings Momentum is now
@@ -100,9 +100,15 @@ not network access.
   has drifted up ≥ `EARNMOM_MIN_DRIFT_PCT` — using earnings dates from
   `backtest_harness/earnings_data.py` (yfinance) and drift/price/volume from the
   OHLCV cache. `backtest_5_strategies.py` runs it alongside Breakout/MeanRev.
-- Like the others, it does **not** clear `trustworthy` on the runs observed so
-  far. Canonical numbers require a re-run on the agreed standard cache — the
-  headline figures depend heavily on which symbols are cached locally.
+- On the canonical 30-symbol cache (same window as the others): **12 trades,
+  Sharpe 0.44, 41.7% win, p=0.523**, total return +2.3% vs SPY +39.4%. It fails
+  every gate — 12 trades is an order of magnitude below the 50-trade floor, and
+  p=0.523 is nowhere near significance. Not trustworthy. Numbers back
+  `backtests/five_strategies_2026-07-05/earnmom.json`.
+- Headline figures depend heavily on which symbols are cached; a larger cache
+  produces far more signals (a 512-symbol local run gave 71 trades, Sharpe 1.16,
+  p=0.093 — still failing). Re-run on the agreed standard cache before drawing
+  conclusions.
 
 ### 2.5 Insider Buying / Short Squeeze (blocked — paid FMP tier)
 
@@ -119,8 +125,8 @@ not network access.
 
 ## 3. Known caveats on the existing numbers
 
-- The satellite backtest universe (Breakout, Mean Reversion) is the 30
-  non-ETF symbols present in the committed bar cache
+- The satellite backtest universe (Breakout, Mean Reversion, Earnings
+  Momentum) is the 30 non-ETF symbols present in the committed bar cache
   (`backtest_harness/cache/*.json`), **not** the full 103-symbol
   `SP80_UNIVERSE` used in live production scans, because the session that
   produced them had no network access to refresh the cache. Results may not
