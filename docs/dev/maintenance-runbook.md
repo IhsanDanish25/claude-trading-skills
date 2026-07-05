@@ -18,6 +18,8 @@ Related references (this runbook links rather than duplicates):
   templates.
 - `docs/dev/metadata-and-workflow-schema.md` → the `skills-index.yaml` /
   `workflows/*.yaml` schema and validator error codes.
+- `docs/dev/strategy-validation-status.md` → which `STRATEGY_MODE` strategies
+  have cleared `validation_gates.py`, and which are unproven or blocked.
 - `workflows/README.md`, `skillsets/README.md` → manifest schemas.
 
 ---
