@@ -4,6 +4,10 @@ Central config — reads from env vars (Railway secrets) or .env file locally.
 import os
 import sys
 
+import pytz
+
+ET = pytz.timezone("America/New_York")
+
 try:
     from dotenv import load_dotenv
     # Load .env from repo root regardless of working directory.
