@@ -113,24 +113,39 @@ def run():
     # NEVER cancel existing OCO protection on positions we currently hold —
     # the cancel+reattach cycle can race against tighten_stop and cause "no
     # open stop order" failures when Alpaca re-propagates the new OCO.
+    #
+    # Stale-stop guard: if a position already has a stop-loss order (trailing
+    # stop was applied at 12:00 noon), DON'T replace it — the midday trail
+    # tightens it further as the stock runs. Blindly overwriting it with entry-
+    # priced STOP_LOSS_PCT throws away 6-8% of trailing gain.
     if positions:
         open_orders = broker.get_open_orders()
+        stop_orders = set()
         if open_orders:
-            position_symbols = {p.symbol for p in positions}
-            cancelled = 0
             for o in open_orders:
                 try:
-                    # Only cancel orders for symbols we NO LONGER hold
-                    if o.symbol not in position_symbols:
+                    otype = str(getattr(o, "type", "")).lower()
+                    oside = str(getattr(o, "side", "")).lower()
+                    if otype == "stop" and oside == "sell":
+                        stop_orders.add(o.symbol)
+                except Exception:
+                    pass
+
+            for o in open_orders:
+                try:
+                    if o.symbol not in {p.symbol for p in positions}:
                         broker.trade.cancel_order_by_id(o.id)
                         log.info(f"  Cancelled orphan order: {o.symbol} {o.side}")
-                        cancelled += 1
                 except Exception as e:
                     log.warning(f"  Cancel order fail: {e}")
-            if cancelled:
-                time.sleep(1)
 
         for p in positions:
+            # Stale-stop guard: skip re-attach if position already holds a stop
+            # (trailing stop from 12:00 noon trail eval is in place).
+            if p.symbol in stop_orders:
+                log.info(f"  {p.symbol}: stop-loss order already live — skip re-attach")
+                continue
+
             entry = float(p.avg_entry_price)
             qty = int(float(p.qty))
             if qty < 1:

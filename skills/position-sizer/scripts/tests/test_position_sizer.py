@@ -139,6 +139,23 @@ class TestKelly:
         assert result["kelly_pct"] == 0.0
         assert result["half_kelly_pct"] == 0.0
 
+    def test_kelly_unknown_n_trades_falls_back(self):
+        """n_trades=0 (unset/unknown) -> fallback flat 5%% budget, not real Kelly."""
+        params = SizingParameters(
+            account_size=100_000,
+            win_rate=0.55,
+            avg_win=2.5,
+            avg_loss=1.0,
+            n_trades=0,  # implicit default: "unknown sample, use safe fallback"
+        )
+        result = calculate_position(params)
+        assert result["mode"] == "budget"
+        assert result["recommended_risk_budget"] == 5000.0  # 5% flat
+        kelly = result["calculations"]["kelly"]
+        assert kelly["reason"] == "fallback flat 5% (n=0 < 20)"
+        assert kelly["kelly_pct"] == 0.0  # Kelly math not run
+        assert result["note"] is not None
+
     def test_kelly_budget_mode_no_entry(self):
         """Kelly without --entry -> budget mode, no shares in output."""
         params = SizingParameters(
@@ -146,11 +163,17 @@ class TestKelly:
             win_rate=0.55,
             avg_win=2.5,
             avg_loss=1.0,
+            n_trades=100,  # sufficient: bypasses fallback, runs real Kelly
         )
         result = calculate_position(params)
         assert result["mode"] == "budget"
         assert "final_recommended_shares" not in result
         assert "recommended_risk_budget" in result
+        # raw half-Kelly 18.5% exceeds 5% hard cap → capped at 5%
+        assert result["recommended_risk_budget"] == 5000.00  # capped at 5.0%
+        kelly = result["calculations"]["kelly"]
+        assert kelly["was_capped"] is True
+        assert kelly["raw_half_kelly_pct"] == 18.5
 
     def test_kelly_shares_mode_with_entry(self):
         """Kelly with --entry and --stop -> shares mode."""
@@ -161,6 +184,7 @@ class TestKelly:
             win_rate=0.55,
             avg_win=2.5,
             avg_loss=1.0,
+            n_trades=100,
         )
         result = calculate_position(params)
         assert result["mode"] == "shares"
@@ -174,6 +198,7 @@ class TestKelly:
             win_rate=0.55,
             avg_win=2.5,
             avg_loss=1.0,
+            n_trades=100,
         )
         result = calculate_position(params)
         assert result["mode"] == "shares"

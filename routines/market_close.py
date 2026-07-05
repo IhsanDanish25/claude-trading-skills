@@ -30,6 +30,55 @@ CLOSE_EXIT_THRESHOLD = -0.03   # Force exit if P&L < -3%
 MAX_CASH_CLOSES_PER_DAY = 3    # Cap how many positions a cash-regime call can liquidate
 DAILY_CLOSE_LOG = os.path.join(config.STATE_DIR, "daily_close_log.json")
 
+# ── 14:45 ET Secondary Trail Eval ─────────────────────────────────────────
+# Second trailing-stop sweep of the day (first at 12:00 noon in midday_review).
+# Handles winners that ran hard post-noon and would otherwise give back 6-8%.
+# Only fires between 14:45 and 15:50 ET to avoid interfering with the
+# 15:00 close auction and the open-order cancellation that follows.
+
+
+def _late_trail(broker: BrokerClient) -> int:
+    """14:45 ET secondary trailing-stop ratchet. Returns count of stops tightened."""
+    from core.edge import compute_trail_stop
+    now_et = datetime.datetime.now(ET)
+    cutoff = datetime.time(14, 45)
+    expire = datetime.time(15, 50)
+    if not (cutoff <= now_et.time() < expire):
+        return 0
+
+    positions  = broker.get_positions()
+    open_orders = broker.get_open_orders()
+    stop_map    = {}   # sym -> current stop price
+    for o in open_orders:
+        try:
+            otype = str(getattr(o, "type", "")).lower()
+            oside = str(getattr(o, "side", "")).lower()
+            sp    = getattr(o, "stop_price", None)
+            if otype == "stop" and oside == "sell" and isinstance(sp, (int, float)):
+                stop_map[o.symbol] = float(sp)
+        except Exception:
+            pass
+
+    quotes   = get_quotes([p.symbol for p in positions])
+    tightened = 0
+    for pos in positions:
+        sym   = pos.symbol
+        entry = float(pos.avg_entry_price)
+        cur   = float(quotes.get(sym, {}).get("price", entry))
+        if cur <= entry:
+            continue  # losers — OCO handles the stop
+
+        cur_stop    = stop_map.get(sym, round(entry * (1 - config.STOP_LOSS_PCT), 2))
+        default_stop = round(entry * (1 - config.STOP_LOSS_PCT), 2)
+        base_stop   = max(cur_stop, default_stop)
+        new_stop    = compute_trail_stop(cur, entry, base_stop)
+        if new_stop > base_stop + 0.01:  # only tighten if materially better
+            if broker.tighten_stop(sym, new_stop):
+                log.info(f"  14:45 TRAIL {sym}: ${base_stop:.2f} → ${new_stop:.2f}  (now ${cur:.2f})")
+                tightened += 1
+    log.info(f"  14:45 trail eval: {tightened} stops tightened")
+    return tightened
+
 
 def _today_close_count() -> int:
     today = datetime.date.today().isoformat()
@@ -59,6 +108,9 @@ def run():
 
     broker = BrokerClient()
     today  = datetime.date.today().isoformat()
+
+    # ── 14:45 secondary trail eval (fires up to 15 min before close) ─────────
+    _late_trail(broker)
 
     # ── Cancel all open day orders ────────────────────────────────────────────
     log.info("── Cancelling open orders")

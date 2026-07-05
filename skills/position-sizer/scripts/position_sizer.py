@@ -26,10 +26,11 @@ class SizingParameters:
     win_rate: float | None = None
     avg_win: float | None = None
     avg_loss: float | None = None
-    max_position_pct: float | None = None
+    max_position_pct: float | None = None  # None → defaults to 5% hard cap (kelly_sizing.py compatible)
     max_sector_pct: float | None = None
     sector: str | None = None
     current_sector_exposure: float = 0.0
+    n_trades: int = 0               # closed trade count; below MIN_TRADES → fallback flat 5%
 
 
 def validate_parameters(params: SizingParameters) -> None:
@@ -122,22 +123,35 @@ def apply_constraints(shares: int, params: SizingParameters) -> tuple[int, list[
 
     Evaluates max position % and max sector % constraints, then returns
     the minimum of all candidate share counts (strictest constraint wins).
+    When entry_price is None ( Kelly budget mode), the max position cap is
+    applied as a notional ceiling directly; shares is returned unchanged.
     """
     constraints: list[dict] = []
     candidates = [shares]
     binding: str | None = None
 
-    if params.max_position_pct is not None and params.entry_price:
-        max_by_pos = int(params.account_size * params.max_position_pct / 100 / params.entry_price)
-        constraints.append(
-            {
-                "type": "max_position_pct",
-                "limit": params.max_position_pct,
-                "max_shares": max_by_pos,
-                "binding": False,
-            }
-        )
-        candidates.append(max_by_pos)
+    if params.max_position_pct is not None:
+        if params.entry_price:
+            max_by_pos = int(params.account_size * params.max_position_pct / 100 / params.entry_price)
+            candidates.append(max_by_pos)
+            constraints.append(
+                {
+                    "type": "max_position_pct",
+                    "limit": params.max_position_pct,
+                    "max_shares": max_by_pos,
+                    "binding": False,
+                }
+            )
+        else:
+            # Kelly budget mode (no entry price): apply cap as notional ceiling
+            constraints.append(
+                {
+                    "type": "max_position_pct",
+                    "limit": params.max_position_pct,
+                    "binding": False,
+                    "note": "budget mode: notional cap",
+                }
+            )
 
     if params.max_sector_pct is not None and params.entry_price:
         remaining_pct = params.max_sector_pct - params.current_sector_exposure
@@ -165,41 +179,91 @@ def apply_constraints(shares: int, params: SizingParameters) -> tuple[int, list[
     return final, constraints, binding
 
 
-def calculate_position(params: SizingParameters) -> dict:
+def calculate_position(params: SizingParameters, min_trades: int = 20) -> dict:
     """Main calculation entry point.
 
     Determines mode (budget or shares), runs the appropriate sizing method,
     applies constraints, and returns the full result dictionary.
+
+    Guardrails matching kelly_sizing.py:
+    - min_trades gate: if n_trades < min_trades, returns flat 5% budget (no Kelly).
+    - Hard max_position_pct cap (default 5.0%): applied to Kelly fraction in both
+      budget and shares mode, even when entry_price is absent.
     """
     validate_parameters(params)
 
+    default_max_pct = 0.05            # kelly_sizing.py default
+    max_pct = (params.max_position_pct / 100) if params.max_position_pct is not None else default_max_pct
+
     is_kelly_mode = params.win_rate is not None
     has_entry = params.entry_price is not None
+    insufficient_trades = is_kelly_mode and params.n_trades < min_trades
 
     result: dict = {
         "schema_version": "1.0",
         "parameters": {},
     }
 
+    # ── Trade-count gate: fall back to flat max_pct (kelly_sizing.py compatible) ─
+    if insufficient_trades:
+        budget_pct = max_pct
+        budget = params.account_size * budget_pct
+        result["mode"] = "budget" if not has_entry else "shares"
+        result["calculations"] = {
+            "kelly": {
+                "method": "kelly",
+                "kelly_pct": 0.0,
+                "half_kelly_pct": 0.0,
+                "reason": f"fallback flat {budget_pct:.0%} (n={params.n_trades} < {min_trades})",
+            },
+            "fixed_fractional": None,
+            "atr_based": None,
+        }
+        if not has_entry:
+            result["recommended_risk_budget"] = round(budget, 2)
+            result["recommended_risk_budget_pct"] = budget_pct
+            result["note"] = f"Tail-risk fallback: only {params.n_trades} closed trades < {min_trades} minimum."
+        else:
+            risk_per_share = (params.entry_price - params.stop_price) if params.stop_price else params.entry_price
+            shares = int(budget / risk_per_share) if risk_per_share else 0
+            result["final_recommended_shares"] = shares
+            result["final_position_value"] = round(shares * params.entry_price, 2)
+            result["final_risk_dollars"] = (
+                round(shares * risk_per_share, 2) if risk_per_share else None
+            )
+            result["final_risk_pct"] = (
+                round(shares * risk_per_share / params.account_size, 4) if risk_per_share else None
+            )
+        return result
+
+    # ── Budget mode (Kelly, no entry price) ───────────────────────────────────
     if is_kelly_mode and not has_entry:
-        # Budget mode: Kelly without entry price
         kelly = calculate_kelly(params)
+        raw_budget_pct = kelly["half_kelly_pct"] / 100
+        capped_budget_pct = min(raw_budget_pct, max_pct)           # hard cap
+        capped_budget = params.account_size * capped_budget_pct
+
         result["mode"] = "budget"
         result["parameters"] = {
             "win_rate": params.win_rate,
             "avg_win": params.avg_win,
             "avg_loss": params.avg_loss,
             "account_size": params.account_size,
+            "n_trades": params.n_trades or None,
         }
         result["calculations"] = {
-            "kelly": kelly,
+            "kelly": {
+                **kelly,
+                "raw_half_kelly_pct": kelly["half_kelly_pct"],
+                "capped_half_kelly_pct": round(capped_budget_pct * 100, 2),
+                "hard_cap_pct": round(max_pct * 100, 2),
+                "was_capped": raw_budget_pct > max_pct,
+            },
             "fixed_fractional": None,
             "atr_based": None,
         }
-        budget = params.account_size * kelly["half_kelly_pct"] / 100
-        result["recommended_risk_budget"] = round(budget, 2)
-        result["recommended_risk_budget_pct"] = kelly["half_kelly_pct"]
-        result["note"] = "To calculate shares, re-run with --entry and --stop"
+        result["recommended_risk_budget"] = round(capped_budget, 2)
+        result["recommended_risk_budget_pct"] = round(capped_budget_pct * 100, 2)
         return result
 
     # Shares mode
@@ -217,16 +281,25 @@ def calculate_position(params: SizingParameters) -> dict:
     risk_shares = 0
 
     if is_kelly_mode:
-        kelly = calculate_kelly(params)
+        kelly_raw = calculate_kelly(params)
+        raw_budget_pct_kelly = kelly_raw["half_kelly_pct"] / 100
+        capped_budget_pct_kelly = min(raw_budget_pct_kelly, max_pct)  # hard cap
+        kelly = {
+            **kelly_raw,
+            "raw_half_kelly_pct": kelly_raw["half_kelly_pct"],
+            "capped_half_kelly_pct": round(capped_budget_pct_kelly * 100, 2),
+            "hard_cap_pct": round(max_pct * 100, 2),
+            "was_capped": raw_budget_pct_kelly > max_pct,
+        }
         calculations["kelly"] = kelly
-        # Use half-kelly budget to determine shares
-        budget = params.account_size * kelly["half_kelly_pct"] / 100
+        budget = params.account_size * capped_budget_pct_kelly  # capped budget
         if params.stop_price:
             risk_per_share = params.entry_price - params.stop_price
             risk_shares = int(budget / risk_per_share)
             result["parameters"]["stop_price"] = params.stop_price
         else:
             risk_shares = int(budget / params.entry_price)
+        result["parameters"]["n_trades"] = params.n_trades or None
     elif params.atr is not None:
         atr_result = calculate_atr_based(params)
         calculations["atr_based"] = atr_result
@@ -287,14 +360,30 @@ def generate_markdown_report(result: dict) -> str:
     if result["mode"] == "budget":
         lines.append("## Kelly Criterion")
         kelly = result["calculations"]["kelly"]
-        lines.append("- Full Kelly: {}%".format(kelly["kelly_pct"]))
-        lines.append("- Half Kelly (recommended): {}%".format(kelly["half_kelly_pct"]))
+        kelly_reason = kelly.get("reason", "")
+        if kelly_reason:
+            lines.append(f"- ⚠️ {kelly_reason}")
+        else:
+            lines.append(
+                "- Half Kelly (recommended): {}%".format(kelly.get("capped_half_kelly_pct", kelly["half_kelly_pct"]))
+            )
+            raw = kelly.get("raw_half_kelly_pct")
+            cap = kelly.get("hard_cap_pct", 5.0)
+            if kelly.get("was_capped") and raw is not None:
+                cap_raw = kelly.get("capped_half_kelly_pct", "N/A")
+                lines.append(
+                    f"  ⚠️ Raw half-Kelly {raw:.2f}% exceeds hard cap {cap:.2f}% → capped at {cap_raw}%"
+                )
+            lines.append(f"- Hard cap: {cap:.2f}% of account")
+            if result["parameters"].get("n_trades"):
+                lines.append(f"- Sample size: {result['parameters']['n_trades']} closed trades")
         lines.append(
             "- **Recommended Risk Budget:** ${:,.2f}".format(result["recommended_risk_budget"])
         )
         lines.append("  ({}% of account)".format(result["recommended_risk_budget_pct"]))
-        lines.append("")
-        lines.append("*{}*".format(result["note"]))
+        if result.get("note"):
+            lines.append("")
+            lines.append("*{}*".format(result["note"]))
     else:
         lines.append("## Calculations")
         for method, calc in result.get("calculations", {}).items():
@@ -302,7 +391,11 @@ def generate_markdown_report(result: dict) -> str:
                 lines.append("### {}".format(method.replace("_", " ").title()))
                 for k, v in calc.items():
                     if k != "method":
-                        lines.append(f"- {k}: {v}")
+                        if k == "was_capped":
+                            label = "⚠️ hard-capped" if v else "ok"
+                            lines.append(f"- {k}: {v} ({label})")
+                        else:
+                            lines.append(f"- {k}: {v}")
                 lines.append("")
 
         if result.get("constraints_applied"):
@@ -376,7 +469,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-position-pct",
         type=float,
-        help="Maximum single position as %% of account",
+        help="Maximum position as %% of account (default: 5%%, always enforced for Kelly mode)",
+    )
+    parser.add_argument(
+        "--n-trades",
+        type=int,
+        default=0,
+        help="Number of closed trades used to derive win_rate/avg_win/avg_loss (default: 0). "
+             "Below 20 trades Kelly is skipped and flat 5%% budget is returned "
+             "(kelly_sizing.py compatible minimum-trade gate).",
     )
     parser.add_argument(
         "--max-sector-pct",
@@ -434,6 +535,7 @@ def main() -> None:
         max_sector_pct=args.max_sector_pct,
         sector=args.sector,
         current_sector_exposure=args.current_sector_exposure,
+        n_trades=args.n_trades,
     )
 
     try:

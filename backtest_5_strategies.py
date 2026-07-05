@@ -154,9 +154,18 @@ def _run_satellite_strategy(key: str, store, universe, start_equity: float,
     spy_rets = [(b["equity"] / a["equity"] - 1) for a, b in zip(spy_curve[:-1], spy_curve[1:])] if spy_curve else []
     gate_report = None
     if len(strat_rets) == len(spy_rets) and len(strat_rets) >= 2:
+        # Overfit gate needs an in-sample/out-of-sample split. These strategies
+        # have FIXED parameters (nothing is fit to the data), so a chronological
+        # 50/50 split of the equity curve is the right test: does the edge that
+        # showed up in the first half survive into the unseen second half, or was
+        # it a one-regime fluke? is_return = earlier (train), oos_return = later.
+        from validation_gates import total_return
+        half = len(strat_rets) // 2
+        is_return = total_return(strat_rets[:half])
+        oos_return = total_return(strat_rets[half:])
         gate_report = run_gates(
             strat_daily_returns=strat_rets, spy_daily_returns=spy_rets,
-            n_trades=len(pf.trades), is_return=None, oos_return=None,
+            n_trades=len(pf.trades), is_return=is_return, oos_return=oos_return,
         )
 
     png_path = os.path.join(out_dir, f"equity_curve_{key}.png")
@@ -187,8 +196,12 @@ def _run_satellite_strategy(key: str, store, universe, start_equity: float,
         "spy_buy_hold": spy,
         "trade_stats": tstats,
         "p_value": round(gate_report.p_value, 4) if gate_report else None,
+        "overfit_ratio": (round(gate_report.overfit_ratio, 3)
+                          if gate_report and gate_report.overfit_ratio != float("inf")
+                          else None),
         "gates": gate_report.gates if gate_report else None,
         "trustworthy": gate_report.trustworthy if gate_report else None,
+        "beats_field": gate_report.beats_field if gate_report else None,
         "equity_curve": pf.equity_curve,
         "trades": pf.trades,
     }
@@ -204,24 +217,36 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--start-equity", type=float, default=100_000.0)
     ap.add_argument("--slippage-bps", type=float, default=10.0)
+    ap.add_argument("--universe", choices=["full", "live"], default="full",
+                    help="'full' = every cached non-ETF symbol (S&P 500 power set); "
+                         "'live' = only the SP80_UNIVERSE symbols production trades")
+    ap.add_argument("--out-dir", default=None,
+                    help="output directory (default: backtests/five_strategies_<date>)")
     args = ap.parse_args()
 
     from backtest_harness import data
 
-    universe_symbols = sorted(f[:-5] for f in os.listdir(data.CACHE_DIR) if f.endswith(".json"))
+    # list_cached_symbols() picks up both {SYM}.json and the gzipped standard
+    # cache {SYM}.json.gz.
+    universe_symbols = data.list_cached_symbols()
     series = {s: data.load_cached(s) for s in universe_symbols}
     series = {s: b for s, b in series.items() if b}
     if "SPY" not in series:
-        log.error("No cached SPY bars at backtest_harness/cache/SPY.json — aborting.")
+        log.error("No cached SPY bars in backtest_harness/cache/ — aborting.")
         return 1
     store = data.BarStore(series)
     data.install_store(store)
 
     universe = build_universe(store)
-    log.info("Universe: %d cached symbols (excl. index/sector ETFs): %s", len(universe), universe)
+    if args.universe == "live":
+        from core.config import SP80_UNIVERSE
+        live = set(SP80_UNIVERSE)
+        universe = [s for s in universe if s in live]
+    log.info("Universe (%s): %d cached symbols (excl. index/sector ETFs)",
+             args.universe, len(universe))
 
     today = datetime.date.today().isoformat()
-    out_dir = os.path.join(REPO, "backtests", f"five_strategies_{today}")
+    out_dir = args.out_dir or os.path.join(REPO, "backtests", f"five_strategies_{today}")
     os.makedirs(out_dir, exist_ok=True)
 
     results: dict[str, dict] = {}

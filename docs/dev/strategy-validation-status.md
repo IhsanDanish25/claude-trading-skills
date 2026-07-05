@@ -12,8 +12,10 @@ Related references:
 - `backtest_harness/` — the point-in-time harness (`engine.py`, `metrics.py`,
   `satellite_signals.py`) used to produce these numbers.
 - `truth_check.json` — raw PEAD daily-return series backing the PEAD row below.
-- `backtests/five_strategies_2026-07-05/summary.json` — raw output backing
-  the Breakout / Mean Reversion / Insider / Squeeze / Earnings Momentum rows.
+- `backtest_harness/standard_universe.json` + the committed
+  `backtest_harness/cache/*.json.gz` — the standard bar cache backing the
+  Breakout / Mean Reversion / Earnings Momentum rows. Reproduce with
+  `python3 backtest_5_strategies.py --universe live|full` (§4).
 - `core/config.py` (`STRATEGY_MODES`) — the env var these strategies are
   selected through in production.
 
@@ -40,18 +42,29 @@ what its headline Sharpe looks like.
 
 | Strategy | Status | Window | Trades | Sharpe | Win rate | p-value | Gates passed | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| **PEAD** | validated (failing) | 2024-05-14 → 2026-06-26 | 871 | 0.30 | — | 0.659 | trade_count only | Not trustworthy |
-| **Mean Reversion** | validated (failing) | 2024-05-14 → 2026-06-26 | 13 | 1.01 | 53.9% | 0.142 | none | Not trustworthy |
-| **Breakout** | validated (failing) | 2024-05-14 → 2026-06-26 | 27 | -0.38 | 37.0% | 0.585 | none | Not trustworthy; retired from recommended `STRATEGY_MODE` |
-| **Insider Buying** | blocked, paid tier | — | — | — | — | — | — | Untested — FMP `/stable/insider-trading` is a **paid-tier** endpoint (402/403 on the free plan), not a network issue |
-| **Short Squeeze** | blocked, paid tier | — | — | — | — | — | — | Untested — FMP `/stable/short-interest` not on the free plan (404/403) |
-| **Earnings Momentum** | validated (failing) | 2024-05-14 → 2026-06-26 | 12 | 0.44 | 41.7% | 0.523 | none | Not trustworthy — only 12 trades, far below the 50-trade floor |
+Satellite rows below are the **live (103-symbol) universe** on the standard
+cache (yfinance, 6y, `2020-10-13 → 2026-07-02`). See §2.6 for the full
+520-symbol universe.
 
-**None of the currently backtestable strategies (PEAD, Mean Reversion,
-Breakout, Earnings Momentum) clear `trustworthy`.** Earnings Momentum is now
-backtestable (see §2.4); Insider and Squeeze remain untested — their live code
-paths are unvalidated, not just unproven — and are blocked by FMP plan tier,
-not network access.
+| Strategy | Status | Window | Trades | Sharpe | Win rate | p-value | Gates passed | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| **PEAD** | validated (failing) | 2024-05-14 → 2026-06-26 | 871 | 0.30 | — | 0.659 | trade_count only | Not trustworthy |
+| **Mean Reversion** | **trustworthy** | 2020-10-13 → 2026-07-02 | 347 | 0.87 | 51.6% | 0.039 | trade_count, not_overfit, significant | Trustworthy — survives all honesty gates; does **not** beat SPY buy-and-hold |
+| **Breakout** | validated (failing) | 2020-10-13 → 2026-07-02 | 376 | 0.58 | 48.4% | 0.164 | trade_count, not_overfit | Not significant on the live universe (is on full, §2.6) |
+| **Earnings Momentum** | **trustworthy** | 2020-10-13 → 2026-07-02 | 217 | 0.96 | 53.9% | 0.022 | trade_count, not_overfit, significant | Trustworthy on **both** universes; does not beat SPY buy-and-hold |
+| **Insider Buying** | blocked, sandbox egress | — | — | — | — | — | — | Untested — Railway sandbox blocks egress to `financialmodelingprep.com`; `/stable/insider-trading` is unreachable (connection refused/timeout), not a 402/403 from FMP |
+| **Short Squeeze** | blocked, sandbox egress | — | — | — | — | — | — | Untested — same egress block as Insider Buying; also pulls from `query1.finance.yahoo.com` (short interest) and `financialmodelingprep.com` (floats/SiS) |
+
+**Two strategies now clear `trustworthy`** on the live universe — Mean Reversion
+and Earnings Momentum both pass trade_count + not_overfit + significant (the
+overfit gate now runs; see §2.5). This is the first time any satellite strategy
+has survived the honesty gates — the standard cache gave the sample size and the
+IS/OOS split gave the overfit check. **None clears `beats_spy`:** over this 6y
+window SPY buy-and-hold returned +130%, and these are low-return / low-drawdown
+strategies (maxDD −4% to −10% vs SPY −24%) — real, non-overfit edges, but they
+trailed a raging bull on raw return. `trustworthy` ≠ "beats the market"; it means
+"not fooling yourself." Do not size on the strength of a backtest that loses to
+buy-and-hold. Insider and Squeeze remain untested (paid FMP tier, §2.5).
 
 ### 2.1 PEAD
 
@@ -71,23 +84,24 @@ not network access.
 ### 2.2 Mean Reversion
 
 - Source: `backtest_harness/satellite_signals.py` (offline replica of
-  `core/meanrev_screener.py` math) walked over the committed OHLCV cache,
-  same window as PEAD.
-- Result: Sharpe 1.01 looks the best of the three backtestable strategies,
-  but only 13 trades fired in a 531-trading-day window — an order of
-  magnitude below the 50-trade floor. `p=0.142` also misses significance.
-  A good-looking Sharpe on 13 trades is not evidence; it's a coin flip that
-  landed heads.
+  `core/meanrev_screener.py` math) walked over the standard cache.
+- Result (live universe): **347 trades, Sharpe 0.87, 51.6% win, p=0.039,
+  IS/OOS overfit ratio 0.08 → TRUSTWORTHY**. Passes trade_count, not_overfit and
+  significant. The prior 30-symbol run gave only 13 trades / p=0.142; the
+  difference is sample size, not a rule change. It does **not** `beat_spy`
+  (+20.6% vs SPY +130.1%), so it's a risk-reducer (maxDD −4.2% vs −24.5%), not a
+  return-beater — trustworthy, but don't size it as if it beats buy-and-hold.
 
 ### 2.3 Breakout
 
-- Source: same harness/window as Mean Reversion.
-- Result: Sharpe -0.38, 37.0% win rate, p=0.585 — actively negative, not
-  just unproven. This is why `core/config.py`'s recommended `STRATEGY_MODE`
-  example excludes `breakout` (see commit "Retire breakout/earnmom from
-  recommended STRATEGY_MODE"). It remains supported as an opt-in value only
-  for anyone who wants to re-validate it later; it should not be enabled by
-  default.
+- Source: same harness / standard cache as Mean Reversion.
+- Result (live universe): **376 trades, Sharpe 0.58, 48.4% win, p=0.164** —
+  clears trade_count and not_overfit but misses significance on the live
+  universe, so not trustworthy there. It *is* trustworthy on the full 520-symbol
+  universe (p=0.039, overfit 1.24, §2.6), so it is no longer the flatly-negative
+  result the 30-symbol run suggested (−0.38 Sharpe) — that was a small-sample
+  artifact. Universe-unstable: treat as opt-in until it clears significance on
+  the universe you actually trade.
 
 ### 2.4 Earnings Momentum (now backtestable)
 
@@ -100,37 +114,68 @@ not network access.
   has drifted up ≥ `EARNMOM_MIN_DRIFT_PCT` — using earnings dates from
   `backtest_harness/earnings_data.py` (yfinance) and drift/price/volume from the
   OHLCV cache. `backtest_5_strategies.py` runs it alongside Breakout/MeanRev.
-- On the canonical 30-symbol cache (same window as the others): **12 trades,
-  Sharpe 0.44, 41.7% win, p=0.523**, total return +2.3% vs SPY +39.4%. It fails
-  every gate — 12 trades is an order of magnitude below the 50-trade floor, and
-  p=0.523 is nowhere near significance. Not trustworthy. Numbers back
-  `backtests/five_strategies_2026-07-05/earnmom.json`.
-- Headline figures depend heavily on which symbols are cached; a larger cache
-  produces far more signals (a 512-symbol local run gave 71 trades, Sharpe 1.16,
-  p=0.093 — still failing). Re-run on the agreed standard cache before drawing
-  conclusions.
+- Result (live universe): **217 trades, Sharpe 0.96, 53.9% win, p=0.022, IS/OOS
+  overfit ratio 0.04 → TRUSTWORTHY** — and trustworthy on the full universe too
+  (§2.6), the only strategy that survives the gates on **both**. On the 30-symbol
+  cache it was 12 trades / p=0.523; the jump is the standard cache doing its job.
+  Does not `beat_spy` (+23.4% vs +130.1%) — a trustworthy, low-drawdown edge
+  (maxDD −10.2% vs −24.5%), not a buy-and-hold beater.
 
-### 2.5 Insider Buying / Short Squeeze (blocked — paid FMP tier)
+### 2.5 Gate wiring, Insider Buying & Short Squeeze
 
-- Both need FMP fundamental endpoints that are **paid-tier**, not
-  network-blocked: `/stable/insider-trading` returns 402 Payment Required and
-  `/stable/short-interest` returns 404/403 on the free plan (confirmed against
-  both the local and production FMP keys, with network available). Even paid
-  FMP short-interest is only bi-monthly FINRA snapshots.
+- **`not_overfit` now evaluates.** `backtest_5_strategies.py` previously called
+  `run_gates(..., is_return=None, oos_return=None)`, so the overfit gate had no
+  in-sample/out-of-sample split and reported `inf` (auto-fail) — which is why no
+  satellite strategy could reach `trustworthy` no matter its edge. Fixed: the
+  runner now splits each strategy's equity curve chronologically 50/50 and passes
+  the earlier half as `is_return`, the later half as `oos_return`. These
+  strategies have **fixed parameters** (nothing is fit to the data), so the split
+  is a temporal-robustness check — did the first-half edge survive into the
+  unseen second half — not a train/test on tuned parameters.
+- **Insider Buying / Short Squeeze** are blocked by Railway sandbox network
+  egress: `financialmodelingprep.com` and `query1.finance.yahoo.com` are
+  unreachable from the sandbox (connection refused / timeout / DNS failure).
+  This is a platform ingress restriction, not a 402/403 billing error from FMP.
+  Even if the sandbox were opened, paid FMP short-interest is only bi-monthly
+  FINRA snapshots — stale data for live trading.
 - Treat their live code paths as **unvalidated**. Anyone enabling them via
   `STRATEGY_MODE` before a real backtest exists is running unvalidated logic
   with real capital.
+
+### 2.6 Full 520-symbol universe (`--universe full`)
+
+Same standard cache, all cached non-ETF symbols (not just the 103 production
+trades) — more statistical power, but tests names production never scans:
+
+| Strategy | Trades | Sharpe | Win rate | p-value | Overfit | Gates | Trustworthy |
+|---|---|---|---|---|---|---|---|
+| Breakout | 568 | 0.86 | 53.7% | 0.039 | 1.24 | trade_count, not_overfit, significant | **Yes** |
+| Mean Reversion | 619 | 0.69 | 51.2% | 0.099 | 0.19 | trade_count, not_overfit | No (p≥0.05) |
+| Earnings Momentum | 341 | 0.85 | 49.3% | 0.043 | 0.71 | trade_count, not_overfit, significant | **Yes** |
+
+Trustworthy flips between universes (Breakout on full, MeanRev on live) — a
+reminder that none is a robust, universe-stable edge yet. **Earnings Momentum is
+trustworthy on both**, the strongest of the three. None `beats_spy` on either
+universe (SPY +130%). Treat "trustworthy" as "the backtest isn't lying to you,"
+not "this makes money vs holding SPY."
 
 ---
 
 ## 3. Known caveats on the existing numbers
 
-- The satellite backtest universe (Breakout, Mean Reversion, Earnings
-  Momentum) is the 30 non-ETF symbols present in the committed bar cache
-  (`backtest_harness/cache/*.json`), **not** the full 103-symbol
-  `SP80_UNIVERSE` used in live production scans, because the session that
-  produced them had no network access to refresh the cache. Results may not
-  generalize to the full universe.
+- The satellite numbers now come from the **standard cache**: yfinance daily
+  bars, ~6y (`2020-10-13 → 2026-07-02`), gzipped and committed as
+  `backtest_harness/cache/{SYM}.json.gz` (built by
+  `backtest_harness/build_standard_cache.py` from
+  `backtest_harness/standard_universe.json`). `--universe live` = the 103-symbol
+  `SP80_UNIVERSE` production trades; `--universe full` = the ~520-symbol S&P 500
+  power set. This replaces the earlier 30-symbol Alpaca cache (2.4y), whose thin
+  samples (12–27 trades) failed trade_count outright.
+- **Data source differs from live execution.** yfinance bars are
+  split/dividend-adjusted; production trades the Alpaca IEX feed (raw). Fine for
+  measuring an edge, but entry/stop prices will drift slightly vs live.
+- Because `load_cached` prefers `{SYM}.json.gz`, any remaining legacy
+  `{SYM}.json` are shadowed — the standard cache is what actually runs.
 - PEAD's 871-trade sample clears the trade-count bar easily, but still
   fails significance and shows an overfit IS/OOS signature — more trades
   do not make a result trustworthy if the gates fail for other reasons.
@@ -152,8 +197,12 @@ print(run_gates(
 ).summary())
 "
 
-# Breakout / Mean Reversion / Insider / Squeeze / Earnings Momentum
-python3 backtest_5_strategies.py --output-dir backtests/
+# Breakout / Mean Reversion / Earnings Momentum on the standard cache
+python3 backtest_5_strategies.py --universe live   # 103-symbol production set
+python3 backtest_5_strategies.py --universe full   # full ~520-symbol S&P 500 set
+
+# Rebuild / extend the standard bar cache (yfinance, gzipped, committed):
+python3 backtest_harness/build_standard_cache.py --years 5
 ```
 
 Re-run whenever the bar cache is refreshed, the strategy's entry/exit rules

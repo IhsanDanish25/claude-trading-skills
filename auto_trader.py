@@ -168,10 +168,14 @@ def _sanitize_scraped(text, max_len=60):
     """Scraped text goes into the Claude prompt — keep it to plain name chars."""
     return re.sub(r"[^A-Za-z0-9 .,'\-]", "", str(text))[:max_len]
 
+
 def get_congress_trades():
     try:
         url = "https://www.capitoltrades.com/api/trades?pageSize=20&page=1"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36",
+        })
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())
         buys = [t for t in data.get("data",[]) if t.get("type","").upper() == "BUY"]
@@ -185,8 +189,8 @@ def get_buffett_holdings():
     try:
         url = "https://www.dataroma.com/m/holdings.php?m=BRK"
         req = urllib.request.Request(url, headers={
-            "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"),
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         })
