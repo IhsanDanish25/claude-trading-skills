@@ -93,7 +93,10 @@ WATCHLIST = [
 
 # ── Strategy mode (comma-separated, run in order listed) ─────────────────────
 # Supported: pead, meanrev, insider, squeeze, breakout, earnmom
-# Example: STRATEGY_MODE=pead,meanrev,insider,squeeze,breakout,earnmom
+# Recommended: STRATEGY_MODE=pead,meanrev,insider,squeeze
+# breakout and earnmom are excluded from the recommended default — backtested
+# negative (Breakout Sharpe -0.38 p=0.585; EarnMom Sharpe -0.37, 31.4% win
+# rate). Still supported as opt-in values if re-validated later.
 _STRATEGY_RAW = os.environ.get("STRATEGY_MODE", "pead").lower()
 STRATEGY_MODES = [s.strip() for s in _STRATEGY_RAW.split(",") if s.strip()]
 
