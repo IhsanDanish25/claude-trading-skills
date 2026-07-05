@@ -12,6 +12,7 @@ yfinance>=0.2.30
 alpaca-py>=0.20.0
 anthropic>=0.25.0
 pytz>=2024.1
+axiom-py>=0.12.0   # durable trade-decision logging (survives Railway redeploys)
 
 # ── Shared ────────────────────────────────────────────────────────────────────
 requests>=2.31.0
