@@ -8,17 +8,17 @@ Reuses the existing backtest_harness (earnings_engine sim loop, metrics,
 validation_gates) — see backtest_harness/satellite_signals.py for the new
 point-in-time Breakout / Mean Reversion signal generators.
 
-Network dependency notice:
-  Breakout and Mean Reversion are computed entirely from the OHLCV bar cache
-  already committed at backtest_harness/cache/*.json — no network call.
-  Insider Buying, Short Squeeze, and Earnings Momentum need live/historical
-  fetches (FMP insider-trading, FMP short-interest, yfinance earnings dates)
-  that are blocked by this session's network egress policy; those 3 strategies
-  are reported as "blocked_no_network" rather than fabricated.
+Data notice:
+  Breakout and Mean Reversion are computed entirely from the committed OHLCV bar
+  cache (backtest_harness/cache/*.json) — no network. Earnings Momentum adds
+  yfinance earnings dates via backtest_harness/earnings_data.py (disk-cached;
+  needs network on first run per symbol). Insider Buying and Short Squeeze stay
+  unbacktestable — their FMP endpoints (/stable/insider-trading,
+  /stable/short-interest) are paid-tier (402/403 on the free plan), reported as
+  "blocked_paid_tier".
 
 Writes:
-    backtests/five_strategies_<date>/breakout.json
-    backtests/five_strategies_<date>/meanrev.json
+    backtests/five_strategies_<date>/{breakout,meanrev,earnmom}.json
     backtests/five_strategies_<date>/summary.json
 """
 from __future__ import annotations
@@ -56,23 +56,30 @@ STRATEGY_CONFIGS = {
         "min_avg_volume_attr": "MEANREV_MIN_AVG_VOLUME",
         "min_score": 0.0,
     },
+    "earnmom": {
+        "label": "Earnings Momentum",
+        "stop_pct_attr": "EARNMOM_STOP_PCT",
+        "hold_days_attr": "EARNMOM_HOLD_DAYS",
+        "min_price_attr": "EARNMOM_MIN_PRICE",
+        "min_avg_volume_attr": "EARNMOM_MIN_AVG_VOLUME",
+        "min_score": 0.0,
+    },
 }
 
+# insider/squeeze are blocked by FMP PLAN (not network): /stable/insider-trading
+# and /stable/short-interest return 402/403 on the free tier even with network.
+# Confirmed against both the local and production FMP keys. Earnings Momentum is
+# no longer blocked — earnings dates come from yfinance via earnings_data.py.
 BLOCKED_STRATEGIES = {
     "insider": {
         "label": "Insider Buying",
-        "reason": "needs FMP /stable/insider-trading historical data — "
-                  "financialmodelingprep.com is blocked by this session's network egress policy",
+        "reason": "needs FMP /stable/insider-trading history — paid-tier endpoint "
+                  "(returns 402 Payment Required on the free plan, with or without network)",
     },
     "squeeze": {
         "label": "Short Squeeze",
-        "reason": "needs FMP /stable/short-interest historical data — "
-                  "financialmodelingprep.com is blocked by this session's network egress policy",
-    },
-    "earnings_momentum": {
-        "label": "Earnings Momentum",
-        "reason": "needs yfinance historical earnings dates — "
-                  "query1.finance.yahoo.com is blocked by this session's network egress policy",
+        "reason": "needs FMP /stable/short-interest history — not on the free plan "
+                  "(404/403); even paid FMP is only bi-monthly FINRA snapshots",
     },
 }
 
@@ -113,6 +120,9 @@ def _run_satellite_strategy(key: str, store, universe, start_equity: float,
 
     if key == "breakout":
         signals = satellite_signals.get_historical_breakout_signals(
+            store, universe, window_start, window_end)
+    elif key == "earnmom":
+        signals = satellite_signals.get_historical_earnmom_signals(
             store, universe, window_start, window_end)
     else:
         signals = satellite_signals.get_historical_meanrev_signals(
@@ -215,7 +225,7 @@ def main() -> int:
     os.makedirs(out_dir, exist_ok=True)
 
     results: dict[str, dict] = {}
-    for key in ("breakout", "meanrev"):
+    for key in ("breakout", "meanrev", "earnmom"):
         try:
             results[key] = _run_satellite_strategy(
                 key, store, universe, args.start_equity, args.slippage_bps, out_dir)
@@ -224,7 +234,7 @@ def main() -> int:
             results[key] = {"label": STRATEGY_CONFIGS[key]["label"], "status": "error", "reason": str(e)}
 
     for key, bcfg in BLOCKED_STRATEGIES.items():
-        results[key] = {"label": bcfg["label"], "status": "blocked_no_network", "reason": bcfg["reason"]}
+        results[key] = {"label": bcfg["label"], "status": "blocked_paid_tier", "reason": bcfg["reason"]}
 
     summary_path = os.path.join(out_dir, "summary.json")
     with open(summary_path, "w") as f:
@@ -233,12 +243,13 @@ def main() -> int:
             "methodology_note": (
                 "Universe is the 30 non-ETF symbols present in the committed bar cache "
                 "(backtest_harness/cache/*.json), not the full 103-symbol SP80_UNIVERSE "
-                "production scans, because this session had no network access to refresh "
-                "the cache. Breakout and Mean Reversion signals are generated point-in-time "
-                "from that cache with no look-ahead (backtest_harness/satellite_signals.py). "
-                "Insider Buying, Short Squeeze, and Earnings Momentum require live/historical "
-                "fetches to hosts blocked by this session's egress policy and are reported as "
-                "blocked_no_network."
+                "production scans. Breakout, Mean Reversion and Earnings Momentum signals "
+                "are generated point-in-time from that cache with no look-ahead "
+                "(backtest_harness/satellite_signals.py); Earnings Momentum additionally "
+                "uses yfinance earnings dates via backtest_harness/earnings_data.py "
+                "(disk-cached). Insider Buying and Short Squeeze remain unbacktestable: "
+                "FMP /stable/insider-trading and /stable/short-interest are paid-tier "
+                "endpoints (402/403 on the free plan), not a network-egress issue."
             ),
             "results": results,
         }, f, indent=2)
@@ -256,7 +267,7 @@ def _print_summary_table(results: dict[str, dict]) -> None:
     header = f"  {'Strategy':<20}{'Status':<20}{'Sharpe':>8}{'Win%':>8}{'p-value':>10}{'Trades':>9}"
     print(header)
     print("  " + "-" * 88)
-    for key in ("breakout", "meanrev", "insider", "squeeze", "earnings_momentum"):
+    for key in ("breakout", "meanrev", "earnmom", "insider", "squeeze"):
         r = results[key]
         label = r.get("label", key)
         status = r.get("status", "?")
@@ -271,9 +282,9 @@ def _print_summary_table(results: dict[str, dict]) -> None:
         else:
             print(f"  {label:<20}{status:<20}{'--':>8}{'--':>8}{'--':>10}{'--':>9}")
     print(line)
-    for key in ("insider", "squeeze", "earnings_momentum"):
+    for key in ("insider", "squeeze"):
         r = results[key]
-        if r.get("status") == "blocked_no_network":
+        if str(r.get("status", "")).startswith("blocked"):
             print(f"  [{r['label']}] blocked: {r['reason']}")
     print(line + "\n")
 

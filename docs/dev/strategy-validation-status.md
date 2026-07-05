@@ -43,14 +43,15 @@ what its headline Sharpe looks like.
 | **PEAD** | validated (failing) | 2024-05-14 → 2026-06-26 | 871 | 0.30 | — | 0.659 | trade_count only | Not trustworthy |
 | **Mean Reversion** | validated (failing) | 2024-05-14 → 2026-06-26 | 13 | 1.01 | 53.9% | 0.142 | none | Not trustworthy |
 | **Breakout** | validated (failing) | 2024-05-14 → 2026-06-26 | 27 | -0.38 | 37.0% | 0.585 | none | Not trustworthy; retired from recommended `STRATEGY_MODE` |
-| **Insider Buying** | blocked, no network | — | — | — | — | — | — | Untested — needs FMP `/stable/insider-trading` history |
-| **Short Squeeze** | blocked, no network | — | — | — | — | — | — | Untested — needs FMP `/stable/short-interest` history |
-| **Earnings Momentum** | blocked, no network | — | — | — | — | — | — | Untested — needs yfinance historical earnings dates |
+| **Insider Buying** | blocked, paid tier | — | — | — | — | — | — | Untested — FMP `/stable/insider-trading` is a **paid-tier** endpoint (402/403 on the free plan), not a network issue |
+| **Short Squeeze** | blocked, paid tier | — | — | — | — | — | — | Untested — FMP `/stable/short-interest` not on the free plan (404/403) |
+| **Earnings Momentum** | backtestable | see §2.4 | — | — | — | — | — | **No longer blocked** — now generated point-in-time; re-run on the standard cache for canonical numbers |
 
 **None of the currently backtestable strategies (PEAD, Mean Reversion,
-Breakout) clear `trustworthy`.** Insider, Squeeze, and Earnings Momentum have
-never been backtested at all — their live code paths are unvalidated, not
-just unproven.
+Breakout, Earnings Momentum) clear `trustworthy`.** Earnings Momentum is now
+backtestable (see §2.4); Insider and Squeeze remain untested — their live code
+paths are unvalidated, not just unproven — and are blocked by FMP plan tier,
+not network access.
 
 ### 2.1 PEAD
 
@@ -88,17 +89,31 @@ just unproven.
   for anyone who wants to re-validate it later; it should not be enabled by
   default.
 
-### 2.4 Insider Buying / Short Squeeze / Earnings Momentum
+### 2.4 Earnings Momentum (now backtestable)
 
-- All three are reported `blocked_no_network` in
-  `backtests/five_strategies_2026-07-05/summary.json`: they need live or
-  historical fetches (FMP insider-trading, FMP short-interest, yfinance
-  earnings dates respectively) to hosts blocked by that backtest session's
-  egress policy. No performance numbers exist for them at all.
-- Treat their live code paths as **unvalidated**, not merely "not yet
-  re-validated" like Breakout. Anyone enabling them via `STRATEGY_MODE`
-  before a real backtest exists is running unvalidated logic with real
-  capital.
+- Previously reported `blocked_no_network`. That diagnosis was wrong: yfinance
+  earnings dates are reachable, and the strategy only lacked a point-in-time
+  signal generator. `backtest_harness/satellite_signals.py`
+  (`get_historical_earnmom_signals`) now replicates
+  `core.earnings_momentum_screener` day-by-day — most recent beat
+  (surprise ≥ `EARNMOM_MIN_SURPRISE_PCT`) 8–`EARNMOM_MAX_DAYS_AGO` days ago that
+  has drifted up ≥ `EARNMOM_MIN_DRIFT_PCT` — using earnings dates from
+  `backtest_harness/earnings_data.py` (yfinance) and drift/price/volume from the
+  OHLCV cache. `backtest_5_strategies.py` runs it alongside Breakout/MeanRev.
+- Like the others, it does **not** clear `trustworthy` on the runs observed so
+  far. Canonical numbers require a re-run on the agreed standard cache — the
+  headline figures depend heavily on which symbols are cached locally.
+
+### 2.5 Insider Buying / Short Squeeze (blocked — paid FMP tier)
+
+- Both need FMP fundamental endpoints that are **paid-tier**, not
+  network-blocked: `/stable/insider-trading` returns 402 Payment Required and
+  `/stable/short-interest` returns 404/403 on the free plan (confirmed against
+  both the local and production FMP keys, with network available). Even paid
+  FMP short-interest is only bi-monthly FINRA snapshots.
+- Treat their live code paths as **unvalidated**. Anyone enabling them via
+  `STRATEGY_MODE` before a real backtest exists is running unvalidated logic
+  with real capital.
 
 ---
 

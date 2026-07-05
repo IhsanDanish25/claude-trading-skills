@@ -19,11 +19,18 @@ from core.config import (
     BREAKOUT_MIN_AVG_VOLUME,
     BREAKOUT_MIN_PRICE,
     BREAKOUT_VOL_MULT,
+    EARNMOM_MAX_DAYS_AGO,
+    EARNMOM_MIN_AVG_VOLUME,
+    EARNMOM_MIN_DRIFT_PCT,
+    EARNMOM_MIN_PRICE,
+    EARNMOM_MIN_SURPRISE_PCT,
     MEANREV_BB_THRESHOLD,
     MEANREV_MIN_AVG_VOLUME,
     MEANREV_MIN_PRICE,
     MEANREV_RSI_THRESHOLD,
 )
+
+_EARNMOM_MIN_AGE = 8   # drift phase starts day 8 (gap-fill done, thesis confirmed)
 
 _RSI_PERIOD = 14
 _SMA200_PERIOD = 200
@@ -165,6 +172,96 @@ def get_historical_breakout_signals(
                 "clearance_pct": round(clearance, 2),
                 "volume_ratio": round(vol_ratio, 2),
             })
+
+    out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
+    return out
+
+
+def _earnmom_score(drift_pct: float, surprise_pct: float) -> float:
+    """Same weighting as core.earnings_momentum_screener._drift_score:
+    up to 60 pts for drift (10% = 60), up to 40 pts for surprise (20% = 40)."""
+    drift_pts = min(60.0, max(0.0, drift_pct * 6.0))
+    surprise_pts = min(40.0, max(0.0, surprise_pct * 2.0))
+    return drift_pts + surprise_pts
+
+
+def get_historical_earnmom_signals(
+    store, symbols: list[str], start_date, end_date,
+) -> list[dict]:
+    """Replica of core.earnings_momentum_screener.screen(), walked day-by-day.
+
+    Earnings-momentum "drift" trade: a stock that BEAT (surprise >=
+    EARNMOM_MIN_SURPRISE_PCT) 8-EARNMOM_MAX_DAYS_AGO days ago and has drifted up
+    >= EARNMOM_MIN_DRIFT_PCT since the beat. Emits one signal per beat, on the
+    first day in the 8-45d window that clears price / volume / drift — the entry
+    the live screener would have surfaced.
+
+    Earnings dates + surprise % come from backtest_harness/earnings_data.py
+    (yfinance, disk-cached); drift / price / volume come from the OHLCV store.
+    No look-ahead: drift on day D uses only bars through D; earnings_engine
+    enters at D+1 open.
+
+    Returns rows sorted by (date, -score): {symbol, date, surprise_pct, ...}
+    (surprise_pct carries the earnmom score for the sim's ranking, matching the
+    breakout/meanrev generators).
+    """
+    from backtest_harness import earnings_data
+
+    start = start_date if isinstance(start_date, datetime.date) else datetime.date.fromisoformat(start_date)
+    end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
+    out: list[dict] = []
+
+    for sym in symbols:
+        bars = store.series.get(sym, [])
+        if len(bars) < 21:
+            continue
+        dates = [b["date"] for b in bars]
+        closes = [b["close"] for b in bars]
+        volumes = [b["volume"] for b in bars]
+
+        earnings = earnings_data.get_symbol_earnings(sym)
+        for e in earnings:
+            sp = e.get("surprise_pct")
+            bd = (e.get("date") or "")[:10]
+            if sp is None or not bd or sp < EARNMOM_MIN_SURPRISE_PCT:
+                continue
+            beat = datetime.date.fromisoformat(bd)
+
+            # Beat reference bar = first bar on/after the report date.
+            bi = next((i for i, dd in enumerate(dates) if dd >= bd), None)
+            if bi is None:
+                continue
+            beat_close = closes[bi]
+            if beat_close <= 0:
+                continue
+
+            for i in range(bi, len(bars)):
+                d = datetime.date.fromisoformat(dates[i])
+                age = (d - beat).days
+                if age < _EARNMOM_MIN_AGE:
+                    continue
+                if age > EARNMOM_MAX_DAYS_AGO:
+                    break
+                if d < start or d > end:
+                    continue
+                price = closes[i]
+                if price < EARNMOM_MIN_PRICE:
+                    continue
+                avg_vol = _avg(volumes[max(0, i - 19):i + 1])
+                if avg_vol < EARNMOM_MIN_AVG_VOLUME:
+                    continue
+                drift = (price - beat_close) / beat_close * 100.0
+                if drift < EARNMOM_MIN_DRIFT_PCT:
+                    continue
+                out.append({
+                    "symbol": sym,
+                    "date": dates[i],
+                    "surprise_pct": round(_earnmom_score(drift, sp), 2),
+                    "drift_pct": round(drift, 2),
+                    "eps_surprise_pct": round(float(sp), 2),
+                    "age_days": age,
+                })
+                break  # one entry per beat (held-set would block re-entry anyway)
 
     out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
     return out
