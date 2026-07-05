@@ -42,6 +42,10 @@ class CircuitBreaker:
         max_open_positions=3,   # YOUR compliant cap (not the live 10). Hard ceiling.
         max_position_pct=0.05,  # MAX_POSITION_SIZE_PCT. Per-name notional ceiling.
         max_daily_loss=0.03,    # halt the day if equity down 3% from the open
+        day_start_equity=None,  # pre-market open equity from day_start_value.json.
+                                 # If None, derived from broker on first check (legacy).
+                                 # Prefer passing it explicitly so tick-time drift can't
+                                 # corrupt the baseline.
     ):
         self.get_account = get_account
         self.get_positions = get_positions
@@ -52,7 +56,7 @@ class CircuitBreaker:
         self.trading_halted = False
         self._halt_reason = None
         self._day = None
-        self._starting_equity = None
+        self._starting_equity = day_start_equity  # set once; never re-fetched from broker
         self._peak_equity = None
 
     # ---- helpers -----------------------------------------------------------
@@ -65,17 +69,23 @@ class CircuitBreaker:
         return float(account.equity)
 
     def _roll_day(self, equity):
-        """Reset the daily anchors at the first check of a new calendar day."""
+        """Reset the daily anchors at the first check of a new calendar day.
+
+        NOTE: _starting_equity is set once at __init__ from the pre-market open value
+        (day_start_value.json) and MUST NOT be changed during the day. Only _peak_equity
+        updates on each tick. Previously this method re-set _starting_equity from the
+        broker's live equity, which drifted throughout the day as intraday P/L
+        accumulated, making the daily-loss baseline meaningless.
+        """
         today = date.today()
         if self._day != today:
             self._day = today
-            self._starting_equity = equity
-            self._peak_equity = equity
             self.trading_halted = False
             self._halt_reason = None
             logger.info(
                 "Circuit breaker day-roll. Start equity=%.2f  halt-below=%.2f",
-                equity, equity * (1 - self.max_daily_loss),
+                self._starting_equity,
+                self._starting_equity * (1 - self.max_daily_loss) if self._starting_equity else 0,
             )
         if equity > self._peak_equity:
             self._peak_equity = equity
