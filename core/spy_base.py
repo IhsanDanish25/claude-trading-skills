@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from core import config
+from core.notifier import send_trade_alert
 from core.broker import BrokerClient
 
 log = logging.getLogger(__name__)
@@ -96,6 +97,15 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
                 time_in_force=TimeInForce.DAY,
             ))
             log.info(f"SPY base: bought {qty} @ ~${spy_price:.2f}")
+            send_trade_alert(
+                action="BUY",
+                ticker="SPY",
+                shares=qty,
+                price=spy_price,
+                stop=0,
+                target=0,
+                reason="SPY base rebalance — idle cash deployed",
+            )
             return {"action": "buy", "qty": qty, "price": spy_price, **info}
         except Exception as e:
             log.error(f"SPY base buy failed: {e}")
@@ -114,6 +124,15 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
                 time_in_force=TimeInForce.DAY,
             ))
             log.info(f"SPY base: sold {qty} @ ~${spy_price:.2f}")
+            send_trade_alert(
+                action="SELL",
+                ticker="SPY",
+                shares=qty,
+                price=spy_price,
+                stop=0,
+                target=0,
+                reason="SPY base rebalance — reducing SPY (overweight)",
+            )
             return {"action": "sell", "qty": qty, "price": spy_price, **info}
         except Exception as e:
             log.error(f"SPY base sell failed: {e}")
@@ -143,7 +162,21 @@ def free_cash_for_pead(broker: BrokerClient, amount_needed: float) -> bool:
 
     log.info(f"SPY base: selling {sell_qty} SPY to fund PEAD entry (need ${shortfall:,.0f})")
     try:
-        broker.sell("SPY", qty=sell_qty)
+        result = broker.sell("SPY", qty=sell_qty)
+        sell_price = spy_price
+        try:
+            sell_price = float(result.get("order", {}).filled_avg_price) or spy_price
+        except Exception:
+            pass
+        send_trade_alert(
+            action="SELL",
+            ticker="SPY",
+            shares=sell_qty,
+            price=sell_price,
+            stop=0,
+            target=0,
+            reason=f"SPY base: freed ${shortfall:,.0f} cash for PEAD entry",
+        )
         return True
     except Exception as e:
         log.error(f"SPY base: failed to sell SPY for PEAD funding: {e}")
