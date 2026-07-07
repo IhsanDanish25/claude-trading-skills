@@ -22,6 +22,7 @@ from core.analyst  import review_open_positions, analyze_market_regime, score_vc
 from core.screener import screen
 from core.edge     import should_pyramid, compute_trail_stop, circuit_breaker_tripped
 from core.spy_base import rebalance_to_spy, log_status as spy_log, is_base_symbol
+from core.order_utils import order_field as _order_field
 from core.notifier import send_trade_alert
 
 log = logger.setup("midday")
@@ -41,15 +42,6 @@ def _load_today_bought() -> set:
         return set(data.get("symbols", []))
     except (FileNotFoundError, ValueError, KeyError):
         return set()
-
-
-def _order_field(order, field: str) -> str:
-    """Normalize an alpaca order attribute to a lowercase plain string.
-    alpaca-py enums are str mixins whose str() is 'OrderSide.SELL', not
-    'sell' — comparing str(o.side) directly never matches. Use .value."""
-    val = getattr(order, field, "") or ""
-    val = getattr(val, "value", val)
-    return str(val).lower()
 
 
 def _clear_base_protection(broker, open_orders, symbol: str) -> int:
@@ -217,6 +209,12 @@ def run():
 
         for p in positions:
             sym          = p.symbol
+            # SPY base is managed by spy_base — exclude it from partial
+            # profit trims, intraday trailing, and the Claude review so a
+            # SELL decision can't liquidate the cash-parking base.
+            if is_base_symbol(sym):
+                log.info(f"  {sym:6} | SPY base holding — excluded from review")
+                continue
             entry        = float(p.avg_entry_price)
             current      = float(quotes.get(sym, {}).get("price", entry))
             qty          = int(float(p.qty))

@@ -14,6 +14,8 @@ import logging
 import time
 from typing import Callable
 
+from core.order_utils import order_field
+
 log = logging.getLogger(__name__)
 
 _INSUFFICIENT_QTY_MARKERS = ("40310000", "insufficient qty")
@@ -40,7 +42,7 @@ def cancel_open_sell_orders(broker, symbol: str) -> int:
     for o in open_orders:
         if o.symbol != symbol:
             continue
-        if str(getattr(o, "side", "")).lower() != "sell":
+        if order_field(o, "side") != "sell":
             continue
         try:
             broker.trade.cancel_order_by_id(o.id)

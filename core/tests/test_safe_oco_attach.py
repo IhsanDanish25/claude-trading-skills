@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from alpaca.trading.enums import OrderSide
+
 import pytest
 
 from core.safe_oco_attach import safe_attach_oco
@@ -33,7 +35,9 @@ class _FakeBroker:
         return self._open_orders
 
 
-def _order(id_, symbol, side="sell"):
+def _order(id_, symbol, side=OrderSide.SELL):
+    # Real alpaca enums, not plain strings: str(OrderSide.SELL) is
+    # 'OrderSide.SELL', and string mocks masked a filter that matched nothing.
     return SimpleNamespace(id=id_, symbol=symbol, side=side)
 
 
@@ -53,9 +57,9 @@ def test_success_on_first_try_does_not_cancel_anything():
 
 def test_insufficient_qty_error_cancels_stale_sell_orders_then_retries():
     broker = _FakeBroker(open_orders=[
-        _order("stale-1", "AAPL", side="sell"),
-        _order("other-buy", "AAPL", side="buy"),   # wrong side — not cancelled
-        _order("other-sym", "MSFT", side="sell"),  # wrong symbol — not cancelled
+        _order("stale-1", "AAPL", side=OrderSide.SELL),
+        _order("other-buy", "AAPL", side=OrderSide.BUY),   # wrong side — not cancelled
+        _order("other-sym", "MSFT", side=OrderSide.SELL),  # wrong symbol — not cancelled
     ])
     attempts = []
 

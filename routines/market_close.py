@@ -21,7 +21,8 @@ from core.fmp      import get_quotes, get_market_breadth, get_daily_bars
 from core.analyst  import review_open_positions, analyze_market_regime, detect_ftd
 from core.notifier import send_eod_summary, send_trade_alert
 from core.pead_tracker import get_expired, remove_position as pead_untrack, get_all as pead_all
-from core.spy_base import log_status as spy_log
+from core.spy_base import log_status as spy_log, is_base_symbol
+from core.order_utils import order_field
 
 log = logger.setup("market_close")
 ET  = pytz.timezone("America/New_York")
@@ -37,6 +38,23 @@ DAILY_CLOSE_LOG = os.path.join(config.STATE_DIR, "daily_close_log.json")
 # 15:00 close auction and the open-order cancellation that follows.
 
 
+def _build_stop_map(open_orders) -> dict:
+    """sym -> current stop price for open sell stop orders. Uses order_field
+    because str(enum) is 'OrderType.STOP' — the old comparison left this map
+    permanently empty."""
+    stop_map = {}
+    for o in open_orders or []:
+        try:
+            sp = getattr(o, "stop_price", None)
+            if (order_field(o, "type") == "stop"
+                    and order_field(o, "side") == "sell"
+                    and isinstance(sp, (int, float))):
+                stop_map[o.symbol] = float(sp)
+        except Exception:
+            pass
+    return stop_map
+
+
 def _late_trail(broker: BrokerClient) -> int:
     """14:45 ET secondary trailing-stop ratchet. Returns count of stops tightened."""
     from core.edge import compute_trail_stop
@@ -48,21 +66,14 @@ def _late_trail(broker: BrokerClient) -> int:
 
     positions  = broker.get_positions()
     open_orders = broker.get_open_orders()
-    stop_map    = {}   # sym -> current stop price
-    for o in open_orders:
-        try:
-            otype = str(getattr(o, "type", "")).lower()
-            oside = str(getattr(o, "side", "")).lower()
-            sp    = getattr(o, "stop_price", None)
-            if otype == "stop" and oside == "sell" and isinstance(sp, (int, float)):
-                stop_map[o.symbol] = float(sp)
-        except Exception:
-            pass
+    stop_map    = _build_stop_map(open_orders)
 
     quotes   = get_quotes([p.symbol for p in positions])
     tightened = 0
     for pos in positions:
         sym   = pos.symbol
+        if is_base_symbol(sym):
+            continue  # SPY base carries no protective stop by design
         entry = float(pos.avg_entry_price)
         cur   = float(quotes.get(sym, {}).get("price", entry))
         if cur <= entry:
@@ -176,6 +187,12 @@ def run():
 
         for p in positions:
             sym      = p.symbol
+            # SPY base is managed by spy_base — exclude it from force-close,
+            # the cash-bias close-all, and the Claude EOD review. Closing the
+            # ~full-portfolio base on a -3% day is not a trade exit.
+            if is_base_symbol(sym):
+                log.info(f"  {sym:6} | SPY base holding — excluded from EOD review")
+                continue
             entry    = float(p.avg_entry_price)
             current  = float(quotes.get(sym, {}).get("price", entry))
             qty      = int(float(p.qty))

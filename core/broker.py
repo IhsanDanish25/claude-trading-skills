@@ -30,6 +30,7 @@ from alpaca.data.requests import (
 )
 from alpaca.data.timeframe import TimeFrame
 
+from core.order_utils import order_field
 from core.config import (
     ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL,
     PAPER_TRADE, MAX_POSITION_SIZE_PCT, MAX_OPEN_POSITIONS,
@@ -349,10 +350,12 @@ class BrokerClient:
             for o in open_orders:
                 if o.symbol != symbol:
                     continue
-                if str(getattr(o, "side", "")).lower() != "sell":
+                # order_field: str(enum) is 'OrderSide.SELL' — the old
+                # str().lower() side check matched nothing, so tighten_stop
+                # always reported "no open stop order".
+                if order_field(o, "side") != "sell":
                     continue
-                order_type = str(getattr(o, "type", "")).lower()
-                if "stop" not in order_type:
+                if "stop" not in order_field(o, "type"):
                     continue
                 candidates.append(o)
 
