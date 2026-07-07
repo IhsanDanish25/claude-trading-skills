@@ -255,3 +255,58 @@ def send_error_alert(routine: str, error: str) -> bool:
     html = _html("⚠️ Routine Error", routine, body)
     plain = f"Routine FAILED: {routine}\n\n{error}"
     return send(f"⚠️ Bot Error — {routine}", plain, html)
+
+
+def send_weekly_summary(week_stats: dict, summary_text: str) -> bool:
+    """Email the Friday weekly performance summary."""
+    win  = week_stats.get("win_rate", 0)
+    ret  = week_stats.get("week_return_pct", 0)
+    pv   = week_stats.get("portfolio_value", 0)
+    wr_color  = "green" if win  >= 50 else "red"   if win  < 40 else "yellow"
+    ret_color  = "green" if ret  >= 0  else "red"
+    wr_sign    = ""
+    ret_sign   = "+" if ret >= 0 else ""
+
+    trades = week_stats.get("trades_taken", 0)
+    wins   = week_stats.get("wins", 0)
+    losses = week_stats.get("losses", 0)
+    avg_g  = week_stats.get("avg_gain_pct", 0)
+    avg_l  = week_stats.get("avg_loss_pct", 0)
+    best   = week_stats.get("best_trade", 0)
+    worst  = week_stats.get("worst_trade", 0)
+    spy    = week_stats.get("spy_week_change", 0)
+    regimes = ", ".join(week_stats.get("regime_changes", [])) or "unknown"
+
+    rows = "\n".join(f'| {l} |' for l in summary_text.strip().split("\n"))
+    summary_html = f'<div class="card"><h2>AI Summary</h2><pre style="color:#A0AEC0;white-space:pre-wrap;font-size:0.85rem">{summary_text}</pre></div>'
+
+    body = f"""
+    <div class="card"><h2>Performance</h2>
+      {_row("Portfolio", f"${pv:,.2f}", "green")}
+      {_row("Week Return", f"{ret_sign}{ret:.2f}%", ret_color)}
+      {_row("SPY Week", f"{'+' if spy >= 0 else ''}{spy:.2f}%", "green" if spy >= 0 else "red")}
+    </div>
+    <div class="card"><h2>Trade Stats ({week_stats['week']})</h2>
+      {_row("Closed trades", f"{trades}  ({wins}W / {losses}L)")}
+      {_row("Win rate", f"{win:.1f}%", wr_color)}
+      {_row("Avg gain", f"+{avg_g:.2f}%", "green")}
+      {_row("Avg loss", f"{avg_l:.2f}%", "red")}
+      {_row("Best trade", f"+{best:.2f}%", "green")}
+      {_row("Worst trade", f"{worst:.2f}%", "red")}
+    </div>
+    <div class="card"><h2>Market</h2>
+      {_row("Regime", regimes.upper())}
+    </div>
+    {summary_html}
+    """
+    html = _html("Weekly Review", week_stats.get("week", "This Week"), body)
+    plain = (
+        f"Weekly Review — {week_stats['week']}\n"
+        f"Portfolio: ${pv:,.2f} | Return: {ret_sign}{ret:.2f}% | SPY: {spy:+.2f}%\n"
+        f"Trades: {trades} ({wins}W / {losses}L) | Win rate: {win:.1f}%\n"
+        f"Avg gain: +{avg_g:.2f}% | Avg loss: {avg_l:.2f}%\n"
+        f"Best: +{best:.2f}% | Worst: {worst:.2f}%\n"
+        f"Regime: {regimes}\n\n{summary_text}"
+    )
+    emoji = "📈" if ret >= 0 else "📉"
+    return send(f"{emoji} Weekly Review — {week_stats['week']} ({ret_sign}{ret:.2f}%)", plain, html)

@@ -906,6 +906,7 @@ def run():
     logger.banner(log, f"MARKET OPEN ROUTINE — fired {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
 
     broker = BrokerClient()
+    pv = broker.portfolio_value()
     day_start = load_day_start_value(pv)
     cb = _build_breaker(broker, day_start)
 
@@ -924,13 +925,11 @@ def run():
         return
     log.info(f"Entry timing: {why}")
 
-    pv        = broker.portfolio_value()
     pos_count = broker.position_count()
     slots     = min(MAX_BUYS, config.MAX_OPEN_POSITIONS - pos_count)
 
     log.info(f"Portfolio: ${pv:,.2f} | Positions: {pos_count} | Slots: {slots}")
 
-    day_start = load_day_start_value(pv)
     if circuit_breaker_tripped(pv, day_start):
         day_pnl = (pv - day_start) / day_start * 100
         log.warning(f"CIRCUIT BREAKER: day P&L {day_pnl:+.2f}% — NO new entries")

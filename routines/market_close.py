@@ -132,13 +132,18 @@ def run():
                 hold = exp["hold_days"]
                 log.info(f"  PEAD TIME-EXIT {sym} — held {age}d (limit {hold}d)")
                 try:
+                    pos = broker.get_position(sym)
+                    qty = int(float(pos.qty)) if pos else 0
+                    cur_price = broker.get_price(sym)
                     broker.close_position(sym)
                     pead_untrack(sym)
                     send_trade_alert(
                         action="SELL",
                         ticker=sym,
-                        shares=0,
-                        price=0,
+                        shares=qty,
+                        price=cur_price,
+                        stop=0,
+                        target=0,
                         reason=f"PEAD time-exit: {age}d held (max {hold}d)",
                     )
                     log.info(f"  ✓ PEAD closed {sym} after {age} days")
@@ -197,15 +202,16 @@ def run():
                     "target":        round(entry * (1 + config.TAKE_PROFIT_PCT), 2),
                 })
 
-        # Execute force closes
+        # Force-close deep losers before market shuts
         for sym in force_close:
             try:
+                pos = broker.get_position(sym)
+                close_qty = int(float(pos.qty)) if pos else 0
+                cur_price = broker.get_price(sym)
                 broker.close_position(sym)
-                log.info(f"  ✓ Force-closed {sym}")
+                log.info(f"  ✓ Force-closed {sym} {close_qty} shares")
                 _bump_close_count()
-                q = quotes.get(sym, {})
-                price = float(q.get("price", 0))
-                send_trade_alert("SELL", sym, 0, price, 0, 0, reason="Force-closed: -3% threshold")
+                send_trade_alert("SELL", sym, close_qty, cur_price, 0, 0, reason="Force-closed: -3% threshold")
             except Exception as e:
                 log.error(f"  ✗ Close {sym} failed: {e}")
 

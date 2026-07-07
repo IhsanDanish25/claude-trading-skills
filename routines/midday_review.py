@@ -22,6 +22,7 @@ from core.analyst  import review_open_positions, analyze_market_regime, score_vc
 from core.screener import screen
 from core.edge     import should_pyramid, compute_trail_stop, circuit_breaker_tripped
 from core.spy_base import rebalance_to_spy, log_status as spy_log
+from core.notifier import send_trade_alert
 
 log = logger.setup("midday")
 ET  = pytz.timezone("America/New_York")
@@ -196,7 +197,17 @@ def run():
             if pnl_pct >= config.PARTIAL_PROFIT_PCT * 100 and qty >= 2:
                 trim_qty = max(1, int(qty * config.PARTIAL_PROFIT_SIZE))
                 try:
+                    cur_price = quotes.get(sym, {}).get("price", 0)
                     broker.sell(sym, qty=trim_qty)
+                    send_trade_alert(
+                        action="SELL",
+                        ticker=sym,
+                        shares=trim_qty,
+                        price=cur_price,
+                        stop=0,
+                        target=0,
+                        reason=f"Partial profit at +{pnl_pct:.1f}% — trimmed {trim_qty} of {qty} shares",
+                    )
                     log.info(f"  💰 {sym}: partial profit — sold {trim_qty}/{qty} at +{pnl_pct:.1f}%")
                     new_trail_stop = round(current * (1 - config.TRAIL_STOP_PCT), 2)
                     broker.tighten_stop(sym, new_trail_stop)
@@ -224,6 +235,15 @@ def run():
                     else:
                         pyramided.add(sym)
                         qty += result["qty"]
+                        send_trade_alert(
+                            action="BUY",
+                            ticker=sym,
+                            shares=result["qty"],
+                            price=result["price"],
+                            stop=0,
+                            target=0,
+                            reason=f"PYRAMID — adding {result['qty']} shares at +{pnl_pct:.1f}% P&L",
+                        )
                         log.info(f"  ➕ {sym}: pyramided +{result['qty']} shares "
                                  f"@ ~${result['price']:.2f} (P&L +{pnl_pct:.1f}%)")
                 except Exception as e:
@@ -256,7 +276,19 @@ def run():
 
             if action == "SELL":
                 try:
+                    pos = broker.get_position(sym)
+                    qty = int(float(pos.qty)) if pos else 0
+                    cur_price = quotes.get(sym, {}).get("price", 0)
                     broker.sell(sym)
+                    send_trade_alert(
+                        action="SELL",
+                        ticker=sym,
+                        shares=qty,
+                        price=cur_price,
+                        stop=0,
+                        target=0,
+                        reason=f"Claude midday decision: {reason}",
+                    )
                     log.info(f"  ✓ Sold {sym}")
                 except Exception as e:
                     log.error(f"  ✗ Sell {sym} failed: {e}")
@@ -296,6 +328,15 @@ def run():
                         log.error(f"  ✗ {s['symbol']} bought but stop NOT attached — flattening")
                         broker.sell(s["symbol"], qty=result["qty"])
                         continue
+                    send_trade_alert(
+                        action="BUY",
+                        ticker=s["symbol"],
+                        shares=result["qty"],
+                        price=result["price"],
+                        stop=result.get("stop", 0),
+                        target=result.get("target", 0),
+                        reason=f"Midday VCP setup — score={s.get('score', '?')}",
+                    )
                     log.info(f"  ✓ Midday buy {s['symbol']}: {result['qty']} @ ~${result['price']:.2f}")
                     _mark_bought(s["symbol"])
                 except Exception as e:

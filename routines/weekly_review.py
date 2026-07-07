@@ -28,6 +28,7 @@ from core import logger, config
 from core.broker   import BrokerClient
 from core.fmp      import get_market_breadth
 from core.analyst  import generate_weekly_summary
+from core.notifier import send_weekly_summary
 
 log = logger.setup("weekly_review")
 ET  = pytz.timezone("America/New_York")
@@ -199,6 +200,13 @@ def run():
         log.warning("  ⚠️  Win rate < 40% — reduce size next week")
     if week_return_pct < -3:
         log.warning("  ⚠️  Week < -3% — cash bias start of next week")
+
+    log.info("── Sending weekly summary email")
+    try:
+        send_weekly_summary(week_stats, summary)
+        log.info("  ✓ Weekly email sent")
+    except Exception as e:
+        log.error(f"  ✗ Weekly email failed: {e}")
 
     logger.banner(log, "WEEKLY REVIEW COMPLETE")
 
