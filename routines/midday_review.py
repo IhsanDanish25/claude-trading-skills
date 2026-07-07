@@ -43,6 +43,15 @@ def _load_today_bought() -> set:
         return set()
 
 
+def _order_field(order, field: str) -> str:
+    """Normalize an alpaca order attribute to a lowercase plain string.
+    alpaca-py enums are str mixins whose str() is 'OrderSide.SELL', not
+    'sell' — comparing str(o.side) directly never matches. Use .value."""
+    val = getattr(order, field, "") or ""
+    val = getattr(val, "value", val)
+    return str(val).lower()
+
+
 def _clear_base_protection(broker, open_orders, symbol: str) -> int:
     """Cancel open sell orders (legacy protection OCOs) on the SPY base
     holding. An OCO holds the full share qty, so Alpaca rejects every base
@@ -51,7 +60,7 @@ def _clear_base_protection(broker, open_orders, symbol: str) -> int:
     cancelled = 0
     for o in open_orders or []:
         try:
-            if o.symbol == symbol and str(getattr(o, "side", "")).lower() == "sell":
+            if o.symbol == symbol and _order_field(o, "side") == "sell":
                 broker.trade.cancel_order_by_id(o.id)
                 cancelled += 1
         except Exception as e:
@@ -141,9 +150,12 @@ def run():
         if open_orders:
             for o in open_orders:
                 try:
-                    otype = str(getattr(o, "type", "")).lower()
-                    oside = str(getattr(o, "side", "")).lower()
-                    if otype == "stop" and oside == "sell":
+                    # _order_field: str(enum) is 'OrderType.STOP', so the old
+                    # str().lower() comparison never matched and this guard
+                    # was dead — every midday re-attached protection OCOs.
+                    otype = _order_field(o, "type")
+                    oside = _order_field(o, "side")
+                    if otype in ("stop", "trailing_stop") and oside == "sell":
                         stop_orders.add(o.symbol)
                 except Exception:
                     pass
