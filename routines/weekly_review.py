@@ -29,6 +29,7 @@ from core.broker   import BrokerClient
 from core.fmp      import get_market_breadth
 from core.analyst  import generate_weekly_summary
 from core.notifier import send_weekly_summary
+from core.order_utils import order_field
 
 log = logger.setup("weekly_review")
 ET  = pytz.timezone("America/New_York")
@@ -60,7 +61,7 @@ def get_closed_trades(broker: BrokerClient, days: int = 7) -> list:
             if o.filled_avg_price and o.filled_qty:
                 trades.append({
                     "symbol":    o.symbol,
-                    "side":      str(o.side),
+                    "side":      order_field(o, "side"),
                     "qty":       float(o.filled_qty),
                     "price":     float(o.filled_avg_price),
                     "filled_at": str(o.filled_at),

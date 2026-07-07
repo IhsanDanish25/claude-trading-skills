@@ -22,6 +22,7 @@ from core.analyst  import review_open_positions, analyze_market_regime, score_vc
 from core.screener import screen
 from core.edge     import should_pyramid, compute_trail_stop, circuit_breaker_tripped
 from core.spy_base import rebalance_to_spy, log_status as spy_log, is_base_symbol
+from core.order_utils import order_field as _order_field
 from core.notifier import send_trade_alert
 
 log = logger.setup("midday")
@@ -51,7 +52,7 @@ def _clear_base_protection(broker, open_orders, symbol: str) -> int:
     cancelled = 0
     for o in open_orders or []:
         try:
-            if o.symbol == symbol and str(getattr(o, "side", "")).lower() == "sell":
+            if o.symbol == symbol and _order_field(o, "side") == "sell":
                 broker.trade.cancel_order_by_id(o.id)
                 cancelled += 1
         except Exception as e:
@@ -141,9 +142,12 @@ def run():
         if open_orders:
             for o in open_orders:
                 try:
-                    otype = str(getattr(o, "type", "")).lower()
-                    oside = str(getattr(o, "side", "")).lower()
-                    if otype == "stop" and oside == "sell":
+                    # _order_field: str(enum) is 'OrderType.STOP', so the old
+                    # str().lower() comparison never matched and this guard
+                    # was dead — every midday re-attached protection OCOs.
+                    otype = _order_field(o, "type")
+                    oside = _order_field(o, "side")
+                    if otype in ("stop", "trailing_stop") and oside == "sell":
                         stop_orders.add(o.symbol)
                 except Exception:
                     pass
@@ -205,6 +209,12 @@ def run():
 
         for p in positions:
             sym          = p.symbol
+            # SPY base is managed by spy_base — exclude it from partial
+            # profit trims, intraday trailing, and the Claude review so a
+            # SELL decision can't liquidate the cash-parking base.
+            if is_base_symbol(sym):
+                log.info(f"  {sym:6} | SPY base holding — excluded from review")
+                continue
             entry        = float(p.avg_entry_price)
             current      = float(quotes.get(sym, {}).get("price", entry))
             qty          = int(float(p.qty))

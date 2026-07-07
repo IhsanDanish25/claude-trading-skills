@@ -13,9 +13,10 @@ Called by:
 from __future__ import annotations
 
 import logging
+
 from core import config
-from core.notifier import send_trade_alert
 from core.broker import BrokerClient
+from core.notifier import send_trade_alert
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +77,42 @@ def compute_target_spy(broker: BrokerClient) -> dict:
     }
 
 
+def _cancel_stale_spy_orders(broker: BrokerClient) -> int:
+    """Cancel open SELL orders that are holding SPY shares, then retry.
+    Called when rebalance_to_spy hits a 40310000 insufficient-qty error.
+    Returns the number cancelled; any cancellation failure is non-fatal."""
+    try:
+        open_orders = broker.get_open_orders()
+    except Exception:
+        return 0
+    cancelled = 0
+    for o in open_orders:
+        if getattr(o, "symbol", None) != "SPY":
+            continue
+        # Use broker.trade directly to avoid BrokerClient.get_open_orders()'s
+        # QueryOrderStatus filter — we want ALL open orders here.
+        if _order_side(o) != "sell":
+            continue
+        try:
+            broker.trade.cancel_order_by_id(str(o.id))
+            cancelled += 1
+        except Exception:
+            pass
+    return cancelled
+
+
+def _order_side(o) -> str:
+    """Map Alpaca OrderSide enum (or dict) to a clean lowercase string."""
+    raw = getattr(o, "side", None)
+    if raw is None:
+        return ""
+    s = str(raw)
+    # 'OrderSide.SELL'  or  'sell'  or  '{"value": "sell"}'
+    if "." in s:
+        return s.rsplit(".", 1)[-1].lower()
+    return s.strip().lower()
+
+
 def rebalance_to_spy(broker: BrokerClient) -> dict:
     """Buy/sell SPY to match target allocation. Returns action taken."""
     if not config.SPY_BASE_ENABLED:
@@ -98,9 +135,9 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
         qty = max(1, int(buy_dollars / spy_price))
         log.info(f"SPY base: BUYING {qty} shares (${buy_dollars:,.0f} underweight)")
         try:
-            from alpaca.trading.requests import MarketOrderRequest
             from alpaca.trading.enums import OrderSide, TimeInForce
-            order = broker.trade.submit_order(MarketOrderRequest(
+            from alpaca.trading.requests import MarketOrderRequest
+            broker.trade.submit_order(MarketOrderRequest(
                 symbol="SPY", qty=qty, side=OrderSide.BUY,
                 time_in_force=TimeInForce.DAY,
             ))
@@ -125,9 +162,9 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
         qty = min(info["spy_qty"], max(1, int(sell_dollars / spy_price)))
         log.info(f"SPY base: SELLING {qty} shares (${sell_dollars:,.0f} overweight)")
         try:
-            from alpaca.trading.requests import MarketOrderRequest
             from alpaca.trading.enums import OrderSide, TimeInForce
-            order = broker.trade.submit_order(MarketOrderRequest(
+            from alpaca.trading.requests import MarketOrderRequest
+            broker.trade.submit_order(MarketOrderRequest(
                 symbol="SPY", qty=qty, side=OrderSide.SELL,
                 time_in_force=TimeInForce.DAY,
             ))
@@ -143,6 +180,35 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
             )
             return {"action": "sell", "qty": qty, "price": spy_price, **info}
         except Exception as e:
+            err_str = str(e).lower()
+            if "40310000" in err_str or "insufficient qty" in err_str:
+                # Shares are locked in a stale OCO. Cancel all open SPY sell
+                # orders and retry once. This replicates safe_oco_attach's
+                # cancel-then-retry pattern for the SPY rebalance path.
+                import time as _time
+                cancelled = _cancel_stale_spy_orders(broker)
+                log.warning(f"SPY base sell: 40310000 — cancelled {cancelled} stale "
+                            f"sell orders, retrying ({e})")
+                _time.sleep(1)
+                try:
+                    broker.trade.submit_order(MarketOrderRequest(
+                        symbol="SPY", qty=qty, side=OrderSide.SELL,
+                        time_in_force=TimeInForce.DAY,
+                    ))
+                    log.info(f"SPY base: sold {qty} @ ~${spy_price:.2f} (retry after cancel)")
+                    send_trade_alert(
+                        action="SELL",
+                        ticker="SPY",
+                        shares=qty,
+                        price=spy_price,
+                        stop=0,
+                        target=0,
+                        reason="SPY base rebalance — reducing SPY (retry after stale order cancel)",
+                    )
+                    return {"action": "sell", "qty": qty, "price": spy_price, **info}
+                except Exception as retry_err:
+                    log.error(f"SPY base sell (retry) failed: {retry_err}")
+                    return {"action": "error", "error": str(retry_err), **info}
             log.error(f"SPY base sell failed: {e}")
             return {"action": "error", "error": str(e), **info}
 
@@ -169,11 +235,22 @@ def free_cash_for_pead(broker: BrokerClient, amount_needed: float) -> bool:
     sell_qty = min(spy_pos["qty"], max(1, int(shortfall / spy_price) + 1))
 
     log.info(f"SPY base: selling {sell_qty} SPY to fund PEAD entry (need ${shortfall:,.0f})")
+    import time as _time
+
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import MarketOrderRequest
+
+    def _do_sell():
+        return broker.trade.submit_order(MarketOrderRequest(
+            symbol="SPY", qty=sell_qty, side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+        ))
+
     try:
-        result = broker.sell("SPY", qty=sell_qty)
+        order = _do_sell()
         sell_price = spy_price
         try:
-            sell_price = float(result.get("order", {}).filled_avg_price) or spy_price
+            sell_price = float(getattr(order, "filled_avg_price", None) or spy_price)
         except Exception:
             pass
         send_trade_alert(
@@ -187,6 +264,30 @@ def free_cash_for_pead(broker: BrokerClient, amount_needed: float) -> bool:
         )
         return True
     except Exception as e:
+        err_str = str(e).lower()
+        if "40310000" in err_str or "insufficient qty" in err_str:
+            cancelled = _cancel_stale_spy_orders(broker)
+            log.warning(f"SPY base: 40310000 — cancelled {cancelled} stale sell orders, retrying")
+            _time.sleep(1)
+            try:
+                order = _do_sell()
+                try:
+                    sell_price = float(getattr(order, "filled_avg_price", None) or spy_price)
+                except Exception:
+                    sell_price = spy_price
+                send_trade_alert(
+                    action="SELL",
+                    ticker="SPY",
+                    shares=sell_qty,
+                    price=sell_price,
+                    stop=0,
+                    target=0,
+                    reason=f"SPY base: freed ${shortfall:,.0f} cash for PEAD entry (retry)",
+                )
+                return True
+            except Exception as retry_err:
+                log.error(f"SPY base: PEAD funding sell (retry) failed: {retry_err}")
+                return False
         log.error(f"SPY base: failed to sell SPY for PEAD funding: {e}")
         return False
 
