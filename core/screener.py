@@ -25,7 +25,7 @@ def _client():
     return _data_client
 
 
-def _fetch_bars(symbols: list[str], days: int = 60) -> dict:
+def fetch_bars(symbols: list[str], days: int = 60) -> dict:
     """Batch daily bars from Alpaca IEX feed. Returns {symbol: [bars newest-first]}."""
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame
@@ -121,7 +121,7 @@ def screen(symbols: list[str] = None) -> list[dict]:
     log.info(f"VCP screen [Alpaca]: {len(symbols)} symbols")
 
     fetch_syms = list(dict.fromkeys(symbols + ["SPY"]))
-    bars_map = _fetch_bars(fetch_syms, days=60)
+    bars_map = fetch_bars(fetch_syms, days=60)
     spy_return = _return_pct_from_bars(bars_map.get("SPY", []))
     log.info(f"Alpaca returned bars for {len(bars_map)}/{len(fetch_syms)} symbols | SPY 1mo={spy_return}%")
 
@@ -191,3 +191,8 @@ def screen(symbols: list[str] = None) -> list[dict]:
     candidates.sort(key=lambda x: x["raw_score"], reverse=True)
     log.info(f"VCP found {len(candidates)} candidates")
     return candidates
+
+
+# ── Backward-compat: keep all call-sites working while switching to public API ──
+# Old callers use: from core.screener import _fetch_bars  OR  screener._fetch_bars(...)# New callers use: from core.screener import fetch_bars   OR  screener.fetch_bars(...)
+_fetch_bars = fetch_bars

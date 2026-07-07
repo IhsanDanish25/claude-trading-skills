@@ -159,18 +159,26 @@ class BrokerClient:
         sell order for this symbol is cancelled if Alpaca rejects the order
         with error 40310000 ("insufficient qty available for order")."""
         def _submit():
-            self.trade.submit_order(LimitOrderRequest(
-                symbol=symbol, qty=qty, side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC, order_class=OrderClass.OCO,
-                take_profit=TakeProfitRequest(limit_price=target),
-                stop_loss=StopLossRequest(stop_price=stop),
-            ))
+            if target is not None:
+                self.trade.submit_order(LimitOrderRequest(
+                    symbol=symbol, qty=qty, side=OrderSide.SELL,
+                    time_in_force=TimeInForce.GTC, order_class=OrderClass.OCO,
+                    take_profit=TakeProfitRequest(limit_price=target),
+                    stop_loss=StopLossRequest(stop_price=stop),
+                ))
+                log.info(f"  ↳ OCO attached: stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]")
+            else:
+                self.trade.submit_order(LimitOrderRequest(
+                    symbol=symbol, qty=qty, side=OrderSide.SELL,
+                    time_in_force=TimeInForce.GTC, order_class=OrderClass.SIMPLE,
+                    stop_price=stop,
+                ))
+                log.info(f"  ↳ SIMPLE STOP attached (no cap): stop @ ${stop:.2f} x{qty} [{symbol}]")
         try:
             safe_attach_oco(self, symbol, qty, stop, target, _submit)
-            log.info(f"  ↳ OCO attached: stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]")
-            return True, True
+            return True, target is not None
         except Exception as e:
-            log.error(f"  ↳ OCO attach FAILED [{symbol}]: {e}")
+            log.error(f"  ↳ Order attach FAILED [{symbol}]: {e}")
             return False, False
 
     def buy(self, symbol: str, dollar_amount: float = None, shares: int = None,
@@ -277,13 +285,14 @@ class BrokerClient:
         if fill_price is None:
             log.warning(f"{symbol} not filled within 5s — using reference ${ref_price:.2f} for stop/target")
         stop   = round(basis * (1 - stop_loss_pct), 2)
-        target = round(basis * (1 + take_profit_pct), 2)
+        target = round(basis * (1 + take_profit_pct), 2) if take_profit_pct is not None else None
 
         # 4. Attach protective stop-loss + take-profit (each its own try/except)
         stop_attached, target_attached = self.attach_stop_target(
             symbol, filled_qty, stop, target
         )
-        log.info(f"BUY {symbol} x{filled_qty} @ ${basis:.2f} | SL={stop} TP={target} "
+        log.info(f"BUY {symbol} x{filled_qty} @ ${basis:.2f} | SL={stop} "
+                 f"TP={'None (no cap)' if target is None else target} "
                  f"| stop_attached={stop_attached} target_attached={target_attached}")
 
         return {

@@ -243,7 +243,7 @@ def _liquidity(symbols: list[str], lookback: int = 20) -> dict[str, dict]:
     if not symbols:
         return {}
     from core import screener
-    bars_map = screener._fetch_bars(list(dict.fromkeys(symbols)), days=max(lookback + 10, 30))
+    bars_map = screener.fetch_bars(list(dict.fromkeys(symbols)), days=max(lookback + 10, 30))
     out: dict[str, dict] = {}
     for sym, bars in bars_map.items():
         if not bars:

@@ -261,7 +261,7 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today):
         )
 
     buys_taken = 0
-    for c in candidates[:slots]:
+    for c in candidates[:slots[0]]:
         sym = c["symbol"]
         surprise = c["surprise_pct"]
         price = c.get("price", 0)
@@ -309,7 +309,7 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today):
                 sym,
                 dollar_amount=amount,
                 stop_loss_pct=config.PEAD_STOP_PCT,
-                take_profit_pct=0.99,
+                take_profit_pct=None,  # no hard target (time-managed 60d exit)
             )
             if result.get("blocked"):
                 log.warning(f"✗ {sym} buy blocked: {result.get('reason')}")
@@ -364,6 +364,10 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today):
                 "pnl_pct": None,
             })
             buys_taken += 1
+            slots[0] -= 1
+            if slots[0] <= 0:
+                log.info("Slots exhausted — PEAD stopping")
+                break
         except Exception as e:
             log.error(f"✗ PEAD {sym} buy failed: {e}")
 
@@ -440,7 +444,7 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today):
             result = broker.buy(
                 sym, dollar_amount=amount,
                 stop_loss_pct=config.MEANREV_STOP_PCT,
-                take_profit_pct=0.99,   # time-managed, no hard target
+                take_profit_pct=None,  # no hard target (time-managed exit)
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -482,6 +486,10 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today):
                 "rsi": c["rsi"], "bb_position": c["bb_position"],
                 "exit_date": None, "exit_price": None, "pnl_pct": None,
             })
+            slots[0] -= 1
+            if slots[0] <= 0:
+                log.info("Slots exhausted — MeanRev stopping")
+                break
         except Exception as e:
             log.error(f"  ✗ MeanRev {sym} failed: {e}")
 
@@ -542,7 +550,7 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today):
             result = broker.buy(
                 sym, dollar_amount=amount,
                 stop_loss_pct=config.INSIDER_STOP_PCT,
-                take_profit_pct=0.99,
+                take_profit_pct=None,
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -584,6 +592,10 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today):
                 "total_dollar": c["total_dollar"],
                 "exit_date": None, "exit_price": None, "pnl_pct": None,
             })
+            slots[0] -= 1
+            if slots[0] <= 0:
+                log.info("Slots exhausted — Insider stopping")
+                break
         except Exception as e:
             log.error(f"  ✗ Insider {sym} failed: {e}")
 
@@ -645,7 +657,7 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today):
             result = broker.buy(
                 sym, dollar_amount=amount,
                 stop_loss_pct=config.SQUEEZE_STOP_PCT,
-                take_profit_pct=0.99,
+                take_profit_pct=None,
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -688,6 +700,10 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today):
                 "momentum_pct": c["momentum_pct"],
                 "exit_date": None, "exit_price": None, "pnl_pct": None,
             })
+            slots[0] -= 1
+            if slots[0] <= 0:
+                log.info("Slots exhausted — Squeeze stopping")
+                break
         except Exception as e:
             log.error(f"  ✗ Squeeze {sym} failed: {e}")
 
@@ -749,7 +765,7 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today):
             result = broker.buy(
                 sym, dollar_amount=amount,
                 stop_loss_pct=config.BREAKOUT_STOP_PCT,
-                take_profit_pct=0.99,
+                take_profit_pct=None,
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -792,6 +808,10 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today):
                 "atr_pct": c["atr_pct"],
                 "exit_date": None, "exit_price": None, "pnl_pct": None,
             })
+            slots[0] -= 1
+            if slots[0] <= 0:
+                log.info("Slots exhausted — Breakout stopping")
+                break
         except Exception as e:
             log.error(f"  ✗ Breakout {sym} failed: {e}")
 
@@ -853,7 +873,7 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today):
             result = broker.buy(
                 sym, dollar_amount=amount,
                 stop_loss_pct=config.EARNMOM_STOP_PCT,
-                take_profit_pct=0.99,
+                take_profit_pct=None,
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -896,6 +916,10 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today):
                 "age_days": c["age_days"],
                 "exit_date": None, "exit_price": None, "pnl_pct": None,
             })
+            slots[0] -= 1
+            if slots[0] <= 0:
+                log.info("Slots exhausted — EarnMom stopping")
+                break
         except Exception as e:
             log.error(f"  ✗ EarnMom {sym} failed: {e}")
 
@@ -926,16 +950,16 @@ def run():
     log.info(f"Entry timing: {why}")
 
     pos_count = broker.position_count()
-    slots     = min(MAX_BUYS, config.MAX_OPEN_POSITIONS - pos_count)
+    slots = [min(MAX_BUYS, config.MAX_OPEN_POSITIONS - pos_count)]  # mutable: handlers decrement in-place
 
-    log.info(f"Portfolio: ${pv:,.2f} | Positions: {pos_count} | Slots: {slots}")
+    log.info(f"Portfolio: ${pv:,.2f} | Positions: {pos_count} | Slots: {slots[0]}")
 
     if circuit_breaker_tripped(pv, day_start):
         day_pnl = (pv - day_start) / day_start * 100
         log.warning(f"CIRCUIT BREAKER: day P&L {day_pnl:+.2f}% — NO new entries")
         return
 
-    if slots <= 0:
+    if slots[0] <= 0:
         log.info("No slots — done")
         return
 
@@ -952,8 +976,8 @@ def run():
 
     # ── Regime gate (shared by both strategies) ─────────────────────────────
     try:
-        from core.screener import _fetch_bars
-        spy_bars = (_fetch_bars(["SPY"], days=400) or {}).get("SPY") or []
+        from core.screener import fetch_bars
+        spy_bars = (fetch_bars(["SPY"], days=400) or {}).get("SPY") or []
     except Exception as e:
         log.warning(f"Regime gate SPY bars fetch failed (non-blocking): {e}")
         spy_bars = []
@@ -985,7 +1009,7 @@ def run():
     log.info(f"Strategy modes: {[s.upper() for s in config.STRATEGY_MODES]}")
 
     for strategy in config.STRATEGY_MODES:
-        if slots <= 0:
+        if slots[0] <= 0:
             log.info(f"No slots remaining — stopping strategy loop")
             break
 
