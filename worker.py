@@ -237,7 +237,7 @@ def startup_rebalance() -> None:
         max_pct = 5.0
 
         broker = BrokerClient()
-        plan = build_plan(broker, target_positions, max_pct)
+        plan = build_plan(broker, target_positions, max_pct, keep_symbols=None)
 
         for line in format_plan(plan):
             if line:
