@@ -21,7 +21,7 @@ from core.fmp      import get_quotes, get_market_breadth
 from core.analyst  import review_open_positions, analyze_market_regime, score_vcp_candidates
 from core.screener import screen
 from core.edge     import should_pyramid, compute_trail_stop, circuit_breaker_tripped
-from core.spy_base import rebalance_to_spy, log_status as spy_log
+from core.spy_base import rebalance_to_spy, log_status as spy_log, is_base_symbol
 from core.notifier import send_trade_alert
 
 log = logger.setup("midday")
@@ -41,6 +41,22 @@ def _load_today_bought() -> set:
         return set(data.get("symbols", []))
     except (FileNotFoundError, ValueError, KeyError):
         return set()
+
+
+def _clear_base_protection(broker, open_orders, symbol: str) -> int:
+    """Cancel open sell orders (legacy protection OCOs) on the SPY base
+    holding. An OCO holds the full share qty, so Alpaca rejects every base
+    rebalance sell with 40310000 until the OCO is gone. Returns the number
+    of orders cancelled; failures are logged and skipped."""
+    cancelled = 0
+    for o in open_orders or []:
+        try:
+            if o.symbol == symbol and str(getattr(o, "side", "")).lower() == "sell":
+                broker.trade.cancel_order_by_id(o.id)
+                cancelled += 1
+        except Exception as e:
+            log.warning(f"  {symbol}: base protection cancel failed: {e}")
+    return cancelled
 
 
 def _mark_bought(symbol: str) -> None:
@@ -141,6 +157,15 @@ def run():
                     log.warning(f"  Cancel order fail: {e}")
 
         for p in positions:
+            # SPY base is a cash-parking holding managed by spy_base — never
+            # attach a protection OCO to it. Also cancel any legacy OCO so
+            # base rebalance sells stop bouncing off held_for_orders.
+            if is_base_symbol(p.symbol):
+                n = _clear_base_protection(broker, open_orders, p.symbol)
+                log.info(f"  {p.symbol}: SPY base holding — no protection OCO"
+                         + (f" ({n} legacy sell orders cancelled)" if n else ""))
+                continue
+
             # Stale-stop guard: skip re-attach if position already holds a stop
             # (trailing stop from 12:00 noon trail eval is in place).
             if p.symbol in stop_orders:

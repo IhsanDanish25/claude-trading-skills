@@ -20,6 +20,14 @@ from core.broker import BrokerClient
 log = logging.getLogger(__name__)
 
 
+def is_base_symbol(symbol: str) -> bool:
+    """True when symbol is the SPY base holding managed by this module.
+    Trade-protection OCOs must never be attached to it: they hold the full
+    share qty, so every base rebalance sell is rejected by Alpaca with
+    40310000 insufficient qty available."""
+    return config.SPY_BASE_ENABLED and symbol.upper() == "SPY"
+
+
 def get_spy_position(broker: BrokerClient) -> dict:
     """Return SPY position details or empty dict."""
     pos = broker.get_position("SPY")

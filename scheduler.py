@@ -39,7 +39,11 @@ SCHEDULE = [
 ]
 
 
-STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
+# Must be the env-aware config STATE_DIR: on Railway that points at the
+# persistent volume, so ran-today state survives container restarts and
+# catch-up doesn't re-fire routines that already ran.
+from core.config import STATE_DIR
+
 CATCHUP_FILE = os.path.join(STATE_DIR, ".scheduler_ran_today.json")
 CATCHUP_MAX_AGE_HOURS = 2.0
 
