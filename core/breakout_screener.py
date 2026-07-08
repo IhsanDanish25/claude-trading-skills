@@ -1,5 +1,5 @@
 """
-Breakout screener — FMP /stable/ historical-price-eod.
+Breakout screener — yfinance batch OHLCV.
 
 Breakout = price breaks above 50-day resistance with volume confirmation.
 Classic momentum trigger:
@@ -18,7 +18,7 @@ Parameters:
   - Price must be above SMA50 (confirm uptrend context - don't buy breakdowns)
   - Max position size: BREAKOUT_SIZE_PCT of portfolio
 
-FMP returns: flat list of {date, open, high, low, close, volume}
+yfinance returns: flat list of {date, open, high, low, close, volume}
 """
 from __future__ import annotations
 
@@ -26,12 +26,13 @@ import logging
 import datetime
 import statistics
 
+import yfinance as yf
+
 from core.config import (
     BREAKOUT_HOLD_DAYS, BREAKOUT_STOP_PCT, BREAKOUT_SIZE_PCT,
     BREAKOUT_MIN_PRICE, BREAKOUT_VOL_MULT, BREAKOUT_MIN_AVG_VOLUME,
     BREAKOUT_LIMIT, SP80_UNIVERSE,
 )
-from core.fmp import _get, _STABLE as _stable
 
 log = logging.getLogger(__name__)
 
@@ -61,41 +62,76 @@ def _sma(values: list[float], n: int) -> float | None:
     return sum(values[-n:]) / n
 
 
-def _avg_volume(bars: list[dict], lookback: int = 20) -> float:
+def _fetch_bars_batch(symbols: list[str]) -> dict[str, list[dict]]:
+    """Fetch daily bars from yfinance (1 call, 0 FMP). Returns {sym: [oldest→newest]}."""
+    if not symbols:
+        return {}
+    try:
+        data = yf.download(symbols, period="1y", progress=False,
+                           auto_adjust=False, group_by="ticker")
+    except Exception:
+        return {}
+    if data.empty:
+        return {}
+
+    out: dict[str, list[dict]] = {}
+    for sym in symbols:
+        try:
+            cols = data.columns.get_level_values(0).unique()
+            if sym not in cols:
+                continue
+            cs = data[sym]["Close"].dropna()
+            if len(cs) < 55:
+                continue
+            n = min(len(cs),
+                    len(data[sym]["High"]),
+                    len(data[sym]["Low"]),
+                    len(data[sym]["Volume"]))
+            bars = []
+            for i in range(n):
+                dt = cs.index[i]
+                bars.append({
+                    "date":   dt.strftime("%Y-%m-%d"),
+                    "open":   float(data[sym]["Open"].iloc[i])    if i < len(data[sym]["Open"])     else 0.0,
+                    "high":   float(data[sym]["High"].iloc[i])    if i < len(data[sym]["High"])    else 0.0,
+                    "low":    float(data[sym]["Low"].iloc[i])     if i < len(data[sym]["Low"])     else 0.0,
+                    "close":  float(cs.iloc[i]),
+                    "volume": float(data[sym]["Volume"].iloc[i])  if i < len(data[sym]["Volume"])  else 0.0,
+                })
+            out[sym] = bars
+        except Exception:
+            continue
+    return out
+
+
+def _avg_volume_h(bars: list[dict], lookback: int = 20) -> float:
     vols = [bars[i].get("volume", 0) for i in range(min(lookback, len(bars)))]
     return sum(vols) / len(vols) if vols else 0.0
 
 
-def _clearance_score(price: float, high_50: float) -> float:
-    """How far above the 50-day high, up to 40 pts."""
-    if high_50 <= 0:
-        return 0.0
-    clearance = (price - high_50) / high_50 * 100.0
-    # 0%=0pts, 5%=20pts, 10%+=40pts
-    return min(40.0, max(0.0, clearance * 4.0))
-
-
-def _volume_score(current_vol: float, avg_vol: float, mult: float) -> float:
-    """Volume surge score, up to 30 pts."""
-    if avg_vol <= 0 or current_vol <= 0:
-        return 0.0
-    ratio = current_vol / avg_vol
-    # 1x = 0pts, 1.5x = 10pts, 2x = 20pts, 3x+ = 30pts
-    if ratio < mult:
-        return 0.0
-    return min(30.0, (ratio - mult) * 15.0 + 10.0)
-
-
 def _compression_score(atr_pct: float) -> float:
-    """Lower ATR = tighter compression = stronger breakout, up to 20 pts.
-    ATR% of price: <2% = 20pts, 2-4% = 10pts, >4% = 0pts."""
-    if atr_pct < 0:
-        return 0.0
+    """Lower ATR = tighter compression = stronger breakout, up to 20 pts."""
     if atr_pct <= 2.0:
         return 20.0
     if atr_pct <= 4.0:
         return 10.0
     return 0.0
+
+
+def _clearance_score(price: float, high_50: float) -> float:
+    if high_50 <= 0:
+        return 0.0
+    clearance = (price - high_50) / high_50 * 100.0
+    return min(40.0, max(0.0, clearance * 4.0))
+
+
+def _volume_score(current_vol: float, avg_vol: float, mult: float) -> float:
+    if avg_vol <= 0 or current_vol <= 0:
+        return 0.0
+    ratio = current_vol / avg_vol
+    if ratio < mult:
+        return 0.0
+    return min(30.0, (ratio - mult) * 15.0 + 10.0)
 
 
 def screen() -> list[dict]:
@@ -105,58 +141,35 @@ def screen() -> list[dict]:
     Candidate shape: {symbol, price, high_50d, volume_ratio, atr_pct,
                       clearance_pct, breakout_score}
     """
-    log.info(f"Breakout screen: fetching {_N_BARS} days for "
+    log.info(f"Breakout screen: fetching {100} days for "
             f"breakout candidates, universe={len(SP80_UNIVERSE)}")
 
-    today = datetime.date.today()
-    start = today - datetime.timedelta(days=_N_BARS * 2)
     candidates: list[dict] = []
-    fetched = 0
+    bars_map = _fetch_bars_batch(SP80_UNIVERSE)
+    log.info(f"  Got bars for {len(bars_map)} symbols")
 
-    for sym in SP80_UNIVERSE:
+    for sym, bars in bars_map.items():
         try:
-            data = _get(f"{_stable}/historical-price-eod/full", {
-                "symbol": sym,
-                "from":    start.isoformat(),
-                "to":      today.isoformat(),
-            })
-            if not isinstance(data, list) or len(data) < 55:
-                continue
-            bars = []
-            for bar in data:
-                if not isinstance(bar, dict):
-                    continue
-                try:
-                    bars.append({
-                        "date":   bar.get("date", ""),
-                        "open":   float(bar.get("open") or 0),
-                        "high":   float(bar.get("high") or 0),
-                        "low":    float(bar.get("low") or 0),
-                        "close":  float(bar.get("close") or 0),
-                        "volume": float(bar.get("volume") or 0),
-                    })
-                except (TypeError, ValueError):
-                    continue
-            bars.reverse()   # oldest first now
-
             if len(bars) < 55:
                 continue
-            fetched += 1
 
-            closes  = [b["close"] for b in bars]
+            closes  = [b["close"]  for b in bars]
             volumes = [b["volume"] for b in bars]
-            highs50 = [b["high"] for b in bars[-50:]]
+            highs   = [b["high"]   for b in bars]
+            lows    = [b["low"]    for b in bars]
 
             price = closes[-1]
             if price < BREAKOUT_MIN_PRICE:
                 continue
 
-            avg_vol = _avg_volume(bars[-20:])
+            vol_slice = bars[-20:]
+            vols_20 = [b["volume"] for b in vol_slice]
+            avg_vol = sum(vols_20) / len(vols_20) if vols_20 else 0.0
             if avg_vol < BREAKOUT_MIN_AVG_VOLUME:
                 continue
 
             # ── 50-day high ───────────────────────────────────────────────
-            high_50 = max(highs50)
+            high_50 = max(highs[-50:])
             if price <= high_50:
                 # Not yet broken out — skip unless within 1% (early breakout)
                 clearance = (price - high_50) / high_50 * 100.0 if high_50 else 0

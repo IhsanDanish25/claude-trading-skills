@@ -39,6 +39,8 @@ from core.config import (
 from core import clock
 from core.fmp import _get, _STABLE as _stable, fmp_remaining_calls
 
+import yfinance as yf
+
 log = logging.getLogger(__name__)
 
 # Live daily cache for /stable/earnings (earnings only change quarterly, so one
@@ -85,65 +87,92 @@ def _load_symbol_earnings(sym: str) -> list[dict]:
 _N_BARS = 60     # need ~45 for drift + 20 for avg volume
 
 
-def _fetch_drift(sym: str, beat_date: str) -> tuple[float, float]:
-    """
-    Get drift % and avg volume via FMP /stable/ historical-price-eod.
+def _fetch_bars_batch(symbols: list[str]) -> dict[str, list[dict]]:
+    """Fetch daily bars from yfinance. Returns {symbol: [oldest→newest bars]}.
 
-    Returns (drift_pct, avg_volume_20d). Drift is measured from beat_date close
-    to most recent close. If too few bars, returns (0.0, 0.0).
+    1 yfinance call for all symbols — 0 FMP calls.
     """
-    today = clock.today()
-    start = today - datetime.timedelta(days=_N_BARS * 2)
+    if not symbols:
+        return {}
     try:
-        data = _get(f"{_stable}/historical-price-eod/full", {
-            "symbol": sym,
-            "from":   start.isoformat(),
-            "to":     today.isoformat(),
-        })
-        if not isinstance(data, list) or len(data) < 5:
-            return 0.0, 0.0
-
-        rows = []
-        for bar in data:
-            if not isinstance(bar, dict):
-                continue
-            try:
-                rows.append({
-                    "date":   bar.get("date"),
-                    "close":  float(bar.get("close") or 0),
-                    "volume": float(bar.get("volume") or 0),
-                })
-            except (TypeError, ValueError):
-                continue
-        # Oldest-first, independent of source ordering. Live FMP returns
-        # newest-first; the backtest harness serves oldest-first. Sorting by
-        # date (rather than a blind reverse) is correct for both.
-        rows.sort(key=lambda r: r["date"] or "")
-
-        # Find bar on or after beat_date
-        beat_price = None
-        for r in rows:
-            if r["date"] and r["date"] >= beat_date[:10]:
-                beat_price = r["close"]
-                break
-
-        if beat_price is None or beat_price <= 0:
-            return 0.0, 0.0
-
-        recent = rows[-1]["close"]
-        if recent <= 0:
-            return 0.0, 0.0
-
-        drift_pct = (recent - beat_price) / beat_price * 100.0
-
-        # 20-day avg volume
-        vol_slice = rows[-20:]
-        vols = [r["volume"] for r in vol_slice if r.get("volume")]
-        avg_vol = sum(vols) / len(vols) if vols else 0.0
-
-        return round(drift_pct, 2), round(avg_vol)
+        data = yf.download(
+            symbols,
+            period="1y",
+            progress=False,
+            auto_adjust=False,
+            group_by="ticker",
+        )
     except Exception:
+        return {}
+    if data.empty:
+        return {}
+
+    out: dict[str, list[dict]] = {}
+    for sym in symbols:
+        try:
+            cols = data.columns.get_level_values(0).unique()
+            if sym not in cols:
+                continue
+            cs = data[sym]["Close"].dropna()
+            if len(cs) < 5:
+                continue
+
+            n = min(len(cs), len(data[sym]["High"]), len(data[sym]["Low"]), len(data[sym]["Volume"]))
+            bars = []
+            for i in range(n):
+                bar_date = cs.index[i].strftime("%Y-%m-%d")
+                bars.append({
+                    "date":   bar_date,
+                    "close":  float(cs.iloc[i]),
+                    "volume": float(data[sym]["Volume"].iloc[i])
+                               if i < len(data[sym]["Volume"]) else 0.0,
+                })
+            out[sym] = bars  # oldest→newest
+        except Exception:
+            continue
+    return out
+
+
+def _get_price_yf(symbol: str) -> float:
+    """Price from yfinance Ticker.fast_info (one call, no loop)."""
+    try:
+        return float(yf.Ticker(symbol).fast_info.last_price)
+    except Exception:
+        return 0.0
+
+
+def _fetch_drift(sym: str, beat_date: str,
+                 bars_map: dict[str, list[dict]]) -> tuple[float, float]:
+    """
+    Get drift % and 20d avg volume from pre-fetched yfinance bars.
+    Returns (drift_pct, avg_volume_20d). No FMP calls.
+    """
+    bars = bars_map.get(sym, [])
+    if len(bars) < 5:
         return 0.0, 0.0
+
+    # Find bar on/after beat_date
+    beat_price = None
+    for bar in bars:
+        if bar["date"] and bar["date"] >= beat_date[:10]:
+            beat_price = bar["close"]
+            break
+
+    if beat_price is None or beat_price <= 0:
+        return 0.0, 0.0
+
+    recent = bars[-1]["close"]
+    if recent <= 0:
+        return 0.0, 0.0
+
+    drift_pct = (recent - beat_price) / beat_price * 100.0
+
+    # 20-day avg volume
+    vol_slice = bars[-20:]
+    vols = [b["volume"] for b in vol_slice if b.get("volume")]
+    avg_vol = sum(vols) / len(vols) if vols else 0.0
+
+    return round(drift_pct, 2), round(avg_vol)
 
 
 def _drift_score(drift_pct: float, surprise_pct: float) -> float:
@@ -175,11 +204,15 @@ def screen() -> list[dict]:
     log.info(f"EarnMom screen: fetching per-symbol earnings via FMP /stable/earnings "
             f"(from={cutoff_s}, universe={len(SP80_UNIVERSE)})")
 
-    # ── FMP budget guard ────────────────────────────────────────────────────────
-    # EarnMom makes up to 3 FMP calls per symbol (earnings + quote + drift).
-    # Check there's enough budget before starting so we don't exhaust mid-loop.
+    # ── Prefetch ALL bars via yfinance (one batch call, 0 FMP calls) ────────────
+    bars_map: dict[str, list[dict]] = {}
+    log.info("  Prefetching 1y bars for all %d symbols via yfinance...", len(SP80_UNIVERSE))
+    bars_map = _fetch_bars_batch(SP80_UNIVERSE)
+    log.info("  Got bars for %d symbols", len(bars_map))
+
+    # ── FMP budget guard — now only 1 call per symbol for /earnings ────────────
     remaining = fmp_remaining_calls()
-    needed = len(SP80_UNIVERSE) * 3   # worst case (earnings + quote + drift per sym)
+    needed = len(SP80_UNIVERSE)   # worst case: 1 earnings call per symbol
     if remaining < needed:
         log.warning(
             "EarnMom SKIPPED: FMP budget %d remaining, need ~%d calls. "
@@ -254,23 +287,14 @@ def screen() -> list[dict]:
             if not (8 <= age_days <= EARNMOM_MAX_DAYS_AGO):
                 continue
 
-            # Early price filter avoids another FMP quote call for sub-$10 stocks
-            try:
-                quote = _get(f"{_stable}/quote", {"symbol": sym})
-                if isinstance(quote, list) and quote:
-                    price = float(quote[0].get("price") or 0)
-                elif isinstance(quote, dict):
-                    price = float(quote.get("price") or 0)
-                else:
-                    price = 0.0
-            except Exception:
-                price = 0.0
-
+            # Early price filter from yfinance bars (0 FMP calls)
+            bars = bars_map.get(sym, [])
+            price = bars[-1]["close"] if bars else _get_price_yf(sym)
             if price < EARNMOM_MIN_PRICE:
                 continue
 
-            # ── Price drift since beat (most expensive FMP call — do last) ──
-            drift_pct, avg_vol = _fetch_drift(sym, report_date)
+            # ── Price drift from pre-fetched yfinance bars ──────────────────
+            drift_pct, avg_vol = _fetch_drift(sym, report_date, bars_map)
             if avg_vol < EARNMOM_MIN_AVG_VOLUME:
                 continue
             if drift_pct < EARNMOM_MIN_DRIFT_PCT:

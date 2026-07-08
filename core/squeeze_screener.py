@@ -1,5 +1,5 @@
 """
-Short Squeeze screener — FMP /stable/short-interest, SI > threshold + DTC + momentum.
+Short Squeeze screener — yfinance batch bars + FMP /stable/short-interest.
 
 Short squeezes happen when:
   1. Heavy short interest (>15% of float = many bears caught)
@@ -19,6 +19,9 @@ Filter gates:
 
 FMP /stable/short-interest returns:
   [{symbol, shortInterest, float, daysToCover, institutionalOwnership, volume}, ...]
+  (1 call total — not per symbol)
+
+yfinance: all historical bars fetched in 1 batch call (0 FMP for bars).
 """
 from __future__ import annotations
 
@@ -26,10 +29,12 @@ import logging
 import datetime
 import math
 
+import yfinance as yf
+
 from core.config import (
     SQUEEZE_HOLD_DAYS, SQUEEZE_STOP_PCT, SQUEEZE_SIZE_PCT,
     SQUEEZE_MIN_PRICE, SQUEEZE_MIN_SI_PCT, SQUEEZE_MIN_DTC,
-    SQUEEZE_MIN_MOMENTUM, SQUEEZE_LIMIT,
+    SQUEEZE_MIN_MOMENTUM, SQUEEZE_LIMIT, SP80_UNIVERSE,
 )
 from core.fmp import _get, _STABLE as _stable
 
@@ -38,29 +43,55 @@ log = logging.getLogger(__name__)
 _N_BARS = 60    # needs 20-day momentum lookback
 
 
-def _fetch_momentum(symbol: str) -> float:
-    """Get 20-bar simple momentum % via FMP /stable/ historical-price-eod."""
-    today = datetime.date.today()
-    start = today - datetime.timedelta(days=_N_BARS * 2)
+# ── yfinance batch bars (called once at top of screen) ────────────────────────
+def _fetch_bars_batch(symbols: list[str]) -> dict[str, list[dict]]:
+    """Fetch daily bars from yfinance. Returns {sym: [oldest→newest]}. 0 FMP."""
+    if not symbols:
+        return {}
     try:
-        data = _get(f"{_stable}/historical-price-eod/full", {
-            "symbol": symbol,
-            "from":    start.isoformat(),
-            "to":      today.isoformat(),
-        })
-        if not isinstance(data, list) or len(data) < 22:
-            return 0.0
-        # newest last
-        prices = [float(b["close"]) for b in data[-22:-1] if b.get("close")]
-        if len(prices) < 22:
-            return 0.0
-        recent = prices[-1]
-        past = prices[0]
-        if past <= 0:
-            return 0.0
-        return (recent - past) / past * 100.0
+        data = yf.download(symbols, period="1y", progress=False,
+                           auto_adjust=False, group_by="ticker")
     except Exception:
+        return {}
+    if data.empty:
+        return {}
+
+    out: dict[str, list[dict]] = {}
+    for sym in symbols:
+        try:
+            cols = data.columns.get_level_values(0).unique()
+            if sym not in cols:
+                continue
+            cs = data[sym]["Close"].dropna()
+            if len(cs) < 22:
+                continue
+            n = min(len(cs), len(data[sym]["High"]), len(data[sym]["Low"]))
+            bars = []
+            for i in range(n):
+                bars.append({
+                    "close": float(cs.iloc[i]),
+                    "high":  float(data[sym]["High"].iloc[i]) if i < len(data[sym]["High"]) else 0.0,
+                    "low":   float(data[sym]["Low"].iloc[i])  if i < len(data[sym]["Low"])  else 0.0,
+                })
+            out[sym] = bars
+        except Exception:
+            continue
+    return out
+
+
+def _squeeze_momentum(sym: str, bars_map: dict[str, list[dict]]) -> float:
+    """20-bar momentum from pre-fetched yfinance bars. 0 FMP."""
+    bars = bars_map.get(sym, [])
+    if len(bars) < 22:
         return 0.0
+    prices = [b["close"] for b in bars[-22:-1] if b.get("close")]
+    if len(prices) < 22:
+        return 0.0
+    recent = prices[-1]
+    past = prices[0]
+    if past <= 0:
+        return 0.0
+    return (recent - past) / past * 100.0
 
 
 def _si_score(si_pct: float) -> float:
@@ -123,6 +154,10 @@ def screen() -> list[dict]:
 
     log.info(f"  Got {len(data)} short-interest records")
 
+    # ── Prefetch all bars via yfinance (1 batch call, 0 FMP) ─────────────────
+    bars_map = _fetch_bars_batch(SP80_UNIVERSE)
+    log.info(f"  Prefetched yfinance bars for {len(bars_map)} symbols")
+
     for row in data:
         if not isinstance(row, dict):
             continue
@@ -144,23 +179,14 @@ def screen() -> list[dict]:
 
             inst_own = float(row.get("institutionalOwnership") or 50)  # default 50%
 
-            # Minimum price filter via FMP quote
-            try:
-                quote_data = _get(f"{_stable}/quote", {"symbol": sym})
-                if isinstance(quote_data, list) and quote_data:
-                    price = float(quote_data[0].get("price") or 0)
-                elif isinstance(quote_data, dict):
-                    price = float(quote_data.get("price") or 0)
-                else:
-                    price = 0.0
-            except Exception:
-                price = 0.0
-
+            # Price from yfinance bars (0 FMP)
+            bars = bars_map.get(sym, [])
+            price = bars[-1]["close"] if bars else 0.0
             if price < SQUEEZE_MIN_PRICE:
                 continue
 
-            # ── 20-day momentum ───────────────────────────────────────────
-            momentum = _fetch_momentum(sym)
+            # ── 20-day momentum from yfinance bars ─────────────────────────
+            momentum = _squeeze_momentum(sym, bars_map)
             if momentum < SQUEEZE_MIN_MOMENTUM:
                 continue
 
