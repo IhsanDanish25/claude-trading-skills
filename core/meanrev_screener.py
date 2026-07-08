@@ -1,10 +1,11 @@
 """
 Mean Reversion screener — RSI < 30 + Bollinger Band oversold + above SMA200.
 
-Universe: 80-stock S&P benchmark. Uses FMP /stable/ historical-price-eod.
+Universe: 80-stock S&P benchmark. Uses yfinance for historical OHLCV data
+(1 year, ~252 bars) — no API key required, no rate limits.
 
 Logic:
-  1. Fetch daily bars for all universe symbols (300 bars ~ 14 months)
+  1. Fetch daily bars for all universe symbols in ONE yfinance call
   2. For each: compute SMA-50, SMA-200, RSI(14), Bollinger Bands(20,2)
   3. Filter: price > SMA200 (trending market), RSI < threshold,
      price <= lower_bollinger_band + BB_THRESHOLD buffer
@@ -17,7 +18,7 @@ Signal semantics:
   - Above SMA200   : in a healthy uptrend that should favor mean-reversion
   - Hold for ~14 days with tight 5% stop — expect 5-10% snap-back
 
-No TA-Lib. Pure-python indicators on FMP OHLCV.
+No TA-Lib. Pure-python indicators on yfinance OHLCV.
 """
 from __future__ import annotations
 
@@ -25,14 +26,15 @@ import math
 import logging
 import datetime
 
+import yfinance as yf
+
 from core.config import SP80_UNIVERSE, MEANREV_STOP_PCT, MEANREV_MIN_PRICE
 from core.config import MEANREV_RSI_THRESHOLD, MEANREV_BB_THRESHOLD
 from core.config import MEANREV_MIN_AVG_VOLUME, MEANREV_LIMIT
-from core.fmp import _get, _STABLE as _stable
 
 log = logging.getLogger(__name__)
 
-_N_BARS = 300        # ~14 months of daily bars — enough for SMA200 + lookback
+_N_BARS = 252        # ~1 year trading days — enough for SMA200 + lookback
 _RSI_PERIOD = 14
 _SMA_PERIOD = 50
 _SMA200_PERIOD = 200
@@ -96,41 +98,80 @@ def _momentum_pct(bars: list[dict], lookback: int = 20) -> float:
     return (recent - past) / past * 100.0
 
 
-def _fetch_bars_batch(symbols: list[str]) -> dict[str, list[dict]]:
-    """Fetch daily bars from FMP stable API. Returns {symbol: [newest-first bars]}."""
-    today = datetime.date.today()
-    from_ = today - datetime.timedelta(days=_N_BARS * 2)
+def _fetch_bars_batch(_symbols: list[str]) -> dict[str, list[dict]]:
+    """Fetch daily bars from yfinance. Returns {symbol: [oldest→newest bars]}.
+
+    yfinance returns ~252 trading days (1 year) in a single API call,
+    no API key or rate-limit cost.
+    """
+    if not _symbols:
+        return {}
+
+    # Fetch all symbols in one yfinance call (no API key needed)
+    try:
+        data = yf.download(
+            _symbols,
+            period="1y",
+            progress=False,
+            auto_adjust=False,   # keep Close col (not Adj Close) for backward compat
+            group_by="ticker",
+        )
+    except Exception as e:
+        log.warning("yfinance download failed: %s", e)
+        return {}
+
+    if data.empty:
+        log.warning("yfinance returned empty data for %d symbols", len(_symbols))
+        return {}
+
     out: dict[str, list[dict]] = {}
-    for sym in symbols:
+
+    for sym in _symbols:
         try:
-            data = _get(f"{_stable}/historical-price-eod/full", {
-                "symbol": sym,
-                "from":    from_.isoformat(),
-                "to":      today.isoformat(),
-            })
-            if not isinstance(data, list) or not data:
-                continue
-            rows = []
-            for bar in data:
-                if not isinstance(bar, dict):
+            # Multi-index access: data[sym]["Close"] etc.
+            cols = data.columns.get_level_values(0).unique()
+            if sym not in cols:
+                # Try flat-column fallback (when group_by="ticker" fails)
+                if "Close" in data.columns:
+                    close_series = data["Close"][sym]
+                    if close_series is None or close_series.isna().all():
+                        continue
+                else:
                     continue
+
+            close_series = data[sym]["Close"].dropna()
+            if len(close_series) < _SMA200_PERIOD + 1:
+                continue
+
+            high_series = data[sym]["High"].dropna()
+            low_series  = data[sym]["Low"].dropna()
+            vol_series  = data[sym]["Volume"].dropna()
+
+            n = min(len(close_series), len(high_series), len(low_series), len(vol_series))
+            if n < _SMA200_PERIOD + 1:
+                continue
+
+            bars = []
+            for i in range(n):
+                row_date = close_series.index[i]
                 try:
-                    rows.append({
-                        "date":   bar.get("date", ""),
-                        "open":   float(bar.get("open", 0) or 0),
-                        "high":   float(bar.get("high", 0) or 0),
-                        "low":    float(bar.get("low", 0) or 0),
-                        "close":  float(bar.get("close", 0) or 0),
-                        "volume": float(bar.get("volume", 0) or 0),
+                    bars.append({
+                        "date":   row_date.strftime("%Y-%m-%d"),
+                        "open":   float(close_series.iloc[i]),
+                        "high":   float(high_series.iloc[i])   if i < len(high_series) else 0.0,
+                        "low":    float(low_series.iloc[i])    if i < len(low_series)  else 0.0,
+                        "close":  float(close_series.iloc[i]),
+                        "volume": float(vol_series.iloc[i])    if i < len(vol_series)  else 0.0,
                     })
                 except (TypeError, ValueError):
                     continue
-            if len(rows) >= 60:
-                rows.reverse()
-                out[sym] = rows
+
+            if len(bars) >= _SMA200_PERIOD + 1:
+                out[sym] = bars   # oldest→newest
         except Exception as e:
-            log.debug("FMP bars %s: %s", sym, e)
+            log.debug("yfinance bars %s: %s", sym, e)
             continue
+
     return out
 
 
@@ -142,7 +183,7 @@ def screen() -> list[dict]:
                       avg_volume, bb_position, score}
     """
     log.info(f"MeanRev screen: fetching {_N_BARS} days for "
-            f"{len(SP80_UNIVERSE)} symbols via FMP /stable/")
+            f"{len(SP80_UNIVERSE)} symbols via yfinance")
     bars_map = _fetch_bars_batch(SP80_UNIVERSE)
     log.info(f"  Got bars for {len(bars_map)} symbols")
 
@@ -151,13 +192,13 @@ def screen() -> list[dict]:
     for sym, bars in bars_map.items():
         try:
             closes = [b["close"] for b in bars if b.get("close")]
-            highs = [b["high"] for b in bars if b.get("high")]
-            lows = [b["low"] for b in bars if b.get("low")]
+            highs  = [b["high"]  for b in bars if b.get("high")]
+            lows   = [b["low"]   for b in bars if b.get("low")]
 
             if len(closes) < _SMA200_PERIOD + 1:
                 continue
 
-            price = closes[-1]  # most recent (newest-last after reverse)
+            price = closes[-1]   # newest bar
 
             if price < MEANREV_MIN_PRICE:
                 continue
@@ -171,10 +212,10 @@ def screen() -> list[dict]:
             if sma200 is None or price <= sma200:
                 continue
 
-            # ── SMA50 ───────────────────────────────────────────────────────
+            # ── SMA50 ─────────────────────────────────────────────────────
             sma50 = _sma(closes, _SMA_PERIOD)
 
-            # ── RSI(14) ────────────────────────────────────────────────────
+            # ── RSI(14) ───────────────────────────────────────────────────
             rsi = _rsi(closes)
             if rsi is None or rsi >= MEANREV_RSI_THRESHOLD:
                 continue
