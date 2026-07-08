@@ -42,6 +42,15 @@ def run():
     log.info(f"Portfolio: ${pv:,.2f} | Cash: ${cash:,.2f} | BP: ${bp:,.2f}")
     log.info(f"Open positions: {pos_count}/{config.MAX_OPEN_POSITIONS}")
 
+    # ── Anchor equity for CircuitBreaker daily-loss tracking ─────────────────
+    day_start_path = os.path.join(config.STATE_DIR, "day_start_value.json")
+    try:
+        with open(day_start_path, "w") as f:
+            json.dump({"date": datetime.date.today().isoformat(), "value": pv}, f)
+        log.info(f"Day-start anchor saved: {pv:,.2f}")
+    except Exception as e:
+        log.warning(f"Could not write day-start value: {e}")
+
     # ── 2. Economic calendar ──────────────────────────────────────────────────
     log.info("── Economic calendar (next 3 days)")
     calendar = get_economic_calendar(days_ahead=3)
