@@ -499,7 +499,7 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today):
     if screen_insider is None:
         log.warning("Insider: screener not loaded — see import error above — skipping")
         return
-    log.info("Insider: screening P-Purchases via FMP insider-trading...")
+    log.info("Insider: screening P-Purchases via SEC EDGAR...")
     candidates = screen_insider()
     log.info(f"Insider: {len(candidates)} candidates")
     if not candidates:
@@ -605,7 +605,7 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today):
     if screen_squeeze is None:
         log.warning("Squeeze: screener not loaded — see import error above — skipping")
         return
-    log.info("Squeeze: screening short interest via FMP...")
+    log.info("Squeeze: screening short interest...")
     candidates = screen_squeeze()
     log.info(f"Squeeze: {len(candidates)} candidates")
     if not candidates:
@@ -713,7 +713,7 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today):
     if screen_breakout is None:
         log.warning("Breakout: screener not loaded — see import error above — skipping")
         return
-    log.info("Breakout: screening for 50d resistance clears via FMP...")
+    log.info("Breakout: screening for 50d resistance clears...")
     candidates = screen_breakout()
     log.info(f"Breakout: {len(candidates)} candidates")
     if not candidates:
