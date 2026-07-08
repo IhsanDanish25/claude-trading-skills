@@ -94,7 +94,15 @@ def run():
 
     if top_vcps:
         log.info(f"── Claude: scoring {len(top_vcps)} VCP candidates")
-        scored = score_vcp_candidates(top_vcps)
+        try:
+            scored = score_vcp_candidates(top_vcps)
+        except Exception as e:
+            log.warning(f"Claude VCP scoring failed: {e} — using raw screener scores")
+            scored = [{**s, "score": s.get("raw_score", s.get("score", 0)),
+                       "action": "BUY" if s.get("raw_score", s.get("score", 0)) >= 50
+                                 else "WATCH",
+                       "reason": f"fallback (Claude unavailable): raw={s.get('raw_score', s.get('score', 0))}"}
+                      for s in sorted(top_vcps, key=lambda x: x.get("raw_score", x.get("score", 0)), reverse=True)]
 
         buy_list = [s for s in scored if s.get("action") == "BUY"]
         log.info(f"  BUY candidates: {len(buy_list)}")

@@ -146,24 +146,55 @@ def _alpaca_change_pct(symbol: str) -> float:
     return 0.0
 
 
-def get_market_breadth() -> dict:
-    """SPY (FMP stable) + QQQ/IWM (Alpaca, ETF-restricted on current FMP plan)."""
+def _spy_quote_fmp() -> dict:
+    """FMP quote for SPY — returns {} on any failure (402/429/timeout)."""
     try:
-        spy     = _safe_quote("SPY")
+        return _safe_quote("SPY")
+    except Exception:
+        return {}
+
+
+def _spy_quote_yf() -> dict:
+    """yfinance fallback for SPY — pure python, no rate-limit or plan restriction."""
+    try:
+        import yfinance as yf
+        t = yf.Ticker("SPY")
+        fi = t.fast_info
+        price = float(fi.last_price) if fi.last_price else 0.0
+        hist = t.history(period="5d")
+        prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
+        change_pct = round((price - prev_close) / prev_close * 100, 4) if prev_close > 0 else 0.0
+        return {
+            "changesPercentage": change_pct,
+            "price": price,
+        }
+    except Exception:
+        return {}
+
+
+def get_market_breadth() -> dict:
+    """SPY (FMP → yfinance fallback) + QQQ/IWM (Alpaca IEX, no FMP)."""
+    spy = _spy_quote_fmp()
+    if not spy:
+        global _fmp_fallback_active
+        _fmp_fallback_active = True
+        spy = _spy_quote_yf()
+        if not spy:
+            spy = {"changesPercentage": 0.0, "price": 0.0}
+    try:
         qqq_chg = _alpaca_change_pct("QQQ")
         iwm_chg = _alpaca_change_pct("IWM")
-        return {
-            "spy_change_pct": spy.get("changesPercentage", 0),
-            "qqq_change_pct": qqq_chg,
-            "iwm_change_pct": iwm_chg,
-            "spy_price":      spy.get("price", 0),
-            "spy_trend":      "up" if spy.get("changesPercentage", 0) > 0 else "down",
-            "qqq_trend":      "up" if qqq_chg > 0 else "down",
-            "sector_perf":    {},
-        }
-    except Exception as e:
-        log.error("Breadth fetch fail: %s", e)
-        return {}
+    except Exception:
+        qqq_chg = iwm_chg = 0.0
+    return {
+        "spy_change_pct": spy.get("changesPercentage", 0),
+        "qqq_change_pct": qqq_chg,
+        "iwm_change_pct": iwm_chg,
+        "spy_price":      spy.get("price", 0),
+        "spy_trend":      "up" if spy.get("changesPercentage", 0) > 0 else "down",
+        "qqq_trend":      "up" if qqq_chg > 0 else "down",
+        "sector_perf":    {},
+    }
 
 
 def get_quotes(symbols: list[str]) -> dict:

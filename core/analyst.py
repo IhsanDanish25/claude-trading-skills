@@ -16,7 +16,7 @@ _client: anthropic.Anthropic | None = None
 # Default is empty so the live loop never burns Anthropic spend on hardcoded
 # model IDs that may be stale; if env var is unset and a caller invokes the
 # analyst, we try once and degrade gracefully.
-_DEFAULT_MODELS = os.environ.get("ANTHROPIC_MODELS", "claude-opus-4-7").strip()
+_DEFAULT_MODELS = os.environ.get("ANTHROPIC_MODELS", "claude-sonnet-4-20250514").strip()
 _MODELS = [m.strip() for m in _DEFAULT_MODELS.split(",") if m.strip()]
 
 
@@ -32,7 +32,12 @@ def _ask(system: str, user: str, max_tokens: int = 1024) -> str:
     if not _MODELS:
         raise RuntimeError(
             "ANTHROPIC_MODELS env var not set (comma-separated model IDs). "
-            "Set it in Railway Variables, e.g. ANTHROPIC_MODELS=claude-sonnet-4-5"
+            "Set it in Railway Variables, e.g. ANTHROPIC_MODELS=claude-sonnet-4-20250514"
+        )
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set. Set it in Railway Variables. "
+            "pre_market VCP scoring requires a valid Anthropic API key."
         )
     client = _get_client()
     for model in _MODELS:
@@ -55,7 +60,7 @@ def _ask(system: str, user: str, max_tokens: int = 1024) -> str:
             _time.sleep(10)
             continue
         except anthropic.AuthenticationError:
-            log.error("Anthropic API key invalid")
+            log.error("Anthropic API key invalid (401)")
             raise
     raise RuntimeError(f"No available model — tried {_MODELS}")
 
