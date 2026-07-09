@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.broker import BrokerClient
 from core.config import MAX_POSITION_SIZE_PCT, MAX_OPEN_POSITIONS
+from core.spy_base import is_base_symbol
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +51,7 @@ def build_plan(broker: BrokerClient, target_positions: int,
         return {"status": "empty", "message": "No open positions.", "equity": equity}
 
     rows = []
+    base_rows = []
     for p in positions:
         mv = abs(float(p.market_value or 0))
         qty = float(p.qty)
@@ -57,7 +59,7 @@ def build_plan(broker: BrokerClient, target_positions: int,
         cost = float(p.avg_entry_price or 0)
         pct_of_equity = (mv / equity * 100) if equity else 0
         upl_pct = (upl / (cost * qty) * 100) if (cost and qty) else 0
-        rows.append({
+        row = {
             "symbol": p.symbol,
             "qty": qty,
             "avg_entry": cost,
@@ -65,12 +67,25 @@ def build_plan(broker: BrokerClient, target_positions: int,
             "unrealized_pl": upl,
             "unrealized_pl_pct": upl_pct,
             "pct_of_equity": pct_of_equity,
-        })
+        }
+        if is_base_symbol(p.symbol):
+            # SPY base is a cash-parking holding rebalanced separately by
+            # spy_base.rebalance_to_spy and is expected to run well over
+            # any per-position/position-count cap. Exempt it here so this
+            # script never closes or trims it out from under that system.
+            base_rows.append(row)
+        else:
+            rows.append(row)
 
     rows.sort(key=lambda r: r["unrealized_pl_pct"], reverse=True)
 
+    if not rows:
+        return {"status": "empty", "message": "No open positions (excluding SPY base).",
+                "equity": equity, "base_positions": base_rows}
+
     if keep_symbols:
         keep_set = {s.upper() for s in keep_symbols}
+        keep_set -= {r["symbol"] for r in base_rows}
         unknown = keep_set - {r["symbol"] for r in rows}
         if unknown:
             raise ValueError(f"--keep symbols not in portfolio: {unknown}")
@@ -106,6 +121,7 @@ def build_plan(broker: BrokerClient, target_positions: int,
             "status": "within_caps",
             "message": "Already within caps. No action needed.",
             "equity": equity, "cash": cash, "positions": rows,
+            "base_positions": base_rows,
             "position_count": len(rows), "target_positions": target_positions,
             "deployed_pct": sum(r["pct_of_equity"] for r in rows),
         }
@@ -118,6 +134,7 @@ def build_plan(broker: BrokerClient, target_positions: int,
         "target_positions": target_positions,
         "max_pct": max_pct,
         "all_positions": rows,
+        "base_positions": base_rows,
         "survivors": survivors,
         "closures": closures,
         "trims": trims,
@@ -125,6 +142,20 @@ def build_plan(broker: BrokerClient, target_positions: int,
         "post_cash": post_cash,
         "post_deployed_pct": post_deployed_pct,
     }
+
+
+def _base_position_lines(base_rows: list[dict]) -> list[str]:
+    """Format SPY base holdings, which are exempt from cap enforcement."""
+    if not base_rows:
+        return []
+    lines = ["-- SPY BASE (exempt from caps — managed by spy_base) --"]
+    for r in base_rows:
+        lines.append(
+            f"    {r['symbol']:6s}  {r['qty']:>8.2f} sh  "
+            f"${r['market_value']:>10,.2f}  ({r['pct_of_equity']:5.1f}%)  "
+            f"P&L ${r['unrealized_pl']:>+8,.2f} ({r['unrealized_pl_pct']:>+.1f}%)")
+    lines.append("")
+    return lines
 
 
 def format_plan(plan: dict) -> list[str]:
@@ -135,6 +166,7 @@ def format_plan(plan: dict) -> list[str]:
         lines.append("=" * 60)
         lines.append("REBALANCE PLAN — No open positions")
         lines.append(f"Equity: ${plan['equity']:,.2f}")
+        lines.extend(_base_position_lines(plan.get("base_positions", [])))
         lines.append("=" * 60)
         return lines
 
@@ -152,6 +184,8 @@ def format_plan(plan: dict) -> list[str]:
                 f"    {r['symbol']:6s}  {r['qty']:>8.2f} sh  "
                 f"${r['market_value']:>10,.2f}  ({r['pct_of_equity']:5.1f}%)  "
                 f"P&L ${r['unrealized_pl']:>+8,.2f} ({r['unrealized_pl_pct']:>+.1f}%){flag}")
+        lines.append("")
+        lines.extend(_base_position_lines(plan.get("base_positions", [])))
         lines.append("=" * 60)
         return lines
 
@@ -172,6 +206,8 @@ def format_plan(plan: dict) -> list[str]:
             f"${r['market_value']:>10,.2f}  ({r['pct_of_equity']:5.1f}%)  "
             f"P&L ${r['unrealized_pl']:>+8,.2f} ({r['unrealized_pl_pct']:>+.1f}%)")
     lines.append("")
+
+    lines.extend(_base_position_lines(plan.get("base_positions", [])))
 
     if plan["closures"]:
         lines.append("-- CLOSE (full liquidation) --")
