@@ -194,7 +194,7 @@ SP80_UNIVERSE = [
     # Utilities / Real estate / Materials
     "NEE","DUK","SO","SPG","PLD","AMT","CCI","EQIX","LIN","REIT",
     # Communication
-    "DIS","CMCSA","CHTR","TMUS","NFLX","PYPL","SNAP","TWTR",
+    "DIS","CMCSA","CHTR","TMUS","NFLX","PYPL","SNAP",
     # Health tech / Biotech
     "DXCM","HUM","CI","ELV","CNC","ZLAB","REGN","BIIB","MRNA",
     # Misc
