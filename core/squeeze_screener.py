@@ -1,10 +1,10 @@
 """
-Short Squeeze screener — yfinance batch bars + FMP /stable/short-interest.
+Short Squeeze screener — yfinance batch bars + yfinance short interest.
 
 Short squeezes happen when:
-  1. Heavy short interest (>15% of float = many bears caught)
-  2. High days-to-cover (>3 = shorts can't exit quickly under pressure)
-  3. Upward momentum (forced covering drives further upside = the squeeze)
+  1. Heavy short interest (>15% of float = many bears caught)         [yfinance]
+  2. High days-to-cover (>3 = shorts can't exit quickly under pressure)  [computed]
+  3. Upward momentum (forced covering drives further upside = the squeeze)  [yfinance]
 
 Scoring:
   - SI as % of float: higher = more fuel, up to 40pts
@@ -17,17 +17,13 @@ Filter gates:
   - 20-day momentum > SQUEEZE_MIN_MOMENTUM  (positive, default 5%)
   - Price >= $5 (too-low price distorts SI data)
 
-FMP /stable/short-interest returns:
-  [{symbol, shortInterest, float, daysToCover, institutionalOwnership, volume}, ...]
-  (1 call total — not per symbol)
+yfinance: short interest from .info attribute + 1 batch bars call (0 FMP).
 
-yfinance: all historical bars fetched in 1 batch call (0 FMP for bars).
+FMP drain: 0 (fully replaced by yfinance).
 """
 from __future__ import annotations
 
 import logging
-import datetime
-import math
 
 import yfinance as yf
 
@@ -36,7 +32,7 @@ from core.config import (
     SQUEEZE_MIN_PRICE, SQUEEZE_MIN_SI_PCT, SQUEEZE_MIN_DTC,
     SQUEEZE_MIN_MOMENTUM, SQUEEZE_LIMIT, SP80_UNIVERSE,
 )
-from core.fmp import _get, _STABLE as _stable
+from core.short_interest import get_short_interest
 
 log = logging.getLogger(__name__)
 
@@ -117,67 +113,31 @@ def screen() -> list[dict]:
     Candidate shape: {symbol, price, short_interest_pct, days_to_cover,
                       institutional_ownership, momentum_pct, squeeze_score}
     """
-    log.info("Squeeze screen: fetching short interest via FMP /stable/")
-    today = datetime.date.today()
-    start = today - datetime.timedelta(days=30)
+    log.info("Squeeze screen: fetching short interest via yfinance (0 FMP)")
 
     candidates: list[dict] = []
 
-    # Fetch short interest for all known S&P symbols in batches
-    symbols_batch = ",".join([
-        "AAPL", "MSFT", "NVDA", "AMD", "META", "GOOGL", "AMZN", "TSLA",
-        "AVGO", "NFLX", "CRM", "ADBE", "JPM", "BAC", "GS", "MS",
-        "XOM", "CVX", "COP", "EOG", "CAT", "GE", "HON", "BA",
-        "PFE", "MRK", "LLY", "JNJ", "UNH", "ABBV",
-        "HD", "MCD", "NKE", "SBUX", "TGT", "LOW", "WMT",
-        "AMGN", "GILD", "BMY", "BMY",
-        "DE", "MMM", "UPS", "FDX",
-        "TJX", "ROST", "DG", "DLTR",
-        "SPG", "PLD", "AMT", "CCI",
-        "NEE", "DUK", "SO", "D",
-    ])
-
-    try:
-        data = _get(f"{_stable}/short-interest", {
-            "date": start.isoformat(),
-        })
-        if not isinstance(data, list):
-            # Try without date filter as fallback
-            data = _get(f"{_stable}/short-interest", {})
-    except Exception as e:
-        log.warning("FMP short-interest: %s", e)
-        return []
-
-    if not isinstance(data, list):
-        log.warning("Squeeze screen: short-interest returned non-list %s", type(data))
-        return []
-
-    log.info(f"  Got {len(data)} short-interest records")
+    # Fetch short interest for all SP80 stocks via yfinance
+    si_data = get_short_interest()
+    log.info(f"  Got short-interest for {len(si_data)} symbols")
 
     # ── Prefetch all bars via yfinance (1 batch call, 0 FMP) ─────────────────
     bars_map = _fetch_bars_batch(SP80_UNIVERSE)
     log.info(f"  Prefetched yfinance bars for {len(bars_map)} symbols")
 
-    for row in data:
-        if not isinstance(row, dict):
-            continue
-        sym = row.get("symbol")
-        if not sym:
-            continue
+    for sym, si_row in si_data.items():
         try:
-            si = float(row.get("shortInterest") or 0)
-            fl = float(row.get("float") or 1)
-            if fl <= 0:
-                continue
-            si_pct = (si / fl) * 100.0
+            si_pct = float(si_row.get("short_interest_pct") or 0)
             if si_pct < SQUEEZE_MIN_SI_PCT:
                 continue
 
-            dtc = float(row.get("daysToCover") or 0)
+            dtc = float(si_row.get("days_to_cover") or 0)
             if dtc < SQUEEZE_MIN_DTC:
                 continue
 
-            inst_own = float(row.get("institutionalOwnership") or 50)  # default 50%
+            # inst_own not available from yfinance SI — use proxy: 50% default
+            # (conservative; DTC gating is the tighter filter anyway)
+            inst_own = 50.0
 
             # Price from yfinance bars (0 FMP)
             bars = bars_map.get(sym, [])
@@ -200,7 +160,7 @@ def screen() -> list[dict]:
                 "symbol":                    sym,
                 "price":                     round(price, 2),
                 "short_interest_pct":        round(si_pct, 2),
-                "short_interest_absolute":   round(si, 0),
+                "short_interest_absolute":   si_row.get("short_interest", 0),
                 "days_to_cover":             round(dtc, 1),
                 "institutional_ownership":    round(inst_own, 1),
                 "momentum_pct":               round(momentum, 2),
@@ -210,7 +170,7 @@ def screen() -> list[dict]:
                 "mom_score":                  round(mom_score, 1),
             })
         except Exception as e:
-            log.debug("Squeeze %s: %s", row.get("symbol", "?"), e)
+            log.debug("Squeeze %s: %s", sym, e)
             continue
 
     candidates.sort(key=lambda x: -x["score"])
