@@ -11,6 +11,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest,
     LimitOrderRequest,
+    StopOrderRequest,
     StopLossRequest,
     TakeProfitRequest,
     GetOrdersRequest,
@@ -168,7 +169,7 @@ class BrokerClient:
                 ))
                 log.info(f"  ↳ OCO attached: stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]")
             else:
-                self.trade.submit_order(LimitOrderRequest(
+                self.trade.submit_order(StopOrderRequest(
                     symbol=symbol, qty=qty, side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC, order_class=OrderClass.SIMPLE,
                     stop_price=stop,
