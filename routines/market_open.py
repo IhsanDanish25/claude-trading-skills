@@ -14,10 +14,9 @@ from core import logger, config
 from core.broker import BrokerClient
 from core.screener import screen
 from core.notifier import send_trade_alert
-from core.edge import circuit_breaker_tripped
 from core import composite
 from core.universe import build_universe
-from circuit_breaker import CircuitBreaker, TradingHalted
+from circuit_breaker import CircuitBreaker, TradingHalted, EmergencyLiquidation
 from regime_gate import classify
 from core.earnings_screener import screen_earnings
 from core.pead_tracker import add_position as pead_track
@@ -25,6 +24,68 @@ from core.spy_base import rebalance_to_spy, free_cash_for_pead, log_status as sp
 from core import trade_logger
 
 log = logger.setup("market_open")
+
+import requests as _req  # noqa: F401
+from functools import lru_cache as _lru_cache
+
+# ── SECTOR CONCENTRATION GUARD helpers ──────────────────────────────────────
+# MAX_PER_SECTOR enforced across all strategies within a single run
+_SECTOR_CACHE: dict = {}
+
+@lru_cache(maxsize=500)
+def _fetch_symbol_sector(symbol: str, api_key: str) -> str | None:
+    """Look up GICS sector via FMP profile. Cached in-process."""
+    if not api_key:
+        return None
+    try:
+        url = f"https://financialmodelingprep.com/api/v3/profile/{symbol}?apikey={api_key}"
+        resp = _req.get(url, timeout=10)
+        if resp.ok:
+            data = resp.json()
+            if data and isinstance(data, list) and len(data):
+                sector = (data[0].get("sector") or "").strip()
+                return sector or None
+    except Exception:
+        pass
+    return None
+
+
+def _build_sector_counts(broker, fmp_key: str) -> dict:
+    """Count open positions per GICS sector for the current held portfolio."""
+    from collections import Counter
+    counts: Counter = Counter()
+    for p in broker.get_positions():
+        if is_base_symbol(p.symbol):
+            continue
+        sector = (getattr(p, "sector", None) or
+                  _fetch_symbol_sector(p.symbol, fmp_key))
+        if sector:
+            counts[sector] += 1
+    return dict(counts)
+
+
+def _sector_gate(symbol: str, sector_counts: dict, fmp_key: str,
+                 strategy: str, log) -> bool:
+    """
+    Gate: returns True (allowed) if sector not at MAX_PER_SECTOR capacity.
+    Marks sector consumed on pass; logs + returns False on block.
+    """
+    max_per = getattr(config, "MAX_PER_SECTOR", 2)
+    sector = _fetch_symbol_sector(symbol, fmp_key)
+    if sector is None:
+        return True  # no FMP — circuit breaker gates on notional instead
+    current = sector_counts.get(sector, 0)
+    if current >= max_per:
+        log.info(f"  SKIP {symbol} — sector {sector!r} at {current}/{max_per}")
+        trade_logger.log_event(
+            "gate_failed", strategy, symbol, gate="sector_concentration",
+            reason=f"sector {sector} at {current}/{max_per}",
+            sector=sector, current=current, cap=max_per,
+        )
+        return False
+    sector_counts[sector] = current + 1
+    return True
+
 ET  = pytz.timezone("America/New_York")
 
 # Strategy screeners — fail gracefully if FMP unavailable, but log the real
@@ -233,7 +294,7 @@ def is_entry_window():
     return True, "entry window open"
 
 
-def _run_pead(broker, cb, pv, slots, held, already_bought_today):
+def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
     """PEAD strategy: buy stocks with big earnings surprises, hold 60 days,
     -15% disaster stop, no take-profit. Time-exit handled by market_close."""
     log.info("PEAD: screening S&P 500 for earnings beats...")
@@ -277,6 +338,12 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today):
                                    gate="idempotency", reason="already bought today")
             continue
 
+
+        # Sector concentration guard
+        _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
+        if not _sector_gate(sym, sector_counts, _fkp, "pead", log):
+            continue
+
         size_pct = config.PEAD_SIZE_PCT
         amount = pv * size_pct
 
@@ -297,6 +364,12 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today):
                 cb.check_before_order(intended_notional=amount, symbol=sym)
                 trade_logger.log_event("gate_passed", "pead", sym,
                                        gate="circuit_breaker", amount=round(amount, 2))
+            except EmergencyLiquidation as emerg:
+                log.error(f"✗ EMERGENCY LIQUIDATION — circuit breaker: {emerg}")
+                trade_logger.log_event("gate_failed", "pead", sym,
+                                       gate="emergency_liquidation", reason=str(emerg))
+                # Propagate so market_open can close all positions before returning
+                raise
             except TradingHalted as halt:
                 log.warning(f"✗ {sym} blocked by circuit breaker: {halt}")
                 trade_logger.log_event("gate_failed", "pead", sym,
@@ -387,7 +460,7 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today):
 # Each calls config.{STRATEGY}_SIZE_PCT, .{STRATEGY}_STOP_PCT, .{STRATEGY}_HOLD_DAYS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_meanrev(broker, cb, pv, slots, held, already_bought_today):
+def _run_meanrev(broker, cb, pv, slots, held, already_bought_today, sector_counts):
     """Mean Reversion: RSI<30 + Bollinger oversold + above SMA200. Hold ~14d."""
     if screen_meanrev is None:
         log.warning("MeanRev: screener not loaded — see import error above — skipping")
@@ -419,6 +492,12 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today):
             log.info(f"  ✗ {sym} SKIP — already bought today")
             trade_logger.log_event("order_skipped", "meanrev", sym,
                                    gate="idempotency", reason="already bought today")
+            continue
+
+
+        # Sector concentration guard
+        _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
+        if not _sector_gate(sym, sector_counts, _fkp, "meanrev", log):
             continue
 
         log.info(f"MeanRev BUY {sym} | RSI={c['rsi']} BBpos={c['bb_position']:.0f}% "
@@ -494,7 +573,7 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today):
             log.error(f"  ✗ MeanRev {sym} failed: {e}")
 
 
-def _run_insider(broker, cb, pv, slots, held, already_bought_today):
+def _run_insider(broker, cb, pv, slots, held, already_bought_today, sector_counts):
     """Insider P-Purchases: CEO/CFO conviction + cluster + $ value. Hold ~30d."""
     if screen_insider is None:
         log.warning("Insider: screener not loaded — see import error above — skipping")
@@ -527,6 +606,12 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today):
                                    gate="idempotency", reason="already bought today")
             continue
 
+
+        # Sector concentration guard
+        _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
+        if not _sector_gate(sym, sector_counts, _fkp, "insider", log):
+            continue
+
         log.info(f"Insider BUY {sym} | score={c['insider_score']:.0f} "
                  f"txns={c['n_transactions']} total=${c['total_dollar']:,.0f} | ${amount:,.0f}")
         try:
@@ -542,6 +627,11 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today):
                 cb.check_before_order(intended_notional=amount, symbol=sym)
                 trade_logger.log_event("gate_passed", "insider", sym,
                                        gate="circuit_breaker", amount=round(amount, 2))
+            except EmergencyLiquidation as emerg:
+                log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
+                trade_logger.log_event("gate_failed", "insider", sym,
+                                       gate="emergency_liquidation", reason=str(emerg))
+                raise
             except TradingHalted as halt:
                 log.warning(f"  ✗ {sym} circuit breaker: {halt}")
                 trade_logger.log_event("gate_failed", "insider", sym,
@@ -600,7 +690,7 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today):
             log.error(f"  ✗ Insider {sym} failed: {e}")
 
 
-def _run_squeeze(broker, cb, pv, slots, held, already_bought_today):
+def _run_squeeze(broker, cb, pv, slots, held, already_bought_today, sector_counts):
     """Short Squeeze: SI>15% + DTC>3 + bullish momentum. Hold ~21d."""
     if screen_squeeze is None:
         log.warning("Squeeze: screener not loaded — see import error above — skipping")
@@ -633,6 +723,12 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today):
                                    gate="idempotency", reason="already bought today")
             continue
 
+
+        # Sector concentration guard
+        _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
+        if not _sector_gate(sym, sector_counts, _fkp, "squeeze", log):
+            continue
+
         log.info(f"Squeeze BUY {sym} | SI={c['short_interest_pct']:.1f}%"
                  f" DTC={c['days_to_cover']:.1f}d mom={c['momentum_pct']:+.1f}% "
                  f"score={c['score']:.0f} | ${amount:,.0f}")
@@ -649,6 +745,11 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today):
                 cb.check_before_order(intended_notional=amount, symbol=sym)
                 trade_logger.log_event("gate_passed", "squeeze", sym,
                                        gate="circuit_breaker", amount=round(amount, 2))
+            except EmergencyLiquidation as emerg:
+                log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
+                trade_logger.log_event("gate_failed", "squeeze", sym,
+                                       gate="emergency_liquidation", reason=str(emerg))
+                raise
             except TradingHalted as halt:
                 log.warning(f"  ✗ {sym} circuit breaker: {halt}")
                 trade_logger.log_event("gate_failed", "squeeze", sym,
@@ -708,7 +809,7 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today):
             log.error(f"  ✗ Squeeze {sym} failed: {e}")
 
 
-def _run_breakout(broker, cb, pv, slots, held, already_bought_today):
+def _run_breakout(broker, cb, pv, slots, held, already_bought_today, sector_counts):
     """Breakout: price above 50d resistance + 1.5x volume confirmation. Hold ~21d."""
     if screen_breakout is None:
         log.warning("Breakout: screener not loaded — see import error above — skipping")
@@ -741,6 +842,12 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today):
                                    gate="idempotency", reason="already bought today")
             continue
 
+
+        # Sector concentration guard
+        _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
+        if not _sector_gate(sym, sector_counts, _fkp, "breakout", log):
+            continue
+
         log.info(f"Breakout BUY {sym} | price=${c['price']:.2f} "
                  f"clearance={c['clearance_pct']:+.2f}% vol={c['volume_ratio']}x "
                  f"ATR={c['atr_pct']:.1f}% score={c['score']:.0f} | ${amount:,.0f}")
@@ -757,6 +864,11 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today):
                 cb.check_before_order(intended_notional=amount, symbol=sym)
                 trade_logger.log_event("gate_passed", "breakout", sym,
                                        gate="circuit_breaker", amount=round(amount, 2))
+            except EmergencyLiquidation as emerg:
+                log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
+                trade_logger.log_event("gate_failed", "breakout", sym,
+                                       gate="emergency_liquidation", reason=str(emerg))
+                raise
             except TradingHalted as halt:
                 log.warning(f"  ✗ {sym} circuit breaker: {halt}")
                 trade_logger.log_event("gate_failed", "breakout", sym,
@@ -816,7 +928,7 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today):
             log.error(f"  ✗ Breakout {sym} failed: {e}")
 
 
-def _run_earnmom(broker, cb, pv, slots, held, already_bought_today):
+def _run_earnmom(broker, cb, pv, slots, held, already_bought_today, sector_counts):
     """Earnings Momentum: beat 8-45d ago, still drifting up. Hold ~35d."""
     if screen_earnmom is None:
         log.warning("EarnMom: screener not loaded — see import error above — skipping")
@@ -850,6 +962,12 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today):
                                    gate="idempotency", reason="already bought today")
             continue
 
+
+        # Sector concentration guard
+        _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
+        if not _sector_gate(sym, sector_counts, _fkp, "earnmom", log):
+            continue
+
         log.info(f"EarnMom BUY {sym} | surprise={c['surprise_pct']:+.1f}% "
                  f"age={c['age_days']}d drift={c['drift_pct']:+.1f}% score={c['score']:.0f} | ${amount:,.0f}")
         try:
@@ -865,6 +983,11 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today):
                 cb.check_before_order(intended_notional=amount, symbol=sym)
                 trade_logger.log_event("gate_passed", "earnmom", sym,
                                        gate="circuit_breaker", amount=round(amount, 2))
+            except EmergencyLiquidation as emerg:
+                log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
+                trade_logger.log_event("gate_failed", "earnmom", sym,
+                                       gate="emergency_liquidation", reason=str(emerg))
+                raise
             except TradingHalted as halt:
                 log.warning(f"  ✗ {sym} circuit breaker: {halt}")
                 trade_logger.log_event("gate_failed", "earnmom", sym,
@@ -954,8 +1077,10 @@ def run():
 
     log.info(f"Portfolio: ${pv:,.2f} | Positions: {pos_count} | Slots: {slots[0]}")
 
-    if circuit_breaker_tripped(pv, day_start):
-        day_pnl = (pv - day_start) / day_start * 100
+    # Circuit-breaker daily-loss check via the unified CircuitBreaker instance (Fix 7)
+    equity_now = float(broker.get_account().equity)
+    day_pnl = (equity_now - day_start) / day_start * 100
+    if day_pnl <= -cb.max_daily_loss * 100:
         log.warning(f"CIRCUIT BREAKER: day P&L {day_pnl:+.2f}% — NO new entries")
         return
 
@@ -991,7 +1116,37 @@ def run():
             log.warning(f"REGIME GATE: STAND_DOWN — {reg.reason} — holding cash, no screening")
             return
     else:
-        log.warning("Regime gate skipped: no SPY bars available — proceeding without gate")
+        log.warning("Regime gate SKIPPED: no SPY bars available.")
+        # Proceed with NEUTRAL regime so strategy still runs, but log explicitly
+        log.info("Regime: fallback NEUTRAL (SPY bars unavailable)")
+
+    # Emergency liquidation check before strategy loop
+    if cb.liquidation_required():
+        log.error("EMERGENCY LIQUIDATION: equity %%.2f%%%% below day-start")
+        try:
+            broker.cancel_all_orders()
+            positions = broker.get_positions()
+            for p in positions:
+                if is_base_symbol(p.symbol): continue
+                try:
+                    broker.close_position(p.symbol)
+                    log.info(f"  Emergency closed {p.symbol}")
+                except Exception as e:
+                    log.warning(f"  Emergency close {p.symbol} failed: {e}")
+        except Exception as e:
+            log.error(f"Emergency liquidation attempt failed: {e}")
+        send_trade_alert(action="EMERGENCY", ticker="ALL", shares=0, price=0,
+                         stop=0, target=0,
+                         reason="Emergency liquidation: emergency threshold breached")
+        trade_logger.log_event("emergency_liquidation", "all", None)
+        logger.banner(log, "EMERGENCY LIQUIDATION — NO STRATEGIES RUN")
+        return
+
+    # Build initial sector counts from held positions (FMP lookup)
+    fmp_key = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
+    sector_counts = _build_sector_counts(broker, fmp_key)
+    if sector_counts:
+        log.info(f"Sector snapshot: {sector_counts}")
 
     # ── STRATEGY ROUTER ───────────────────────────────────────────────────────
     # Run each strategy in priority order (PEAD → MEANREV → INSIDER → SQUEEZE →
@@ -1020,7 +1175,11 @@ def run():
 
         log.info(f"=== {strategy.upper()} RUNNER ===")
         try:
-            handler(broker, cb, pv, slots, held, already_bought_today)
+            handler(broker, cb, pv, slots, held, already_bought_today, sector_counts)
+        except EmergencyLiquidation:
+            raise  # propagate to outer handler
+        except TradingHalted:
+            pass  # already logged per-symbol in runner
         except Exception as e:
             log.error(f"Strategy {strategy.upper()} runner raised: {e}")
 

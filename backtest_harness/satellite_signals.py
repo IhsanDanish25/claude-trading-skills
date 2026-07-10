@@ -114,6 +114,53 @@ def _compression_score(atr_pct: float) -> float:
     return 0.0
 
 
+# ── ATR percentile filter (Fix 11 mirror: core/breakout_screener uses pct < 0.40) ──
+
+def _atr_percentile(closes: list[float], highs: list[float], lows: list[float]) -> float | None:
+    """
+    Percentile of the current 14-bar ATR within the past 50 historical ATRs.
+    Mirrors core.breakout_screener._atr_percentile exactly.
+    Returns a value 0–1. Lower = more compressed. Signals where ATR is
+    in the upper 60% (pct >= 0.40) should be rejected post-check.
+    """
+    n = len(closes)
+    if n < 55:
+        return None
+
+    # Build 50 historical 14-bar ATRs (one per trading day back).
+    atr_history: list[float] = []
+    for base in range(n - 50, n - 14):
+        trs = [
+            max(
+                highs[base + j + 1] - lows[base + j + 1],
+                abs(highs[base + j + 1] - closes[base + j]),
+                abs(lows[base + j + 1] - closes[base + j]),
+            )
+            for j in range(14)
+        ]
+        atr_history.append(sum(trs) / 14.0)
+
+    if len(atr_history) < 10:
+        return None
+
+    current_atr = atr_history[-1]
+    price = closes[-1]
+    if price <= 0:
+        return None
+    current_pct = (current_atr / price) * 100.0
+
+    # Compare each historical ATR% against the current to find percentile.
+    hist_pcts = [
+        (atr_history[k] / closes[n - 50 + k]) * 100.0
+        for k in range(len(atr_history))
+        if 0 <= n - 50 + k < n and closes[n - 50 + k] > 0
+    ]
+    if len(hist_pcts) < 10:
+        return None
+
+    return sum(1 for hp in hist_pcts if hp < current_pct) / len(hist_pcts)
+
+
 def get_historical_breakout_signals(
     store, symbols: list[str], start_date, end_date,
 ) -> list[dict]:
@@ -139,6 +186,8 @@ def get_historical_breakout_signals(
             continue
         closes = [b["close"] for b in bars]
         volumes = [b["volume"] for b in bars]
+        highs = [b["high"] for b in bars]
+        lows = [b["low"] for b in bars]
 
         for i in range(54, len(bars)):
             d = datetime.date.fromisoformat(bars[i]["date"])
@@ -166,6 +215,14 @@ def get_historical_breakout_signals(
                 continue
             atr = _atr14(bars[max(0, i - 14):i + 1])
             atr_pct = (atr / price * 100.0) if price > 0 else 0.0
+
+            # Fix 11 mirror: reject if ATR is in the upper 60% (not compressed enough).
+            # Mirrors core/breakout_screener.py: `_atr_percentile(bars)` filter.
+            if i + 1 > 55:
+                atp = _atr_percentile(closes[:i + 1], highs[:i + 1], lows[:i + 1])
+                if atp is not None and atp >= 0.40:
+                    continue  # ATR not compressed — skip
+
             score = (_clearance_score(price, high_50)
                      + _volume_score(current_vol, avg_vol, BREAKOUT_VOL_MULT)
                      + _compression_score(atr_pct))

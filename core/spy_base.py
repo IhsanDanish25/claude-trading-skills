@@ -13,6 +13,7 @@ Called by:
 from __future__ import annotations
 
 import logging
+import uuid
 
 from core import config
 from core.broker import BrokerClient
@@ -129,6 +130,13 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
 
     spy_price = broker.get_price("SPY")
 
+    # SPY governance: refuse to buy if it would push SPY above SPY_MAX_PCT
+    spy_pct = (info["spy_current"] + info["diff"]) / info["equity"] if info["equity"] > 0 else 0
+    max_pct = getattr(config, 'SPY_MAX_PCT', 0.93)
+    if spy_pct > max_pct:
+        log.warning("SPY BUY BLOCKED —would make SPY %.0f%% of equity (> %.0f%% cap)", spy_pct*100, max_pct*100)
+        return {"action": "exceeded_max_pct", "reason": f"SPY would be {spy_pct:.0%}>max{max_pct:.0%}", **info}
+
     if info["diff"] > 0:
         # Need to BUY more SPY
         buy_dollars = info["diff"]
@@ -139,7 +147,8 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
             from alpaca.trading.requests import MarketOrderRequest
             broker.trade.submit_order(MarketOrderRequest(
                 symbol="SPY", qty=qty, side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=TimeInForce.GTC,
+                client_order_id=f"spy-rebal-buy-{qty}",
             ))
             log.info(f"SPY base: bought {qty} @ ~${spy_price:.2f}")
             send_trade_alert(
@@ -166,7 +175,8 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
             from alpaca.trading.requests import MarketOrderRequest
             broker.trade.submit_order(MarketOrderRequest(
                 symbol="SPY", qty=qty, side=OrderSide.SELL,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=TimeInForce.GTC,
+                client_order_id=f"spy-rebal-sell-{qty}",
             ))
             log.info(f"SPY base: sold {qty} @ ~${spy_price:.2f}")
             send_trade_alert(
@@ -193,7 +203,8 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
                 try:
                     broker.trade.submit_order(MarketOrderRequest(
                         symbol="SPY", qty=qty, side=OrderSide.SELL,
-                        time_in_force=TimeInForce.DAY,
+                        time_in_force=TimeInForce.GTC,
+                        client_order_id=f"spy-rebal-sell-retry-{qty}",
                     ))
                     log.info(f"SPY base: sold {qty} @ ~${spy_price:.2f} (retry after cancel)")
                     send_trade_alert(
@@ -243,7 +254,8 @@ def free_cash_for_pead(broker: BrokerClient, amount_needed: float) -> bool:
     def _do_sell():
         return broker.trade.submit_order(MarketOrderRequest(
             symbol="SPY", qty=sell_qty, side=OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
+            time_in_force=TimeInForce.GTC,
+            client_order_id=f"spy-pead-sell-{sell_qty}",
         ))
 
     try:

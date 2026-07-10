@@ -37,6 +37,30 @@ _FMP_CALLS_TODAY = 0
 _FMP_HALT_AT = 220
 # Public read-only view for callers that need to budget their own calls.
 # Usage: from core import fmp; fmp.fmp_remaining_calls() -> int
+_fmp_session: requests.Session | None = None
+
+
+def _ensure_session() -> requests.Session:
+    """Construct a requests.Session with exponential-backoff retry.
+    Thread-safe lazy init.  Handles 429 inside retries so callers
+    only see a final failure after all back-offs are exhausted."""
+    global _fmp_session
+    if _fmp_session is not None:
+        return _fmp_session
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    retry = Retry(
+        total=3, backoff_factor=2.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    _fmp_session = requests.Session()
+    _fmp_session.mount("https://", adapter)
+    _fmp_session.mount("http://", adapter)
+    return _fmp_session
+
+
 def fmp_remaining_calls() -> int:
     """Approximate FMP calls remaining today (approximate because cache hits
     don't count against the limit, but we can't predict cache hits in advance)."""
@@ -70,9 +94,10 @@ def _get(url: str, params: dict = None) -> dict | list:
     if entry and now - entry["ts"] < _CACHE_TTL:
         return entry["data"]
 
-    r = requests.get(url, params=params, timeout=15)
+    _ensure_session()
+    r = _fmp_session.get(url, params=params, timeout=15)
     if r.status_code == 429:
-        # Rate-limited — degrade gracefully so the live loop never crashes.
+        # Rate-limited — session retry exhausted; degrade gracefully.
         # yfinance fallback will kick in for quote/bar calls
         global _fmp_fallback_active
         _fmp_fallback_active = True

@@ -35,7 +35,7 @@ from core.order_utils import order_field
 from core.config import (
     ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL,
     PAPER_TRADE, MAX_POSITION_SIZE_PCT, MAX_OPEN_POSITIONS,
-    STOP_LOSS_PCT, TAKE_PROFIT_PCT,
+    STOP_LOSS_PCT, TAKE_PROFIT_PCT, RISK_PCT, MAX_SPREAD_PCT,
 )
 from core.safe_oco_attach import safe_attach_oco
 
@@ -134,9 +134,21 @@ class BrokerClient:
             bid = float(getattr(q, "bid_price", 0) or 0)
             ask = float(getattr(q, "ask_price", 0) or 0)
             if bid > 0 and ask >= bid:
+                spread = ask - bid
                 mid = (bid + ask) / 2
-                if last is None or abs(mid - last) <= 0.10 * last:
-                    return mid
+                mid_price = mid
+                # Fix 19: reject wide spreads (stale quotes, low-liquidity names)
+                if mid_price > 0 and spread / mid_price > MAX_SPREAD_PCT:
+                    log.warning(
+                        "get_price %s: spread %.2f%% (>$MAX_SPREAD_PCT=%.0f%%) "
+                        "-- rejecting midpoint, falling back to last trade",
+                        symbol, spread / mid_price * 100, MAX_SPREAD_PCT * 100,
+                    )
+                    # Widen the spread → mid is unreliable; fall through to last trade
+                if mid_price > 0 and spread / mid_price <= MAX_SPREAD_PCT and (
+                    last is None or abs(mid_price - last) <= 0.10 * last
+                ):
+                    return mid_price
         except Exception as e:
             log.warning("get_price quote failed for %s: %s", symbol, e)
         if last is not None and last > 0:
@@ -159,20 +171,24 @@ class BrokerClient:
         Submission is wrapped in safe_attach_oco, which retries once a stale
         sell order for this symbol is cancelled if Alpaca rejects the order
         with error 40310000 ("insufficient qty available for order")."""
+        # STOP_LIMIT_BUFFER_PCT: stop-limit fills cap slippage at 1.5% below
+        # the stop price on gap-down opens. Trade-off: stop-limit orders do
+        # not participate in the open/close auction (Alpaca docs). Accepted.
+        stop_limit = max(round(stop * 0.985, 2), stop - 0.05)
         def _submit():
             if target is not None:
                 self.trade.submit_order(LimitOrderRequest(
                     symbol=symbol, qty=qty, side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC, order_class=OrderClass.OCO,
                     take_profit=TakeProfitRequest(limit_price=target),
-                    stop_loss=StopLossRequest(stop_price=stop),
+                    stop_loss=StopLossRequest(stop_price=stop, limit_price=stop_limit),
                 ))
                 log.info(f"  ↳ OCO attached: stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]")
             else:
                 self.trade.submit_order(StopOrderRequest(
                     symbol=symbol, qty=qty, side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC, order_class=OrderClass.SIMPLE,
-                    stop_price=stop,
+                    stop_price=stop, limit_price=stop_limit,
                 ))
                 log.info(f"  ↳ SIMPLE STOP attached (no cap): stop @ ${stop:.2f} x{qty} [{symbol}]")
         try:
@@ -227,12 +243,18 @@ class BrokerClient:
 
         MIN_ORDER_PRICE = 1.00  # reject sub-dollar stocks to prevent unrealistic share counts
 
-        if dollar_amount:
-            qty = max(1, int(dollar_amount / ref_price)) if ref_price >= MIN_ORDER_PRICE else 0
-        elif shares:
+        # ── PRIMARY: risk-parity sizing ──────────────────────────────────────────
+        # Size = equity × RISK_PCT / stop_pct  →  each position risks RISK_PCT of equity
+        # at the defined stop distance. SIZE_PCT acts as a hard ceiling on notional.
+        if shares is not None:
             qty = shares
+        elif ref_price >= MIN_ORDER_PRICE:
+            risk_qty = max(1, int((equity * RISK_PCT) / (ref_price * stop_loss_pct)))
+            # SIZE_PCT ceiling: prevent single-name from exceeding MAX_POSITION_SIZE_PCT
+            size_qty = max(1, int(remaining_cap / ref_price))
+            qty = min(risk_qty, size_qty)
         else:
-            qty = max(1, int(remaining_cap / ref_price)) if ref_price >= MIN_ORDER_PRICE else 0
+            qty = 0
 
         if qty < 1:
             log.warning("BUY %s BLOCKED — ref_price $%.4f below $%.2f minimum",

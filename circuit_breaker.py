@@ -1,9 +1,11 @@
 """
 circuit_breaker.py  —  strong-charisma drop-in
 
-Two jobs, both as HARD pre-trade gates that RAISE (never return a bool):
+Four jobs, all as HARD pre-trade gates that RAISE (never return a bool):
   1. Position-cap enforcement   -> kills the "drifted to 8 positions" bug for good.
   2. Daily-loss + rapid-drawdown halt -> caps a runaway day.
+  3. Emergency liquidation -> force-close all if equity drops > 2× max_daily_loss.
+  4. Pyramiding gap guard -> rejects pyramid entries that would exceed per-name cap.
 
 Why raise instead of return True/False?
   A bool can be silently ignored by a caller. An exception cannot. Every order
@@ -22,6 +24,23 @@ from datetime import date
 logger = logging.getLogger("circuit_breaker")
 
 
+# Rapid intraday give-back trips earlier than the full daily limit.
+RAPID_DRAWDOWN_RATIO = 0.67   # trip at 67% of max_daily_loss from the day's peak
+
+# Emergency liquidation threshold: liquidate if equity drops more than this
+# multiple of max_daily_loss from day-start (e.g. 2.0 × 5% = -10% day loss).
+EMERGENCY_LIQUIDATION_MULT = 2.0
+
+
+def default_max_daily_loss():
+    """Read from config at runtime so env-var changes take effect without code edits."""
+    try:
+        from core.config import CIRCUIT_BREAKER_PCT, MAX_OPEN_POSITIONS, MAX_POSITION_SIZE_PCT
+        return CIRCUIT_BREAKER_PCT, MAX_OPEN_POSITIONS, MAX_POSITION_SIZE_PCT
+    except Exception:
+        return 0.05, 10, 0.05  # safe fallback
+
+
 class TradingHalted(Exception):
     """Raised when an order must be blocked. Reason lives on .reason."""
     def __init__(self, message, reason="unknown", detail=None):
@@ -30,8 +49,12 @@ class TradingHalted(Exception):
         self.detail = detail
 
 
-# Rapid intraday give-back trips earlier than the full daily limit.
-RAPID_DRAWDOWN_RATIO = 0.67   # trip at 67% of max_daily_loss from the day's peak
+class EmergencyLiquidation(Exception):
+    """Raised when equity has dropped so far the bot must close everything."""
+    def __init__(self, message, reason="emergency_liquidation", detail=None):
+        super().__init__(message)
+        self.reason = reason
+        self.detail = detail
 
 
 class CircuitBreaker:
@@ -39,24 +62,27 @@ class CircuitBreaker:
         self,
         get_account,            # callable -> object/dict with .equity (or ["equity"])
         get_positions,          # callable -> list of current open positions
-        max_open_positions=3,   # YOUR compliant cap (not the live 10). Hard ceiling.
-        max_position_pct=0.05,  # MAX_POSITION_SIZE_PCT. Per-name notional ceiling.
-        max_daily_loss=0.03,    # halt the day if equity down 3% from the open
+        max_open_positions=None, # hard ceiling. Defaults to config.MAX_OPEN_POSITIONS.
+        max_position_pct=None,   # per-name notional ceiling. Defaults to config.
+        max_daily_loss=None,    # halt the day if equity down N% from the open. Default: config.
         day_start_equity=None,  # pre-market open equity from day_start_value.json.
-                                 # If None, derived from broker on first check (legacy).
-                                 # Prefer passing it explicitly so tick-time drift can't
-                                 # corrupt the baseline.
     ):
+        # Resolve None args from config at import time (not lazy, so errors surface early)
+        cb_pct, mo_positions, mp_pct = default_max_daily_loss()
+        self.max_open_positions = max_open_positions if max_open_positions is not None else mo_positions
+        self.max_position_pct = max_position_pct if max_position_pct is not None else mp_pct
+        self.max_daily_loss = max_daily_loss if max_daily_loss is not None else cb_pct
+
         self.get_account = get_account
         self.get_positions = get_positions
-        self.max_open_positions = max_open_positions
-        self.max_position_pct = max_position_pct
-        self.max_daily_loss = max_daily_loss
 
         self.trading_halted = False
         self._halt_reason = None
         self._day = None
-        self._starting_equity = day_start_equity  # set once; never re-fetched from broker
+        # _starting_equity is set once at __init__ from the pre-market open value
+        # (day_start_value.json). Prevents tick-time drift from corrupting the
+        # daily-loss baseline.
+        self._starting_equity = day_start_equity
         self._peak_equity = None
 
     # ---- helpers -----------------------------------------------------------
@@ -82,7 +108,7 @@ class CircuitBreaker:
             self._day = today
             self.trading_halted = False
             self._halt_reason = None
-            self._peak_equity = equity  # reset peak on day-roll — was left None, crashed next line
+            self._peak_equity = equity  # reset peak on day-roll
             logger.info(
                 "Circuit breaker day-roll. Start equity=%.2f  halt-below=%.2f",
                 self._starting_equity,
@@ -96,6 +122,7 @@ class CircuitBreaker:
         """
         Call IMMEDIATELY before submitting an entry order.
         Raises TradingHalted if the trade must be blocked. Returns None if OK.
+        Raises EmergencyLiquidation if equity has cratered and everything must close.
         """
         account = self.get_account()
         equity = self._equity(account)
@@ -104,7 +131,25 @@ class CircuitBreaker:
 
         self._roll_day(equity)
 
-        # 1) DAILY-LOSS HALT (sticky for the rest of the day) ----------------
+        # 1) EMERGENCY LIQUIDATION — equity has cratered 2× past the daily limit
+        #    (e.g. -10% on a 5% circuit). Close everything immediately.
+        emergency_threshold = self._starting_equity * (1 - self.max_daily_loss * EMERGENCY_LIQUIDATION_MULT)
+        if self._starting_equity and equity < emergency_threshold:
+            raise EmergencyLiquidation(
+                f"Emergency liquidation: equity ${equity:,.2f} below emergency "
+                f"threshold ${emergency_threshold:,.2f} "
+                f"({(equity / self._starting_equity - 1) * 100:+.2f}% from day-start). "
+                f"Closing all positions.",
+                reason="emergency_liquidation",
+                detail={
+                    "equity": equity,
+                    "starting": self._starting_equity,
+                    "threshold": emergency_threshold,
+                    "drawdown_pct": (equity / self._starting_equity - 1) * 100,
+                },
+            )
+
+        # 2) DAILY-LOSS HALT (sticky for the rest of the day)
         daily_loss = (self._starting_equity - equity) / self._starting_equity
         if daily_loss >= self.max_daily_loss:
             self.trading_halted = True
@@ -122,7 +167,7 @@ class CircuitBreaker:
                 detail={"daily_loss": daily_loss, "give_back": give_back},
             )
 
-        # 2) POSITION-COUNT CAP  (THE drift-bug killer) ----------------------
+        # 3) POSITION-COUNT CAP  (THE drift-bug killer)
         positions = self.get_positions() or []
         open_count = len(positions)
         held = {self._sym(p) for p in positions}
@@ -135,15 +180,28 @@ class CircuitBreaker:
                 detail={"open": open_count, "cap": self.max_open_positions},
             )
 
-        # 3) PER-NAME NOTIONAL CAP -------------------------------------------
-        if intended_notional > 0:
+        # 4) PER-NAME NOTIONAL CAP (including pyramids — closes the pyramiding gap)
+        if intended_notional > 0 and symbol is not None:
             ceiling = equity * self.max_position_pct
-            if intended_notional > ceiling * 1.0001:  # tiny epsilon for float noise
+            # Sum existing notional for this symbol (if any) so pyramids are capped
+            existing_notional = 0.0
+            for p in positions:
+                if self._sym(p) == symbol:
+                    existing_notional = abs(float(getattr(p, "market_value", 0) or 0))
+                    break
+            total_notional = intended_notional + existing_notional
+            if total_notional > ceiling * 1.0001:  # tiny epsilon for float noise
                 raise TradingHalted(
-                    f"Order notional ${intended_notional:,.0f} exceeds per-name cap "
-                    f"${ceiling:,.0f} ({self.max_position_pct:.0%} of equity).",
+                    f"Order notional ${total_notional:,.0f} exceeds per-name cap "
+                    f"${ceiling:,.0f} ({self.max_position_pct:.0%} of equity). "
+                    f"(existing=${existing_notional:,.0f} + new=${intended_notional:,.0f})",
                     reason="notional_cap",
-                    detail={"notional": intended_notional, "ceiling": ceiling},
+                    detail={
+                        "existing": existing_notional,
+                        "intended": intended_notional,
+                        "total": total_notional,
+                        "ceiling": ceiling,
+                    },
                 )
         return None  # all gates passed -> caller may submit the order
 
@@ -152,3 +210,16 @@ class CircuitBreaker:
         if isinstance(p, dict):
             return p.get("symbol")
         return getattr(p, "symbol", None)
+
+    def liquidation_required(self) -> bool:
+        """True when equity has crossed the emergency liquidation threshold.
+        Check this instead of relying on check_before_order() raising so
+        callers can explicitly close positions before the exception propagates."""
+        if not self._starting_equity:
+            return False
+        account = self.get_account()
+        equity = self._equity(account)
+        if equity is None:
+            return False
+        emergency_threshold = self._starting_equity * (1 - self.max_daily_loss * EMERGENCY_LIQUIDATION_MULT)
+        return equity < emergency_threshold

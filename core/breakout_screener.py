@@ -134,6 +134,28 @@ def _volume_score(current_vol: float, avg_vol: float, mult: float) -> float:
     return min(30.0, (ratio - mult) * 15.0 + 10.0)
 
 
+def _atr_percentile(bars: list[dict]) -> float | None:
+    if len(bars) < 55:
+        return None
+    n = 14
+    atr_history = []
+    for i in range(n, min(51, len(bars) - 1)):
+        trs = []
+        for j in range(max(0, i - n), i):
+            high = bars[j]["high"]
+            low  = bars[j]["low"]
+            prev = bars[j - 1]["close"]
+            tr = max(high - low, abs(high - prev), abs(low - prev))
+            trs.append(tr)
+        if len(trs) == n:
+            atr_history.append(sum(trs) / n)
+    if len(atr_history) < 10:
+        return None
+    current_atr = atr_history[-1]
+    pct = sum(1 for v in atr_history if v < current_atr) / len(atr_history)
+    return round(pct, 3)
+
+
 def screen() -> list[dict]:
     """
     Run breakout screen. Returns candidates sorted by breakout_score.
@@ -198,17 +220,26 @@ def screen() -> list[dict]:
             comp_score = _compression_score(atr_pct)
             total = cl_score + vol_score + comp_score
 
+            # Fix 11: skip if ATR is in the upper 60% — not compressed enough
+            ap = _atr_percentile(bars)
+            base_duration_pct = ap if ap is not None else 0.3
+            if base_duration_pct >= 0.40:
+                log.debug("Breakout %s: ATR pct=%.1f%% (not compressed) — skipping",
+                          sym, base_duration_pct * 100)
+                continue
+
             candidates.append({
-                "symbol":          sym,
-                "price":           round(price, 2),
-                "sma50":           round(sma50, 2),
-                "high_50d":        round(high_50, 2),
-                "clearance_pct":   round((price - high_50) / high_50 * 100, 2) if high_50 else 0,
-                "volume_ratio":    round(vol_ratio, 2),
-                "atr_pct":         round(atr_pct, 2),
-                "avg_volume":      round(avg_vol),
-                "current_volume":  round(current_vol),
-                "score":           round(total, 1),
+                "symbol":            sym,
+                "price":             round(price, 2),
+                "sma50":             round(sma50, 2),
+                "high_50d":          round(high_50, 2),
+                "clearance_pct":     round((price - high_50) / high_50 * 100, 2) if high_50 else 0,
+                "volume_ratio":      round(vol_ratio, 2),
+                "atr_pct":           round(atr_pct, 2),
+                "base_duration_pct": round(base_duration_pct, 3),
+                "avg_volume":        round(avg_vol),
+                "current_volume":    round(current_vol),
+                "score":             round(total, 1),
             })
         except Exception as e:
             log.debug("Breakout %s: %s", sym, e)

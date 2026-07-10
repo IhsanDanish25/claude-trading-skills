@@ -20,7 +20,7 @@ from core.broker   import BrokerClient
 from core.fmp      import get_quotes, get_market_breadth
 from core.analyst  import review_open_positions, analyze_market_regime, score_vcp_candidates
 from core.screener import screen
-from core.edge     import should_pyramid, compute_trail_stop, circuit_breaker_tripped
+from core.edge     import should_pyramid, compute_trail_stop
 from core.spy_base import rebalance_to_spy, log_status as spy_log, is_base_symbol
 from core.order_utils import order_field as _order_field
 from core.notifier import send_trade_alert
@@ -113,11 +113,16 @@ def run():
     except (FileNotFoundError, ValueError, KeyError):
         pass
 
-    if circuit_breaker_tripped(pv, day_start):
-        day_pnl = (pv - day_start) / day_start * 100
+    equity_now = float(broker.get_account().equity)
+    day_pnl = (equity_now - day_start) / day_start * 100
+    # Use the same hard halt threshold as CircuitBreaker (5% default).
+    # market_open.py uses cb.max_daily_loss * 100; mirror it here directly
+    # so midday and open use identical logic (no config read path divergence).
+    CB_THRESHOLD = getattr(config, "CIRCUIT_BREAKER_PCT", 0.05) * 100
+    if day_pnl <= -CB_THRESHOLD:
         log.warning(f"CIRCUIT BREAKER: day P&L {day_pnl:+.2f}% — NO new entries, NO new pyramids")
         return
-    log.info(f"Day P&L OK ({((pv - day_start) / day_start * 100):+.2f}%) — circuit breaker clear")
+    log.info(f"Day P&L OK ({day_pnl:+.2f}%) — circuit breaker clear")
 
     breadth = get_market_breadth()
     regime  = analyze_market_regime(breadth)

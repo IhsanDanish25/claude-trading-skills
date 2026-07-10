@@ -63,6 +63,7 @@ MIN_PRICE             = float(os.environ.get("MIN_PRICE", "5.0"))
 MAX_PRICE             = float(os.environ.get("MAX_PRICE", "500.0"))
 MIN_COMPOSITE_SCORE   = int(os.environ.get("MIN_COMPOSITE_SCORE", "20"))
 RISK_PCT              = float(os.environ.get("RISK_PCT", "0.01"))
+MAX_SPREAD_PCT        = float(os.environ.get("MAX_SPREAD_PCT", "0.02"))  # wide-spread guard in get_price
 
 # ── Edge upgrades ─────────────────────────────────────────────────────────────
 ENTRY_DELAY_MIN       = int(os.environ.get("ENTRY_DELAY_MIN", "20"))
@@ -170,6 +171,10 @@ EARNMOM_LIMIT            = int(os.environ.get("EARNMOM_LIMIT", "5"))
 SPY_BASE_ENABLED      = os.environ.get("SPY_BASE_ENABLED", "true").lower() == "true"
 SPY_CASH_RESERVE_PCT  = float(os.environ.get("SPY_CASH_RESERVE_PCT", "0.10"))
 SPY_REBALANCE_BAND    = float(os.environ.get("SPY_REBALANCE_BAND", "0.05"))
+# Governance: hard cap prevents SPY from consuming the entire portfolio.
+# SPY_EXEMPT from circuit breaker — this is the structural base position.
+SPY_MAX_PCT           = float(os.environ.get("SPY_MAX_PCT",          "0.93"))  # % of equity
+SPY_MAX_POSITIONS     = int(os.environ.get("SPY_MAX_POSITIONS",     "1"))     # shares outstanding
 
 # ── Timezone ──────────────────────────────────────────────────────────────────
 TIMEZONE = "America/New_York"

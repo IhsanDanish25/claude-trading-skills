@@ -47,6 +47,41 @@ from core.config import STATE_DIR
 CATCHUP_FILE = os.path.join(STATE_DIR, ".scheduler_ran_today.json")
 CATCHUP_MAX_AGE_HOURS = 2.0
 
+# ── Fix 8: Alpaca-backed dedup (resilient to Railway ephemeral filesystem) ───
+def _market_open_ran_today() -> bool:
+    """
+    Double-check: even if the state-file was lost due to a redeploy, we can
+    still verify that a routine ran today via Alpaca order history.
+
+    If market_open already filled BUY orders today → market_open already ran.
+    If no orders filled today → market_open may not have run; let catchup fire.
+    """
+    try:
+        from core.broker import BrokerClient
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        import datetime as _dt, pytz as _pytz
+        ET = _pytz.timezone("America/New_York")
+        today_open = _dt.datetime.now(ET).replace(
+            hour=9, minute=30, second=0, microsecond=0
+        )
+        # Query orders filled today (after market open window)
+        broker = BrokerClient()
+        orders = broker.trade.get_orders(
+            GetOrdersRequest(
+                status=QueryOrderStatus.CLOSED,
+                after=today_open.isoformat(),
+                limit=10,
+            )
+        )
+        # Anything filled today is proof that a BUY routine ran
+        for o in orders:
+            if o.side.value == "buy" and (o.filled_qty or 0) > 0:
+                return True
+        return False
+    except Exception:
+        return False  # Fail-safe: if we can't check, let catchup fire
+
 
 def get_routine(now: datetime.datetime):
     h, m, wd = now.hour, now.minute, now.weekday()
@@ -74,6 +109,11 @@ def get_catchup_routine(now: datetime.datetime):
 
     for (sched_h, m_min, m_max, module) in catchup_targets:
         if module in ran_today:
+            continue
+        # Fix 8: double-check against Alpaca so a lost state-file doesn't
+        # cause a false-positive "already ran" claim after a Railway redeploy.
+        if module == "routines.market_open" and _market_open_ran_today():
+            log.info("market_open: ran today (Alpaca history confirms)")
             continue
         scheduled = now.replace(hour=sched_h, minute=m_max, second=0, microsecond=0)
         age_hours = (now - scheduled).total_seconds() / 3600.0

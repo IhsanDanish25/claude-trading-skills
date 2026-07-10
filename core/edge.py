@@ -14,7 +14,7 @@ Pack 2:
   8.  Earnings blackout — earnings_clear(): block entries within EARNINGS_BLACKOUT_DAYS
   9.  Sector cap        — sector_concentration_ok(): cap entries per sector
   10. Pyramiding        — should_pyramid(): add to winners past PYRAMID_TRIGGER_PCT
-  11. Circuit breaker   — circuit_breaker_tripped(): halt buys on a bad day
+  11. Circuit breaker   — use CircuitBreaker from circuit_breaker.py (raises on halt)
   12. Intraday trail    — compute_trail_stop(): ratchet stop up, never down
 """
 from __future__ import annotations
@@ -201,7 +201,19 @@ def should_pyramid(position: dict) -> bool:
 
 
 def circuit_breaker_tripped(portfolio_value: float, day_start_value: float) -> bool:
-    """Halt new buys when the day's drawdown breaches CIRCUIT_BREAKER_PCT."""
+    """
+    DEPRECATED — routing to CircuitBreaker.check_before_order() instead.
+
+    CircuitBreaker is instantiated in market_open and midday_review with
+    day_start_equity from day_start_value.json, and raises TradingHalted
+    on breach. This function is kept as a no-op shim to avoid import errors
+    in any callers that still reference it (they should migrate to CircuitBreaker).
+    """
+    import warnings
+    warnings.warn(
+        "circuit_breaker_tripped is deprecated — use CircuitBreaker from circuit_breaker.py",
+        DeprecationWarning, stacklevel=2,
+    )
     if not day_start_value or day_start_value <= 0:
         return False
     day_pnl_pct = (portfolio_value - day_start_value) / day_start_value * 100
