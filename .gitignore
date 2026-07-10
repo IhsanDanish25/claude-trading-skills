@@ -51,3 +51,15 @@ htmlcov/
 .coverage
 # .secrets.baseline is tracked — needed by detect-secrets pre-commit hook
 .aider*
+
+# Local dev scripts & generated artifacts
+chart.spy.html
+railway_mcp_proxy.js
+setup_railway_mcp.py
+
+# Backtest run output (live results, not code)
+backtests/
+
+# Nested duplicate clone (accidental local copy)
+claude-trading-skills/
+validate_pead.py
