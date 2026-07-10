@@ -43,6 +43,33 @@ _axiom_client = None
 _axiom_init_done = False
 
 
+def _ensure_dataset(token: str, dataset: str) -> None:
+    """Create the dataset if it does not already exist (idempotent PUT).
+
+    Uses stdlib urllib so no new dependency needed. Railway's xaat- token
+    authenticates from inside the container even though it 403s from outside.
+    Best-effort: never raises — callers treat a missing dataset as a degraded
+    but non-fatal condition."""
+    import urllib.request
+    url = f"https://api.axiom.co/v1/datasets/{dataset}"
+    payload = json.dumps({"name": dataset, "description": "Live trade decision log — strong-charisma bot"}).encode()
+    req = urllib.request.Request(
+        url, data=payload, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="PUT"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            log.info("Axiom dataset '%s' created (HTTP %s)", dataset, resp.status)
+    except urllib.error.HTTPError as e:
+        if e.code == 409:
+            log.debug("Axiom dataset '%s' already exists (HTTP 409 — OK)", dataset)
+        elif e.code == 403:
+            log.warning("Axiom dataset auto-create failed: 403 — check token permissions in app.axiom.co/settings/tokens")
+        else:
+            log.warning("Axiom dataset auto-create failed (HTTP %s): %s", e.code, e.reason)
+    except Exception as e:
+        log.warning("Axiom dataset auto-create failed: %s", e)
+
+
 def _get_axiom():
     """Lazily construct the Axiom client once. Returns None if unconfigured or
     unavailable — callers treat None as 'Axiom disabled, use jsonl only'."""
@@ -53,6 +80,7 @@ def _get_axiom():
     if not AXIOM_API_TOKEN:
         log.info("Axiom logging disabled — AXIOM_API_TOKEN not set (jsonl-only)")
         return None
+    _ensure_dataset(AXIOM_API_TOKEN, AXIOM_DATASET)
     try:
         from axiom_py import Client
         _axiom_client = Client(token=AXIOM_API_TOKEN, org_id=AXIOM_ORG_ID or None)
