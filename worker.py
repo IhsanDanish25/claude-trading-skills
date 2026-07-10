@@ -28,6 +28,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from core import trade_logger
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | worker | %(message)s",
@@ -206,6 +208,13 @@ def startup_health_check() -> None:
         log.info("  %s  %s", time_str, label)
 
     log.info("HEALTH CHECK COMPLETE")
+    # Eagerly init Axiom so the dataset auto-creates on startup (before first trade).
+    # _get_axiom() runs _ensure_dataset() which PUTs /v1/datasets/trade-decisions.
+    # Idempotent: 409 = already exists, other errors silently degrade to jsonl-only.
+    if trade_logger._get_axiom():
+        log.info("Axiom dataset ready for ingest")
+    else:
+        log.warning("Axiom unavailable — trade-decision logging degrades to jsonl-only")
     log.info("=" * 50)
 
 
