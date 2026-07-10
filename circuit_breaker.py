@@ -82,6 +82,7 @@ class CircuitBreaker:
             self._day = today
             self.trading_halted = False
             self._halt_reason = None
+            self._peak_equity = equity  # reset peak on day-roll — was left None, crashed next line
             logger.info(
                 "Circuit breaker day-roll. Start equity=%.2f  halt-below=%.2f",
                 self._starting_equity,
