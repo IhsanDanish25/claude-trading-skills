@@ -25,13 +25,25 @@ from core.config import (
     EARNMOM_MIN_DRIFT_PCT,
     EARNMOM_MIN_PRICE,
     EARNMOM_MIN_SURPRISE_PCT,
+    GAPFILL_MIN_GAP_PCT,
+    GAPFILL_MAX_GAP_PCT,
+    GAPFILL_MIN_PRICE,
+    GAPFILL_MIN_VOLUME,
     MEANREV_BB_THRESHOLD,
     MEANREV_MIN_AVG_VOLUME,
     MEANREV_MIN_PRICE,
     MEANREV_RSI_THRESHOLD,
+    MOMENTUM_MIN_AVG_VOLUME,
+    MOMENTUM_MIN_MOMENTUM_PCT,
+    MOMENTUM_MIN_PRICE,
+    MOMENTUM_STREAK_DAYS,
     PEAD_MIN_AVG_VOLUME,
     PEAD_MIN_PRICE,
     PEAD_MIN_SURPRISE_PCT,
+    SECTOR_MIN_AVG_VOLUME,
+    SECTOR_MIN_PRICE,
+    SECTOR_MIN_RS,
+    SECTOR_MAX_GAP_PCT,
 )
 
 _EARNMOM_MIN_AGE = 8   # drift phase starts day 8 (gap-fill done, thesis confirmed)
@@ -472,3 +484,212 @@ def get_historical_meanrev_signals(
 
     out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
     return out
+
+
+# ── Sector universe for backtest ─────────────────────────────────────────────
+# Mirrors core/sector_screener.py SECTOR_UNIVERSE
+_SECTOR_UNIVERSE: dict[str, list[str]] = {
+    "Technology":   ["NVDA","AMD","META","ADBE","CRM","PANW","CRWD","SNOW","DDOG","NET"],
+    "Consumer":      ["TSLA","NFLX","MELI","SHOP","PINS","COIN","RIVN"],
+    "Healthcare":    ["ISRG","DXCM","REGN","MRNA","ELV","CNC"],
+    "Financials":    ["JPM","GS","AXP","SCHW","COIN"],
+    "Industrials":   ["GE","CAT","RTX","HON","PCAR","AXON"],
+    "Energy":        ["FSLR","ENPH","ON","AEHR","SMCI"],
+    "Communications": ["GOOGL","AMZN","OMC","CHTR"],
+}
+
+
+def get_historical_gapfill_signals(
+    store, symbols: list[str], start_date, end_date,
+) -> list[dict]:
+    """Gap Fill: gap > GAPFILL_MIN_GAP_PCT at open vs prior close.
+
+    Mirrors core/gapfill_screener.py exactly.
+    Entry day D = day of the gap. Enter at next trading day's open.
+    Returns {symbol, date, surprise_pct} rows where surprise_pct carries gap%.
+    """
+    start = start_date if isinstance(start_date, datetime.date) else datetime.date.fromisoformat(start_date)
+    end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
+    out: list[dict] = []
+
+    for sym in symbols:
+        bars = store.series.get(sym, [])
+        if len(bars) < 25:
+            continue
+        opens   = [b["open"]   for b in bars]
+        closes  = [b["close"]  for b in bars]
+        volumes = [b["volume"] for b in bars]
+
+        for i in range(1, len(bars)):
+            prev_close = closes[i - 1]
+            if prev_close <= 0:
+                continue
+            today_open = opens[i] if "open" in bars[i] else closes[i]
+            gap_pct    = (today_open - prev_close) / prev_close * 100.0
+            if abs(gap_pct) < GAPFILL_MIN_GAP_PCT or abs(gap_pct) > GAPFILL_MAX_GAP_PCT:
+                continue
+            d = datetime.date.fromisoformat(bars[i]["date"])
+            if d < start or d > end:
+                continue
+            price = closes[i]
+            if price < GAPFILL_MIN_PRICE:
+                continue
+            avg_vol = _avg(volumes[max(0, i - 19):i])
+            if avg_vol < GAPFILL_MIN_VOLUME:
+                continue
+            out.append({
+                "symbol": sym,
+                "date": bars[i]["date"],
+                "surprise_pct": round(gap_pct, 2),
+                "gap_pct": round(gap_pct, 2),
+                "prior_close": round(prev_close, 2),
+            })
+
+    out.sort(key=lambda r: (r["date"], -abs(r["surprise_pct"])))
+    return out
+
+
+def get_historical_momentum_signals(
+    store, symbols: list[str], start_date, end_date,
+) -> list[dict]:
+    """Momentum: N-day consecutive up closes with volume confirmation.
+
+    Mirrors core/momentum_screener.py exactly.
+    Entry at next trading day's open after the N-streak day.
+    Returns {symbol, date, surprise_pct} where surprise_pct = streak score.
+    """
+    start = start_date if isinstance(start_date, datetime.date) else datetime.date.fromisoformat(start_date)
+    end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
+    out: list[dict] = []
+
+    for sym in symbols:
+        bars = store.series.get(sym, [])
+        if len(bars) < _SMA200_PERIOD + MOMENTUM_STREAK_DAYS + 5:
+            continue
+        closes  = [b["close"]  for b in bars]
+        volumes = [b["volume"] for b in bars]
+
+        for i in range(MOMENTUM_STREAK_DAYS, len(bars)):
+            window_closes = closes[:i + 1]
+            sma200 = _sma(window_closes, _SMA200_PERIOD)
+            if sma200 is None or closes[i] <= sma200:
+                continue
+            price = closes[i]
+            if price < MOMENTUM_MIN_PRICE:
+                continue
+            streak = 0
+            for j in range(i - 1, i - MOMENTUM_STREAK_DAYS - 1, -1):
+                if j < 1:
+                    break
+                if closes[j] > closes[j - 1]:
+                    streak += 1
+                else:
+                    break
+            if streak < MOMENTUM_STREAK_DAYS:
+                continue
+            momentum_pct = (closes[i] - closes[i - MOMENTUM_STREAK_DAYS]) / closes[i - MOMENTUM_STREAK_DAYS] * 100.0
+            if momentum_pct < MOMENTUM_MIN_MOMENTUM_PCT:
+                continue
+            avg_vol = _avg(volumes[max(0, i - 24):i - MOMENTUM_STREAK_DAYS + 1])
+            if avg_vol < MOMENTUM_MIN_AVG_VOLUME:
+                continue
+            d = datetime.date.fromisoformat(bars[i]["date"])
+            if d < start or d > end:
+                continue
+            out.append({
+                "symbol": sym,
+                "date": bars[i]["date"],
+                "surprise_pct": round(streak * 10 + min(momentum_pct, 10), 2),
+                "streak_days": streak,
+                "momentum_pct": round(momentum_pct, 2),
+            })
+
+    out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
+    return out
+
+
+def get_historical_sector_signals(
+    store, symbols: list[str], start_date, end_date,
+) -> list[dict]:
+    """Sector Rotation: top sector leaders above SMA200 with RS > SECTOR_MIN_RS.
+
+    Mirrors core/sector_screener.py. Returns top candidate per sector per date.
+    Returns {symbol, date, surprise_pct} where surprise_pct = combined score.
+    """
+    start = start_date if isinstance(start_date, datetime.date) else datetime.date.fromisoformat(start_date)
+    end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
+    out: list[dict] = []
+
+    sym_to_sector: dict[str, str] = {}
+    for sector, syms in _SECTOR_UNIVERSE.items():
+        for s in syms:
+            sym_to_sector[s] = sector
+
+    sector_rets_21: dict[str, list[float]] = {s: [] for s in _SECTOR_UNIVERSE}
+    for sym in {s for syms in _SECTOR_UNIVERSE.values() for s in syms}:
+        bars = store.series.get(sym) or []
+        if len(bars) < _SMA200_PERIOD + 21:
+            continue
+        close_list = [b["close"] for b in bars]
+        for i in range(_SMA200_PERIOD, len(bars) - 21):
+            ret21 = (close_list[min(i + 22, len(close_list) - 1)] - close_list[i]) / close_list[i] * 100.0
+            sector = sym_to_sector.get(sym)
+            if sector and sector in sector_rets_21:
+                sector_rets_21[sector].append(ret21)
+
+    sector_avg_ret: dict[str, float] = {sec: _avg(rets) if rets else 0.0 for sec, rets in sector_rets_21.items()}
+    ranked_sectors = sorted(sector_avg_ret.items(), key=lambda x: x[1], reverse=True)
+    top_sectors = {s for s, _ in ranked_sectors[:4]}
+
+    for sym in symbols:
+        sector = sym_to_sector.get(sym)
+        if not sector or sector not in top_sectors:
+            continue
+        bars = store.series.get(sym) or []
+        if len(bars) < _SMA200_PERIOD + 22:
+            continue
+        closes  = [b["close"]  for b in bars]
+        volumes = [b["volume"] for b in bars]
+
+        for i in range(_SMA200_PERIOD, len(bars) - 21):
+            window_closes = closes[:i + 1]
+            sma200 = _sma(window_closes, _SMA200_PERIOD)
+            price = closes[i]
+            if sma200 is None or price <= sma200:
+                continue
+            if price < SECTOR_MIN_PRICE:
+                continue
+            avg_vol = _avg(volumes[max(0, i - 19):i + 1])
+            if avg_vol < SECTOR_MIN_AVG_VOLUME:
+                continue
+            stock_ret = (closes[i] - closes[max(0, i - 21)]) / closes[max(0, i - 21)] * 100.0
+            sector_ret = sector_avg_ret.get(sector, 0.0)
+            rs = stock_ret - sector_ret
+            if rs < SECTOR_MIN_RS:
+                continue
+            if i > 0:
+                gap = (price - closes[i - 1]) / closes[i - 1] * 100.0
+                if abs(gap) > SECTOR_MAX_GAP_PCT:
+                    continue
+            d = datetime.date.fromisoformat(bars[i]["date"])
+            if d < start or d > end:
+                continue
+            out.append({
+                "symbol": sym,
+                "date": bars[i]["date"],
+                "surprise_pct": round(rs + sector_ret * 0.5, 2),
+                "sector": sector,
+                "sector_ret": round(sector_ret, 2),
+                "stock_ret": round(stock_ret, 2),
+                "rs": round(rs, 2),
+            })
+
+    # De-dup: top candidate per sector per date
+    best: dict[tuple, dict] = {}
+    for r in out:
+        key = (r["date"], r["sector"])
+        if key not in best or r["surprise_pct"] > best[key]["surprise_pct"]:
+            best[key] = r
+
+    result = sorted(best.values(), key=lambda r: (r["date"], -r["surprise_pct"]))
+    return result

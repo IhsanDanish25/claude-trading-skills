@@ -97,11 +97,11 @@ WATCHLIST = [
 ]
 
 # ── Strategy mode (comma-separated, run in order listed) ─────────────────────
-# Supported: pead, meanrev, insider, squeeze, breakout, earnmom
+# Supported: pead, meanrev, insider, squeeze, breakout, earnmom, gapfill, momentum, sector
 # Recommended: STRATEGY_MODE=pead,meanrev,insider,squeeze
 # breakout and earnmom are excluded from the recommended default — backtested
 # negative (Breakout Sharpe -0.38 p=0.585; EarnMom Sharpe -0.37, 31.4% win
-# rate). Still supported as opt-in values if re-validated later.
+# rate). Sector/momentum/gapfill are opt-in until live-validated.
 _STRATEGY_RAW = os.environ.get("STRATEGY_MODE", "pead").lower()
 STRATEGY_MODES = [s.strip() for s in _STRATEGY_RAW.split(",") if s.strip()]
 
@@ -166,6 +166,42 @@ EARNMOM_MAX_DAYS_AGO     = int(os.environ.get("EARNMOM_MAX_DAYS_AGO", "45"))
 EARNMOM_MIN_DRIFT_PCT    = float(os.environ.get("EARNMOM_MIN_DRIFT_PCT", "2.0"))
 # stock must be up at least this much since earnings beat
 EARNMOM_LIMIT            = int(os.environ.get("EARNMOM_LIMIT", "5"))
+
+# ── Gap Fill params (morning gap fade — intraday mean reversion) ─────────────
+# Entry: stock gaps > min at open; fade the spike back to prior close.
+# Win rate 55-70% (best on 3-8% gaps with volume confirmation).
+GAPFILL_MIN_GAP_PCT       = float(os.environ.get("GAPFILL_MIN_GAP_PCT", "3.0"))
+GAPFILL_MAX_GAP_PCT       = float(os.environ.get("GAPFILL_MAX_GAP_PCT", "12.0"))
+GAPFILL_MIN_PRICE         = float(os.environ.get("GAPFILL_MIN_PRICE", "5.0"))
+GAPFILL_MIN_VOLUME        = float(os.environ.get("GAPFILL_MIN_VOLUME", "500000"))
+GAPFILL_EARNINGS_BLACKOUT_DAYS = int(os.environ.get("GAPFILL_EARNINGS_BLACKOUT_DAYS", "5"))
+GAPFILL_STOP_PCT          = float(os.environ.get("GAPFILL_STOP_PCT", "0.04"))
+GAPFILL_LIMIT             = int(os.environ.get("GAPFILL_LIMIT", "3"))
+
+# ── Momentum Continuation params (3-day streak) ────────────────────────────
+# Entry: stock up N consecutive days on volume; ride day 4 continuation.
+# Win rate 55-65%. 3-5 day streaks have best Sharpe; drops off at 7+.
+MOMENTUM_STREAK_DAYS      = int(os.environ.get("MOMENTUM_STREAK_DAYS", "3"))
+MOMENTUM_STOP_PCT         = float(os.environ.get("MOMENTUM_STOP_PCT", "0.05"))
+MOMENTUM_TAKE_PROFIT_PCT  = float(os.environ.get("MOMENTUM_TAKE_PROFIT_PCT", "0.08"))
+MOMENTUM_MIN_PRICE        = float(os.environ.get("MOMENTUM_MIN_PRICE", "5.0"))
+MOMENTUM_MIN_AVG_VOLUME   = float(os.environ.get("MOMENTUM_MIN_AVG_VOLUME", "500000"))
+MOMENTUM_MIN_MOMENTUM_PCT = float(os.environ.get("MOMENTUM_MIN_MOMENTUM_PCT", "3.0"))
+MOMENTUM_HOLD_DAYS        = int(os.environ.get("MOMENTUM_HOLD_DAYS", "5"))
+MOMENTUM_LIMIT            = int(os.environ.get("MOMENTUM_LIMIT", "5"))
+
+# ── Sector Rotation params ────────────────────────────────────────────────
+# Entry: buy strongest stock in top-performing sector.
+# Win rate 55-65%. Works best when sector leadership is clear.
+SECTOR_MIN_RANK           = int(os.environ.get("SECTOR_MIN_RANK", "4"))
+SECTOR_STOP_PCT           = float(os.environ.get("SECTOR_STOP_PCT", "0.06"))
+SECTOR_TAKE_PROFIT_PCT    = float(os.environ.get("SECTOR_TAKE_PROFIT_PCT", "0.10"))
+SECTOR_MIN_PRICE          = float(os.environ.get("SECTOR_MIN_PRICE", "5.0"))
+SECTOR_MIN_AVG_VOLUME     = float(os.environ.get("SECTOR_MIN_AVG_VOLUME", "500000"))
+SECTOR_MIN_RS             = float(os.environ.get("SECTOR_MIN_RS", "15.0"))
+SECTOR_HOLD_DAYS          = int(os.environ.get("SECTOR_HOLD_DAYS", "14"))
+SECTOR_MAX_GAP_PCT        = float(os.environ.get("SECTOR_MAX_GAP_PCT", "8.0"))
+SECTOR_LIMIT              = int(os.environ.get("SECTOR_LIMIT", "3"))
 
 # ── E4 Portable Alpha: idle cash → SPY ───────────────────────────────────────
 SPY_BASE_ENABLED      = os.environ.get("SPY_BASE_ENABLED", "true").lower() == "true"

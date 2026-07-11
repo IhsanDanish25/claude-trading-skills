@@ -115,6 +115,21 @@ try:
 except Exception as e:
     log.error("EarnMom screener import failed: %s", e)
     screen_earnmom = None
+try:
+    from core.gapfill_screener import screen as screen_gapfill
+except Exception as e:
+    log.error("GapFill screener import failed: %s", e)
+    screen_gapfill = None
+try:
+    from core.momentum_screener import screen as screen_momentum
+except Exception as e:
+    log.error("Momentum screener import failed: %s", e)
+    screen_momentum = None
+try:
+    from core.sector_screener import screen as screen_sector
+except Exception as e:
+    log.error("Sector screener import failed: %s", e)
+    screen_sector = None
 
 
 def _build_breaker(broker: BrokerClient, day_start_equity: float) -> CircuitBreaker:
@@ -1047,6 +1062,232 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today, sector_count
             log.error(f"  ✗ EarnMom {sym} failed: {e}")
 
 
+# ── Gap Fill runner ──────────────────────────────────────────────────────────
+def _run_gapfill(broker, cb, pv, slots, held, already_bought_today, sector_counts):
+    """Gap Fill: fade morning gaps. Gap-up = short spike, gap-down = bounce.
+    Hold: max 4 hours or until target/stop hit."""
+    if screen_gapfill is None:
+        log.warning("GapFill: screener not loaded — skip")
+        return
+    log.info("GapFill: screening morning gaps...")
+    candidates = screen_gapfill()
+    log.info(f"GapFill: {len(candidates)} candidates")
+    if not candidates:
+        return
+    for c in candidates:
+        sym = c["symbol"]
+        if slots[0] <= 0:
+            log.info("Slots exhausted — GapFill stopping")
+            break
+        if sym in held:
+            log.info(f"  ✗ {sym} SKIP — already holding")
+            continue
+        if sym in already_bought_today:
+            log.info(f"  ✗ {sym} SKIP — already bought today")
+            continue
+
+        # Sector guard (gap fill trades are short-hold, treat as satellite)
+        fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
+        if not _sector_gate(sym, sector_counts, fkp, "gapfill", log):
+            continue
+
+        amount = pv * 0.03  # gap fills are short-hold, size accordingly
+        log.info(f"GapFill BUY {sym} | gap={c['gap_pct']:+.2f}% "
+                 f"price=${c['price']:.2f} prior_close=${c['prior_close']:.2f}")
+        trade_logger.log_event("signal_detected", "gapfill", sym,
+                               price=c["price"], gap_pct=c["gap_pct"],
+                               prior_close=c["prior_close"], target=c["target"])
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"  ✗ {sym} SKIP — cannot free cash")
+                continue
+            cb.check_before_order(intended_notional=amount, symbol=sym)
+        except EmergencyLiquidation as emerg:
+            log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
+            raise
+        except TradingHalted as halt:
+            log.warning(f"  ✗ {sym} circuit breaker: {halt}")
+            continue
+        except Exception as e:
+            log.warning(f"  ✗ {sym} gate failed: {e}")
+            continue
+
+        result = broker.buy(
+            sym, dollar_amount=amount,
+            stop_loss_pct=config.GAPFILL_STOP_PCT,
+            take_profit_pct=None,
+        )
+        if result.get("blocked"):
+            log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
+            continue
+        if not result.get("stop_attached"):
+            broker.sell(sym, qty=result["qty"])
+            log.info(f"  ✗ {sym} stop-attach failed — flattened {result['qty']} sh")
+            continue
+
+        log.info(f"  ✓ GapFill {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                 f"SL=${result['stop']} target=${c['target']:.2f}")
+        trade_logger.log_event("order_placed", "gapfill", sym,
+                               qty=result["qty"], price=result["price"],
+                               stop=result["stop"], target=c["target"],
+                               amount=round(amount, 2), gap_pct=c["gap_pct"])
+        _mark_bought(sym, result)
+        pead_track(sym, result["price"], surprise_pct=c["gap_pct"],
+                   report_date=datetime.date.today().isoformat(),
+                   strategy="gapfill", hold_days=1)
+        slots[0] -= 1
+
+
+# ── Momentum Continuation runner ───────────────────────────────────────────
+def _run_momentum(broker, cb, pv, slots, held, already_bought_today, sector_counts):
+    """Momentum: ride 3-5 day winning streaks. Win rate 55-65%."""
+    if screen_momentum is None:
+        log.warning("Momentum: screener not loaded — skip")
+        return
+    log.info("Momentum: screening 3-day streaks...")
+    candidates = screen_momentum()
+    log.info(f"Momentum: {len(candidates)} candidates")
+    if not candidates:
+        return
+    for c in candidates:
+        sym = c["symbol"]
+        if slots[0] <= 0:
+            log.info("Slots exhausted — Momentum stopping")
+            break
+        if sym in held:
+            log.info(f"  ✗ {sym} SKIP — already holding")
+            continue
+        if sym in already_bought_today:
+            log.info(f"  ✗ {sym} SKIP — already bought today")
+            continue
+
+        fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
+        if not _sector_gate(sym, sector_counts, fkp, "momentum", log):
+            continue
+
+        amount = pv * 0.03
+        log.info(f"Momentum BUY {sym} | {c['streak_days']}d streak "
+                 f"+{c['momentum_pct']}% RV={c['rel_volume']}x score={c['score']}")
+        trade_logger.log_event("signal_detected", "momentum", sym,
+                               price=c["price"], streak_days=c["streak_days"],
+                               momentum_pct=c["momentum_pct"], rel_volume=c["rel_volume"],
+                               score=c["score"])
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"  ✗ {sym} SKIP — cannot free cash")
+                continue
+            cb.check_before_order(intended_notional=amount, symbol=sym)
+        except EmergencyLiquidation as emerg:
+            log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
+            raise
+        except TradingHalted as halt:
+            log.warning(f"  ✗ {sym} circuit breaker: {halt}")
+            continue
+        except Exception as e:
+            log.warning(f"  ✗ {sym} gate failed: {e}")
+            continue
+
+        result = broker.buy(
+            sym, dollar_amount=amount,
+            stop_loss_pct=config.MOMENTUM_STOP_PCT,
+            take_profit_pct=config.MOMENTUM_TAKE_PROFIT_PCT,
+        )
+        if result.get("blocked"):
+            log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
+            continue
+        if not result.get("stop_attached"):
+            broker.sell(sym, qty=result["qty"])
+            log.info(f"  ✗ {sym} stop-attach failed — flattened {result['qty']} sh")
+            continue
+
+        log.info(f"  ✓ Momentum {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                 f"SL=${result['stop']} TP=${result['target']}")
+        trade_logger.log_event("order_placed", "momentum", sym,
+                               qty=result["qty"], price=result["price"],
+                               stop=result["stop"], target=result["target"],
+                               amount=round(amount, 2))
+        _mark_bought(sym, result)
+        pead_track(sym, result["price"], surprise_pct=c["score"],
+                   report_date=datetime.date.today().isoformat(),
+                   strategy="momentum", hold_days=c["hold_days"])
+        slots[0] -= 1
+
+
+# ── Sector Rotation runner ─────────────────────────────────────────────────
+def _run_sector(broker, cb, pv, slots, held, already_bought_today, sector_counts):
+    """Sector Rotation: buy leaders in top-performing sectors. Hold 14d."""
+    if screen_sector is None:
+        log.warning("Sector: screener not loaded — skip")
+        return
+    log.info("Sector Rotation: screening sector leaders...")
+    candidates = screen_sector()
+    log.info(f"Sector Rotation: {len(candidates)} candidates")
+    if not candidates:
+        return
+    for c in candidates:
+        sym = c["symbol"]
+        if slots[0] <= 0:
+            log.info("Slots exhausted — Sector stopping")
+            break
+        if sym in held:
+            log.info(f"  ✗ {sym} SKIP — already holding")
+            continue
+        if sym in already_bought_today:
+            log.info(f"  ✗ {sym} SKIP — already bought today")
+            continue
+
+        # Sector rotation is inherently sector-aware — don't double-check
+        amount = pv * config.MAX_POSITION_SIZE_PCT
+        log.info(f"Sector BUY {sym} [{c['sector']}] | "
+                 f"stock+{c['stock_ret']}% sector+{c['sector_ret']}% "
+                 f"RS={c['rs']} score={c['score']}")
+        trade_logger.log_event("signal_detected", "sector", sym,
+                               price=c["price"], sector=c["sector"],
+                               sector_ret=c["sector_ret"], stock_ret=c["stock_ret"],
+                               rs=c["rs"], score=c["score"])
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"  ✗ {sym} SKIP — cannot free cash")
+                continue
+            cb.check_before_order(intended_notional=amount, symbol=sym)
+        except EmergencyLiquidation as emerg:
+            log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
+            raise
+        except TradingHalted as halt:
+            log.warning(f"  ✗ {sym} circuit breaker: {halt}")
+            continue
+        except Exception as e:
+            log.warning(f"  ✗ {sym} gate failed: {e}")
+            continue
+
+        result = broker.buy(
+            sym, dollar_amount=amount,
+            stop_loss_pct=config.SECTOR_STOP_PCT,
+            take_profit_pct=config.SECTOR_TAKE_PROFIT_PCT,
+        )
+        if result.get("blocked"):
+            log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
+            continue
+        if not result.get("stop_attached"):
+            broker.sell(sym, qty=result["qty"])
+            log.info(f"  ✗ {sym} stop-attach failed — flattened {result['qty']} sh")
+            continue
+
+        log.info(f"  ✓ Sector {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                 f"SL=${result['stop']} TP=${result['target']} [{c['sector']}]")
+        trade_logger.log_event("order_placed", "sector", sym,
+                               qty=result["qty"], price=result["price"],
+                               stop=result["stop"], target=result["target"],
+                               amount=round(amount, 2), sector=c["sector"])
+        _mark_bought(sym, result)
+        pead_track(sym, result["price"], surprise_pct=c["score"],
+                   report_date=datetime.date.today().isoformat(),
+                   strategy="sector", hold_days=c["hold_days"])
+        slots[0] -= 1
+        # Mark sector as counted so we don't over-allocate
+        sector_counts[c["sector"]] = sector_counts.get(c["sector"], 0) + 1
+
+
 def run():
     config.validate()
     now = datetime.datetime.now(ET)
@@ -1154,12 +1395,15 @@ def run():
     # Held-set and already_bought_today accumulate across runners so the same
     # symbol is never double-bought within a single run.
     STRATEGY_HANDLERS = {
-        "pead":    _run_pead,
-        "meanrev": _run_meanrev,
-        "insider": _run_insider,
-        "squeeze": _run_squeeze,
-        "breakout": _run_breakout,
-        "earnmom": _run_earnmom,
+        "pead":     _run_pead,
+        "meanrev":  _run_meanrev,
+        "insider":  _run_insider,
+        "squeeze":  _run_squeeze,
+        "breakout":  _run_breakout,
+        "earnmom":  _run_earnmom,
+        "gapfill":  _run_gapfill,
+        "momentum": _run_momentum,
+        "sector":   _run_sector,
     }
     log.info(f"Strategy modes: {[s.upper() for s in config.STRATEGY_MODES]}")
 
