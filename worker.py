@@ -28,7 +28,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from core import trade_logger
+from core import config, trade_logger
 
 logging.basicConfig(
     level=logging.INFO,
@@ -242,7 +242,7 @@ def startup_rebalance() -> None:
         from core.broker import BrokerClient
         from scripts.rebalance_to_caps import build_plan, execute_plan, format_plan
 
-        target_positions = 2
+        target_positions = config.MAX_OPEN_POSITIONS
         max_pct = 5.0
 
         broker = BrokerClient()
