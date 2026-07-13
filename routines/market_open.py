@@ -20,13 +20,13 @@ from circuit_breaker import CircuitBreaker, TradingHalted, EmergencyLiquidation
 from regime_gate import classify
 from core.earnings_screener import screen_earnings
 from core.pead_tracker import add_position as pead_track
-from core.spy_base import rebalance_to_spy, free_cash_for_pead, log_status as spy_log
+from core.spy_base import rebalance_to_spy, free_cash_for_pead, log_status as spy_log, is_base_symbol
 from core import trade_logger
 
 log = logger.setup("market_open")
 
 import requests as _req  # noqa: F401
-from functools import lru_cache as _lru_cache
+from functools import lru_cache
 
 # ── SECTOR CONCENTRATION GUARD helpers ──────────────────────────────────────
 # MAX_PER_SECTOR enforced across all strategies within a single run
@@ -1363,7 +1363,7 @@ def run():
 
     # Emergency liquidation check before strategy loop
     if cb.liquidation_required():
-        log.error("EMERGENCY LIQUIDATION: equity %%.2f%%%% below day-start")
+        log.error(f"EMERGENCY LIQUIDATION: equity ${equity_now:,.2f} vs day-start ${day_start:,.2f} ({day_pnl:+.2f}%)")
         try:
             broker.cancel_all_orders()
             positions = broker.get_positions()
