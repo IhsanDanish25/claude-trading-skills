@@ -243,7 +243,7 @@ def startup_rebalance() -> None:
         from scripts.rebalance_to_caps import build_plan, execute_plan, format_plan
 
         target_positions = config.MAX_OPEN_POSITIONS
-        max_pct = 5.0
+        max_pct = config.MAX_POSITION_SIZE_PCT * 100
 
         broker = BrokerClient()
         plan = build_plan(broker, target_positions, max_pct, keep_symbols=None)
