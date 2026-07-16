@@ -15,6 +15,7 @@ Signal handling: SIGTERM/SIGINT break out of the sleep loop cleanly so
 Railway's graceful-shutdown window (default 10s) doesn't end in SIGKILL.
 Memory is logged each tick so OOM trends are visible before the kill.
 """
+
 from __future__ import annotations
 
 import json
@@ -84,6 +85,7 @@ def _rss_mb() -> float:
     # ru_maxrss is KB on Linux, bytes on macOS. The platform switch makes
     # the math identical in both cases once normalized to MB.
     import sys as _sys
+
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     divisor = 1024.0 if _sys.platform == "darwin" else 1.0  # bytes vs KB
     return rss / divisor / 1024.0  # → MB
@@ -149,13 +151,17 @@ def startup_health_check() -> None:
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
         from alpaca_client import AlpacaClient
-        client = AlpacaClient()
+
+        # core.broker.BrokerClient always connects live now — match that here
+        # so the health check doesn't probe paper-api with live-only keys.
+        client = AlpacaClient(paper=False)
         acct = client.get_account()
         equity = float(acct.get("equity", 0))
         cash = float(acct.get("cash", 0))
         status = acct.get("status", "unknown")
-        log.info("  ALPACA: CONNECTED ✓ (status=%s, equity=$%.2f, cash=$%.2f)",
-                 status, equity, cash)
+        log.info(
+            "  ALPACA: CONNECTED ✓ (status=%s, equity=$%.2f, cash=$%.2f)", status, equity, cash
+        )
     except Exception as e:
         log.error("  ALPACA: FAILED ✗ — %s", e)
         log.error("  Fix: regenerate API keys at app.alpaca.markets → API Keys")
@@ -165,6 +171,7 @@ def startup_health_check() -> None:
     # Test FMP connection
     try:
         import requests
+
         fmp_key = os.environ.get("FMP_API_KEY", "")
         r = requests.get(
             "https://financialmodelingprep.com/stable/quote",
@@ -177,7 +184,9 @@ def startup_health_check() -> None:
             price = data[0].get("price", 0) if isinstance(data, list) else 0
             log.info("  FMP: CONNECTED ✓ (AAPL=$%.2f)", price)
         else:
-            log.warning("  FMP: empty response (may be rate-limited) — yfinance fallback auto-enabled")
+            log.warning(
+                "  FMP: empty response (may be rate-limited) — yfinance fallback auto-enabled"
+            )
     except Exception as e:
         log.warning("  FMP: FAILED — %s (yfinance fallback auto-enabled)", e)
 
@@ -185,6 +194,7 @@ def startup_health_check() -> None:
     # propagates. Also logs the public URL for quick reference.
     try:
         import requests
+
         port = int(os.environ.get("PORT", "8080"))
         r = requests.get(f"http://localhost:{port}/", timeout=5)
         r.raise_for_status()
@@ -230,8 +240,7 @@ def startup_rebalance() -> None:
         return
 
     if mode not in ("dry", "execute"):
-        log.error("REBALANCE_ON_BOOT=%r is invalid (expected 'dry' or 'execute') "
-                  "— skipping", mode)
+        log.error("REBALANCE_ON_BOOT=%r is invalid (expected 'dry' or 'execute') — skipping", mode)
         return
 
     log.info("=" * 50)
@@ -257,8 +266,10 @@ def startup_rebalance() -> None:
         elif plan["status"] == "empty":
             log.info("No positions — nothing to rebalance")
         elif mode == "dry":
-            log.info("DRY RUN — no orders placed. Set REBALANCE_ON_BOOT=execute "
-                     "to submit orders on next deploy.")
+            log.info(
+                "DRY RUN — no orders placed. Set REBALANCE_ON_BOOT=execute "
+                "to submit orders on next deploy."
+            )
         elif mode == "execute":
             ok = execute_plan(broker, plan, logger=log)
             if ok:
@@ -283,14 +294,17 @@ def main() -> None:
 
     startup_health_check()
     startup_rebalance()
-    log.info("Worker daemon started — scheduler fires every %ds "
-             "(RSS=%.1f MB, pid=%d)", TICK_SECONDS, _rss_mb(), os.getpid())
+    log.info(
+        "Worker daemon started — scheduler fires every %ds (RSS=%.1f MB, pid=%d)",
+        TICK_SECONDS,
+        _rss_mb(),
+        os.getpid(),
+    )
 
     tick_count = 0
     while not _shutdown_requested:
         tick_count += 1
-        log.info("Firing scheduler (tick #%d, RSS=%.1f MB)...",
-                 tick_count, _rss_mb())
+        log.info("Firing scheduler (tick #%d, RSS=%.1f MB)...", tick_count, _rss_mb())
         try:
             result = subprocess.run(
                 [sys.executable, "scheduler.py"],
@@ -307,14 +321,12 @@ def main() -> None:
 
         # Periodic memory observation so OOM trends are visible before kill.
         if tick_count % 5 == 0:
-            log.info("Memory check (tick #%d): RSS=%.1f MB",
-                     tick_count, _rss_mb())
+            log.info("Memory check (tick #%d): RSS=%.1f MB", tick_count, _rss_mb())
 
         log.info("Sleeping %ds until next tick...", TICK_SECONDS)
         _interrupted_sleep(TICK_SECONDS)
 
-    log.info("Worker exiting cleanly (RSS=%.1f MB, ticks completed=%d)",
-             _rss_mb(), tick_count)
+    log.info("Worker exiting cleanly (RSS=%.1f MB, ticks completed=%d)", _rss_mb(), tick_count)
     sys.exit(0)
 
 
