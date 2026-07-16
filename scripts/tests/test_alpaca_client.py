@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import os
-from unittest.mock import MagicMock, patch
-
-import pytest
-
 # Ensure scripts/ is importable
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -19,7 +17,6 @@ from alpaca_client import (
     AlpacaClient,
     is_railway,
 )
-
 
 # ── is_railway detection ────────────────────────────────────
 
@@ -75,6 +72,18 @@ class TestCredentialLoading:
         monkeypatch.setenv("ALPACA_API_KEY", "env")
         c = AlpacaClient(api_key="explicit", secret_key="s")
         assert c.api_key == "explicit"
+
+    def test_strips_trailing_newline_from_env(self, monkeypatch):
+        monkeypatch.setenv("ALPACA_API_KEY", "envkey\n")
+        monkeypatch.setenv("ALPACA_SECRET_KEY", "  envsec \n")
+        c = AlpacaClient()
+        assert c.api_key == "envkey"
+        assert c.secret_key == "envsec"
+
+    def test_strips_whitespace_from_explicit_args(self):
+        c = AlpacaClient(api_key=" key1\n", secret_key="sec1\t")
+        assert c.api_key == "key1"
+        assert c.secret_key == "sec1"
 
 
 # ── URL routing ─────────────────────────────────────────────
@@ -136,9 +145,7 @@ class TestAPIMethods:
 
     @patch("alpaca_client.requests.get")
     def test_get_account(self, mock_get):
-        mock_get.return_value = _mock_response(
-            json_data={"status": "ACTIVE", "equity": "100000"}
-        )
+        mock_get.return_value = _mock_response(json_data={"status": "ACTIVE", "equity": "100000"})
         result = self._client().get_account()
         assert result["status"] == "ACTIVE"
         mock_get.assert_called_once()
@@ -152,9 +159,7 @@ class TestAPIMethods:
 
     @patch("alpaca_client.requests.get")
     def test_get_positions_with_holdings(self, mock_get):
-        mock_get.return_value = _mock_response(
-            json_data=[{"symbol": "AAPL", "qty": "10"}]
-        )
+        mock_get.return_value = _mock_response(json_data=[{"symbol": "AAPL", "qty": "10"}])
         result = self._client().get_positions()
         assert len(result) == 1
         assert result[0]["symbol"] == "AAPL"
@@ -180,17 +185,13 @@ class TestAPIMethods:
 
     @patch("alpaca_client.requests.get")
     def test_get_latest_quote(self, mock_get):
-        mock_get.return_value = _mock_response(
-            json_data={"quote": {"bp": 150.0, "ap": 150.05}}
-        )
+        mock_get.return_value = _mock_response(json_data={"quote": {"bp": 150.0, "ap": 150.05}})
         result = self._client().get_latest_quote("AAPL")
         assert result["quote"]["bp"] == 150.0
 
     @patch("alpaca_client.requests.get")
     def test_get_asset_found(self, mock_get):
-        mock_get.return_value = _mock_response(
-            json_data={"symbol": "AAPL", "shortable": True}
-        )
+        mock_get.return_value = _mock_response(json_data={"symbol": "AAPL", "shortable": True})
         result = self._client().get_asset("AAPL")
         assert result["symbol"] == "AAPL"
 
@@ -220,9 +221,7 @@ class TestVerifyConnection:
 
     @patch("alpaca_client.requests.get")
     def test_returns_account_on_success(self, mock_get):
-        mock_get.return_value = _mock_response(
-            json_data={"status": "ACTIVE"}
-        )
+        mock_get.return_value = _mock_response(json_data={"status": "ACTIVE"})
         c = AlpacaClient(api_key="k", secret_key="s")
         result = c.verify_connection()
         assert result["status"] == "ACTIVE"
