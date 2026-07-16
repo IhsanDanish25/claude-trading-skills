@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
 from typing import Any
 
 try:
@@ -62,8 +61,11 @@ class AlpacaClient:
         paper: bool | None = None,
         timeout: float = 10.0,
     ) -> None:
-        self.api_key = api_key or os.environ.get(_ENV_KEY)
-        self.secret_key = secret_key or os.environ.get(_ENV_SECRET)
+        # .strip() guards against a trailing newline or stray space on a
+        # pasted Railway variable, which becomes part of the key and causes
+        # a 401 that looks like a bad/expired credential.
+        self.api_key = (api_key or os.environ.get(_ENV_KEY) or "").strip() or None
+        self.secret_key = (secret_key or os.environ.get(_ENV_SECRET) or "").strip() or None
 
         if paper is not None:
             self.paper = paper
@@ -135,9 +137,7 @@ class AlpacaClient:
         resp.raise_for_status()
         return resp.json()
 
-    def get_orders(
-        self, status: str = "all", limit: int = 50
-    ) -> list[dict[str, Any]]:
+    def get_orders(self, status: str = "all", limit: int = 50) -> list[dict[str, Any]]:
         resp = requests.get(
             f"{self.trading_url}/v2/orders",
             headers=self._headers(),
@@ -147,9 +147,7 @@ class AlpacaClient:
         resp.raise_for_status()
         return resp.json()
 
-    def get_portfolio_history(
-        self, period: str = "1M", timeframe: str = "1D"
-    ) -> dict[str, Any]:
+    def get_portfolio_history(self, period: str = "1M", timeframe: str = "1D") -> dict[str, Any]:
         resp = requests.get(
             f"{self.trading_url}/v2/account/portfolio/history",
             headers=self._headers(),
@@ -194,6 +192,7 @@ class AlpacaClient:
 
 # ── CLI entry point ──────────────────────────────────────────
 
+
 def _print_account(account: dict[str, Any]) -> None:
     print(f"  Status:          {account.get('status')}")
     print(f"  Account Number:  {account.get('account_number')}")
@@ -228,12 +227,13 @@ def _print_positions(positions: list[dict[str, Any]]) -> None:
         total_value += mv
         total_pl += upl
         sign = "+" if upl >= 0 else ""
-        print(f"  {sym}: {qty:.2f} shares @ ${avg:.2f} → ${cur:.2f}  "
-              f"({sign}${upl:,.2f} / {sign}{uplp:.1f}%)")
+        print(
+            f"  {sym}: {qty:.2f} shares @ ${avg:.2f} → ${cur:.2f}  "
+            f"({sign}${upl:,.2f} / {sign}{uplp:.1f}%)"
+        )
 
     sign = "+" if total_pl >= 0 else ""
-    print(f"\n  Total Value: ${total_value:,.2f}  "
-          f"Unrealized P/L: {sign}${total_pl:,.2f}")
+    print(f"\n  Total Value: ${total_value:,.2f}  Unrealized P/L: {sign}${total_pl:,.2f}")
 
 
 def main() -> int:
