@@ -1,56 +1,61 @@
 """
 Alpaca broker client — paper + live unified interface.
 """
-from __future__ import annotations
-import logging
-import datetime
-import time
-import pytz
 
+from __future__ import annotations
+
+import datetime
+import logging
+import time
+
+import pytz
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
-    MarketOrderRequest,
-    LimitOrderRequest,
-    StopOrderRequest,
-    StopLossRequest,
-    TakeProfitRequest,
     GetOrdersRequest,
-    ClosePositionRequest,
+    LimitOrderRequest,
+    MarketOrderRequest,
     ReplaceOrderRequest,
+    StopLossRequest,
+    StopOrderRequest,
+    TakeProfitRequest,
 )
+
 try:
     from alpaca.trading.requests import GetPortfolioHistoryRequest
 except ImportError:
     GetPortfolioHistoryRequest = None
-from alpaca.trading.enums import (
-    OrderSide, TimeInForce, QueryOrderStatus, OrderClass
-)
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import (
-    StockBarsRequest, StockLatestQuoteRequest, StockLatestTradeRequest,
+    StockBarsRequest,
+    StockLatestQuoteRequest,
+    StockLatestTradeRequest,
 )
 from alpaca.data.timeframe import TimeFrame
+from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
 
-from core.order_utils import order_field
 from core.config import (
-    ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL,
-    PAPER_TRADE, MAX_POSITION_SIZE_PCT, MAX_OPEN_POSITIONS,
-    STOP_LOSS_PCT, TAKE_PROFIT_PCT, RISK_PCT, MAX_SPREAD_PCT,
+    ALPACA_API_KEY,
+    ALPACA_BASE_URL,
+    ALPACA_SECRET_KEY,
+    MAX_OPEN_POSITIONS,
+    MAX_POSITION_SIZE_PCT,
+    MAX_SPREAD_PCT,
+    RISK_PCT,
+    STOP_LOSS_PCT,
+    TAKE_PROFIT_PCT,
 )
+from core.order_utils import order_field
 from core.safe_oco_attach import safe_attach_oco
 
 log = logging.getLogger(__name__)
-ET  = pytz.timezone("America/New_York")
+ET = pytz.timezone("America/New_York")
 
 
 class BrokerClient:
     def __init__(self):
-        self.trade = TradingClient(
-            ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=PAPER_TRADE
-        )
+        self.trade = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=False)
         self.data = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-        mode = "PAPER" if PAPER_TRADE else "LIVE"
-        log.info(f"Broker init [{mode}] → {ALPACA_BASE_URL}")
+        log.info(f"Broker init [LIVE] → {ALPACA_BASE_URL}")
 
     # ── Account ───────────────────────────────────────────────────────────────
     def get_account(self):
@@ -97,9 +102,9 @@ class BrokerClient:
 
     # ── Market data ───────────────────────────────────────────────────────────
     def get_bars(self, symbols: list, timeframe: TimeFrame, days: int = 60):
-        end   = datetime.datetime.now(ET)
+        end = datetime.datetime.now(ET)
         start = end - datetime.timedelta(days=days)
-        req   = StockBarsRequest(
+        req = StockBarsRequest(
             symbol_or_symbols=symbols,
             timeframe=timeframe,
             start=start,
@@ -123,9 +128,9 @@ class BrokerClient:
         """
         last = None
         try:
-            t = self.data.get_stock_latest_trade(
-                StockLatestTradeRequest(symbol_or_symbols=symbol)
-            )[symbol]
+            t = self.data.get_stock_latest_trade(StockLatestTradeRequest(symbol_or_symbols=symbol))[
+                symbol
+            ]
             last = float(t.price)
         except Exception as e:
             log.warning("get_price last-trade failed for %s: %s", symbol, e)
@@ -142,11 +147,15 @@ class BrokerClient:
                     log.warning(
                         "get_price %s: spread %.2f%% (>$MAX_SPREAD_PCT=%.0f%%) "
                         "-- rejecting midpoint, falling back to last trade",
-                        symbol, spread / mid_price * 100, MAX_SPREAD_PCT * 100,
+                        symbol,
+                        spread / mid_price * 100,
+                        MAX_SPREAD_PCT * 100,
                     )
                     # Widen the spread → mid is unreliable; fall through to last trade
-                if mid_price > 0 and spread / mid_price <= MAX_SPREAD_PCT and (
-                    last is None or abs(mid_price - last) <= 0.10 * last
+                if (
+                    mid_price > 0
+                    and spread / mid_price <= MAX_SPREAD_PCT
+                    and (last is None or abs(mid_price - last) <= 0.10 * last)
                 ):
                     return mid_price
         except Exception as e:
@@ -156,8 +165,9 @@ class BrokerClient:
         raise RuntimeError(f"no usable price for {symbol}")
 
     # ── Trade execution ───────────────────────────────────────────────────────
-    def attach_stop_target(self, symbol: str, qty: int,
-                           stop: float, target: float) -> tuple[bool, bool]:
+    def attach_stop_target(
+        self, symbol: str, qty: int, stop: float, target: float
+    ) -> tuple[bool, bool]:
         """Attach a protective exit as a single OCO (one-cancels-other) order:
         a take-profit limit and a stop-loss that share the same shares. When
         either leg fills, Alpaca cancels the other — so both can coexist on one
@@ -175,22 +185,37 @@ class BrokerClient:
         # the stop price on gap-down opens. Trade-off: stop-limit orders do
         # not participate in the open/close auction (Alpaca docs). Accepted.
         stop_limit = max(round(stop * 0.985, 2), stop - 0.05)
+
         def _submit():
             if target is not None:
-                self.trade.submit_order(LimitOrderRequest(
-                    symbol=symbol, qty=qty, side=OrderSide.SELL,
-                    time_in_force=TimeInForce.GTC, order_class=OrderClass.OCO,
-                    take_profit=TakeProfitRequest(limit_price=target),
-                    stop_loss=StopLossRequest(stop_price=stop, limit_price=stop_limit),
-                ))
-                log.info(f"  ↳ OCO attached: stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]")
+                self.trade.submit_order(
+                    LimitOrderRequest(
+                        symbol=symbol,
+                        qty=qty,
+                        side=OrderSide.SELL,
+                        time_in_force=TimeInForce.GTC,
+                        order_class=OrderClass.OCO,
+                        take_profit=TakeProfitRequest(limit_price=target),
+                        stop_loss=StopLossRequest(stop_price=stop, limit_price=stop_limit),
+                    )
+                )
+                log.info(
+                    f"  ↳ OCO attached: stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]"
+                )
             else:
-                self.trade.submit_order(StopOrderRequest(
-                    symbol=symbol, qty=qty, side=OrderSide.SELL,
-                    time_in_force=TimeInForce.GTC, order_class=OrderClass.SIMPLE,
-                    stop_price=stop, limit_price=stop_limit,
-                ))
+                self.trade.submit_order(
+                    StopOrderRequest(
+                        symbol=symbol,
+                        qty=qty,
+                        side=OrderSide.SELL,
+                        time_in_force=TimeInForce.GTC,
+                        order_class=OrderClass.SIMPLE,
+                        stop_price=stop,
+                        limit_price=stop_limit,
+                    )
+                )
                 log.info(f"  ↳ SIMPLE STOP attached (no cap): stop @ ${stop:.2f} x{qty} [{symbol}]")
+
         try:
             safe_attach_oco(self, symbol, qty, stop, target, _submit)
             return True, target is not None
@@ -198,9 +223,14 @@ class BrokerClient:
             log.error(f"  ↳ Order attach FAILED [{symbol}]: {e}")
             return False, False
 
-    def buy(self, symbol: str, dollar_amount: float = None, shares: int = None,
-            stop_loss_pct: float = STOP_LOSS_PCT,
-            take_profit_pct: float = TAKE_PROFIT_PCT) -> dict:
+    def buy(
+        self,
+        symbol: str,
+        dollar_amount: float = None,
+        shares: int = None,
+        stop_loss_pct: float = STOP_LOSS_PCT,
+        take_profit_pct: float = TAKE_PROFIT_PCT,
+    ) -> dict:
         """
         Simple market BUY with hard position-sizing guardrails, then attach a
         protective OCO exit (stop + target) priced off the REAL fill price.
@@ -222,7 +252,9 @@ class BrokerClient:
         if existing_pos is None and self.position_count() >= MAX_OPEN_POSITIONS:
             log.warning(
                 "BUY %s BLOCKED — already at %d/%d open positions",
-                symbol, self.position_count(), MAX_OPEN_POSITIONS,
+                symbol,
+                self.position_count(),
+                MAX_OPEN_POSITIONS,
             )
             return {"blocked": True, "reason": "max_open_positions"}
 
@@ -234,9 +266,10 @@ class BrokerClient:
 
         if remaining_cap <= 0:
             log.warning(
-                "BUY %s BLOCKED — existing position $%.0f already at/above "
-                "%.1f%% cap ($%.0f)",
-                symbol, existing_value, MAX_POSITION_SIZE_PCT * 100,
+                "BUY %s BLOCKED — existing position $%.0f already at/above %.1f%% cap ($%.0f)",
+                symbol,
+                existing_value,
+                MAX_POSITION_SIZE_PCT * 100,
                 max_position_dollars,
             )
             return {"blocked": True, "reason": "position_size_cap"}
@@ -257,8 +290,12 @@ class BrokerClient:
             qty = 0
 
         if qty < 1:
-            log.warning("BUY %s BLOCKED — ref_price $%.4f below $%.2f minimum",
-                        symbol, ref_price, MIN_ORDER_PRICE)
+            log.warning(
+                "BUY %s BLOCKED — ref_price $%.4f below $%.2f minimum",
+                symbol,
+                ref_price,
+                MIN_ORDER_PRICE,
+            )
             return {"blocked": True, "reason": "min_price"}
 
         order_value = qty * ref_price
@@ -267,9 +304,12 @@ class BrokerClient:
             log.warning(
                 "BUY %s CLAMPED — requested %d shares ($%.0f) exceeds "
                 "%.1f%% cap; reduced to %d shares ($%.0f)",
-                symbol, qty, order_value,
+                symbol,
+                qty,
+                order_value,
                 MAX_POSITION_SIZE_PCT * 100,
-                clamped_qty, clamped_qty * ref_price,
+                clamped_qty,
+                clamped_qty * ref_price,
             )
             qty = clamped_qty
 
@@ -278,9 +318,14 @@ class BrokerClient:
             return {"blocked": True, "reason": "position_size_cap"}
 
         # 1. Simple market BUY
-        order = self.trade.submit_order(MarketOrderRequest(
-            symbol=symbol, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
-        ))
+        order = self.trade.submit_order(
+            MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+            )
+        )
         log.info(f"BUY {symbol} x{qty} (market) submitted [{str(order.id)[:8]}]")
 
         # 2. Poll for the actual fill price (up to ~5s); exit early if market closed
@@ -306,22 +351,28 @@ class BrokerClient:
         # 3. Compute stop/target from the REAL fill price (fallback to reference)
         basis = fill_price if fill_price else ref_price
         if fill_price is None:
-            log.warning(f"{symbol} not filled within 5s — using reference ${ref_price:.2f} for stop/target")
-        stop   = round(basis * (1 - stop_loss_pct), 2)
+            log.warning(
+                f"{symbol} not filled within 5s — using reference ${ref_price:.2f} for stop/target"
+            )
+        stop = round(basis * (1 - stop_loss_pct), 2)
         target = round(basis * (1 + take_profit_pct), 2) if take_profit_pct is not None else None
 
         # 4. Attach protective stop-loss + take-profit (each its own try/except)
-        stop_attached, target_attached = self.attach_stop_target(
-            symbol, filled_qty, stop, target
+        stop_attached, target_attached = self.attach_stop_target(symbol, filled_qty, stop, target)
+        log.info(
+            f"BUY {symbol} x{filled_qty} @ ${basis:.2f} | SL={stop} "
+            f"TP={'None (no cap)' if target is None else target} "
+            f"| stop_attached={stop_attached} target_attached={target_attached}"
         )
-        log.info(f"BUY {symbol} x{filled_qty} @ ${basis:.2f} | SL={stop} "
-                 f"TP={'None (no cap)' if target is None else target} "
-                 f"| stop_attached={stop_attached} target_attached={target_attached}")
 
         return {
-            "order": order, "qty": filled_qty, "price": basis,
-            "stop": stop, "target": target,
-            "stop_attached": stop_attached, "target_attached": target_attached,
+            "order": order,
+            "qty": filled_qty,
+            "price": basis,
+            "stop": stop,
+            "target": target,
+            "stop_attached": stop_attached,
+            "target_attached": target_attached,
         }
 
     def sell(self, symbol: str, qty: int = None) -> dict:
@@ -371,10 +422,12 @@ class BrokerClient:
             # Log all orders for this symbol for debugging
             for o in open_orders:
                 if o.symbol == symbol:
-                    log.info(f"  Order: id={o.id} type={o.type} side={o.side} "
-                              f"order_class={getattr(o, 'order_class', 'n/a')} "
-                              f"stop_price={getattr(o, 'stop_price', 'n/a')} "
-                              f"limit_price={getattr(o, 'limit_price', 'n/a')}")
+                    log.info(
+                        f"  Order: id={o.id} type={o.type} side={o.side} "
+                        f"order_class={getattr(o, 'order_class', 'n/a')} "
+                        f"stop_price={getattr(o, 'stop_price', 'n/a')} "
+                        f"limit_price={getattr(o, 'limit_price', 'n/a')}"
+                    )
 
             # Match stop orders for this symbol (handles both standalone stops
             # and OCO child stop-loss legs, which Alpaca returns as separate rows)
@@ -396,7 +449,9 @@ class BrokerClient:
                 return False
             order = candidates[0]
             old_stop = getattr(order, "stop_price", None)
-            old_label = f"${old_stop:.2f}" if isinstance(old_stop, (int, float)) else str(old_stop or "?")
+            old_label = (
+                f"${old_stop:.2f}" if isinstance(old_stop, (int, float)) else str(old_stop or "?")
+            )
             self.trade.replace_order_by_id(
                 str(order.id),
                 ReplaceOrderRequest(stop_price=new_stop),
