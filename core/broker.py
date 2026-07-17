@@ -317,6 +317,37 @@ class BrokerClient:
             log.warning("BUY %s BLOCKED — clamped qty to 0", symbol)
             return {"blocked": True, "reason": "position_size_cap"}
 
+        # ── Guardrail 3: clamp order to available cash / buying power ────────
+        # Guardrail 2 only bounds notional against equity (portfolio_value),
+        # which includes the market value of existing positions. On an
+        # already-invested account, equity can far exceed actual spendable
+        # cash, so a qty sized off equity alone can exceed buying power and
+        # get rejected — or draw on margin — at submission time.
+        available_cash = self.buying_power()
+        order_value = qty * ref_price
+        if order_value > available_cash:
+            cash_qty = max(0, int(available_cash / ref_price))
+            log.warning(
+                "BUY %s CLAMPED — requested %d shares ($%.0f) exceeds "
+                "available buying power ($%.0f); reduced to %d shares ($%.0f)",
+                symbol,
+                qty,
+                order_value,
+                available_cash,
+                cash_qty,
+                cash_qty * ref_price,
+            )
+            qty = cash_qty
+
+        if qty < 1:
+            log.warning(
+                "BUY %s BLOCKED — insufficient buying power ($%.2f) for 1 share @ $%.2f",
+                symbol,
+                available_cash,
+                ref_price,
+            )
+            return {"blocked": True, "reason": "insufficient_cash"}
+
         # 1. Simple market BUY
         order = self.trade.submit_order(
             MarketOrderRequest(
