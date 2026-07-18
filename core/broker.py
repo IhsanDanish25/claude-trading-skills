@@ -527,3 +527,179 @@ class BrokerClient:
 
     def next_close(self):
         return self.trade.get_clock().next_close
+
+    # ── Options trading (CSP / Cash-Secured Puts) ─────────────────────────────────
+    def sell_csp(
+        self,
+        symbol: str,
+        strike: float,
+        expiration: str,  # YYYY-MM-DD
+        premium: float = None,
+        qty: int = 1,
+    ) -> dict:
+        """
+        Sell a Cash-Secured Put (CSP) — sell_to_open a put option.
+
+        symbol: underlying stock (e.g. "INTC")
+        strike: strike price (e.g. 90.0)
+        expiration: ISO date string (YYYY-MM-DD)
+        premium: limit price in dollars (if None, attempt MARKET)
+        qty: number of contracts (default 1 = 100 shares collateral)
+
+        Returns order dict with contract details and filled price.
+
+        NOTE: Account must have options_level >= 1 and sufficient buying power.
+        """
+        try:
+            from alpaca.trading.requests import (
+                OptionTradeRequest, LimitOrderRequest as OptLimitOrderRequest,
+                MarketOrderRequest as OptMarketOrderRequest,
+                GetOptionContractsRequest,
+            )
+            from alpaca.trading.enums import (
+                OptionType, OrderSide as OptSide, TimeInForce as OptTIF, OrderType as OptType,
+            )
+        except ImportError:
+            log.error("Alpaca options not supported — upgrade alpaca-py: pip install alpaca-py")
+            return {"blocked": True, "reason": "no_options_support"}
+
+        # Build OCC symbol: format = ROOT + DATE + C/P + STRIKE
+        # Example: INTC 20260725 $90.00 PUT → "INTC20260725P90"
+        strike_int = int(strike)
+        strike_dec = int((strike - strike_int) * 1000)
+        if strike < 1:
+            strike_dec = int((strike - strike_int) * 10000)
+            occ_type = "P"
+            occ_symbol = f"{symbol.upper()}{expiration.replace('-', '')}{strike_dec:08d}P"
+        elif strike < 1000:
+            occ_symbol = f"{symbol.upper()}{expiration.replace('-', '')}P{int(strike * 1000):08d}"
+        else:
+            occ_symbol = f"{symbol.upper()}{expiration.replace('-', '')}P{int(strike * 100):05d}0"
+
+        log.info(f"CSP: searching contract {occ_symbol} for {symbol} strike=${strike}")
+
+        # Look up the contract
+        import datetime as _dt
+        try:
+            req = GetOptionContractsRequest(
+                underlying_symbols=[symbol.upper()],
+                expiration_date_gte=expiration,
+                expiration_date_lte=expiration,
+                _fcc_arg_type="put",
+                strike_price_gte=float(strike) * 0.9,
+                strike_price_lte=float(strike) * 1.1,
+                status="active",
+                limit=10,
+            )
+            contracts = list(self.trade.get_option_contracts(req))
+            log.info(f"  Found {len(contracts)} contracts")
+        except Exception as e:
+            log.error(f"  Contract lookup failed: {e}")
+            return {"blocked": True, "reason": f"contract_lookup_failed: {e}"}
+
+        if not contracts:
+            log.error(f"No contracts found for {occ_symbol}")
+            return {"blocked": True, "reason": "no_contract_found"}
+
+        # Pick the one matching our strike best
+        target = float(strike)
+        contract = min(contracts, key=lambda c: abs(float(c.strike_price or 0) - target))
+        occ_symbol = contract.symbol
+        log.info(f"  Using contract: {occ_symbol} strike=${contract.strike_price}")
+
+        # Check buying power
+        acct = self.get_account()
+        options_bp = float(acct.options_buying_power or 0)
+        if options_bp < strike * 100:
+            log.warning(f"  Insufficient options BP: ${options_bp:.2f} < ${strike * 100:.2f} required")
+            return {"blocked": True, "reason": "insufficient_buying_power"}
+
+        # Submit the order
+        try:
+            if premium:
+                order = self.trade.submit_option_order(
+                    OptionTradeRequest(
+                        symbol=occ_symbol,
+                        qty=str(qty),
+                        side=OptSide.SELL_TO_OPEN,
+                        type=OptType.LIMIT,
+                        limit_price=str(premium),
+                        time_in_force=OptTIF.GTC,
+                    )
+                )
+                log.info(f"  LIMIT CSP submitted: {occ_symbol} x{qty} @ ${premium}")
+            else:
+                order = self.trade.submit_option_order(
+                    OptionTradeRequest(
+                        symbol=occ_symbol,
+                        qty=str(qty),
+                        side=OptSide.SELL_TO_OPEN,
+                        type=OptType.MARKET,
+                        time_in_force=OptTIF.GTC,
+                    )
+                )
+                log.info(f"  MARKET CSP submitted: {occ_symbol} x{qty}")
+
+            # Poll for fill
+            filled_price = None
+            for _ in range(20):
+                try:
+                    o = self.trade.get_order_by_id(order.id)
+                    if o and o.filled_avg_price:
+                        filled_price = float(o.filled_avg_price)
+                        break
+                except Exception:
+                    pass
+                time.sleep(1)
+
+            premium_actual = filled_price if filled_price else premium if premium else 0
+            collateral = target * 100 * qty
+            log.info(f"  CSP filled: ${filled_price} | premium=${filled_price * 100:.2f}" if filled_price else f"  CSP pending: {order.id}")
+
+            return {
+                "order": order,
+                "contract": occ_symbol,
+                "symbol": symbol,
+                "strike": target,
+                "expiration": expiration,
+                "qty": qty,
+                "type": "csp_sell",
+                "side": "sell_to_open",
+                "fill_price": filled_price,
+                "premium_collected": filled_price * 100 if filled_price else 0,
+                "collateral": collateral,
+                "status": o.status.value if o else "pending",
+            }
+
+        except Exception as e:
+            log.error(f"CSP order failed: {e}")
+            return {"blocked": True, "reason": str(e)}
+
+    def close_option(self, contract_symbol: str, qty: int = 1) -> dict:
+        """Buy to close an existing short option position."""
+        try:
+            from alpaca.trading.enums import OptionType, OrderSide, TimeInForce, OrderType
+            order = self.trade.submit_option_order(
+                symbol=contract_symbol,
+                qty=str(qty),
+                side=OrderSide.BUY_TO_CLOSE,
+                type=OrderType.MARKET,
+                time_in_force=TimeInForce.DAY,
+            )
+            log.info(f"BTC option {contract_symbol} x{qty} order={order.id}")
+            return {"order": order, "contract": contract_symbol}
+        except Exception as e:
+            log.error(f"Close option failed: {e}")
+            return {"blocked": True, "reason": str(e)}
+
+    def get_options_positions(self) -> list:
+        """Return all open option positions."""
+        try:
+            return self.trade.get_all_positions()
+        except Exception:
+            return []
+
+    def options_level(self) -> int:
+        """Return account options trading level (0=disabled, 1=CSP/CC only, 2=long, 3=strategies)."""
+        acct = self.get_account()
+        return int(getattr(acct, "options_trading_level", 0) or 0)

@@ -1,0 +1,72 @@
+{
+  "generated": "2026-07-18T16:30:00ET",
+  "strategy": "WEEKLY_CSP",
+  "account": "285953278",
+  "deposit_pending": 194.96,
+  "notes": "CSP picks for week of Jul 21-25. Execute when deposit clears.",
+  "market_regime": "DISTRIBUTION",
+  "picks": [
+    {
+      "rank": 1,
+      "symbol": "INTC",
+      "action": "SELL",
+      "_fcc_arg_type": "put",
+      "side": "sell_to_open",
+      "qty": "1",
+      "strike": 90.0,
+      "expiration": "2026-07-25",
+      "dte": 7,
+      "estimated_premium": 18.50,
+      "premium_collected": true,
+      "collateral_required": 9000,
+      "actual_position_cost": 9000,
+      "comment": "Full CSP — 100 shares collateral if assigned",
+      "when_to_execute": "Monday Jul 21, after deposit clears)",
+      "entry_price": "MARKET",
+      "note": "INTC at $95. Dropped -18% from $116. Support at $90. Good premium at 5% OTM.",
+      "win_logic": "INTC stays above $90 = keep premium. Price recovers = bonus upside on stock.",
+      "loss_logic": "INTC drops below $85 = might exit early, take small loss. $90 support is strong.",
+      "ps_ratio": 0.33,
+      "risk_score": "LOW",
+      "status": "READY"
+    },
+    {
+      "rank": 2,
+      "symbol": "NOK",
+      "action": "SELL",
+      "_fcc_arg_type": "put",
+      "side": "sell_to_open",
+      "qty": "1",
+      "strike": 9.50,
+      "expiration": "2026-07-25",
+      "dte": 7,
+      "estimated_premium": 13.40,
+      "premium_collected": true,
+      "collateral_required": 9500,
+      "actual_position_cost": 9500,
+      "comment": "Full CSP — 100 shares collateral if assigned",
+      "when_to_execute": "ONLY_IF_INTC_FILLS_OTHERWISE",
+      "entry_price": "MARKET",
+      "note": "NOK at $10.10. Dropped -21%. Support at $9.50. Solid oversold bounce candidate.",
+      "win_logic": "NOK stays above $9.50 = keep premium. Bounces back to $11 = great entry.",
+      "loss_logic": "Drops below $9 = might exit early. Support at $9.50 is key level.",
+      "ps_ratio": 0.28,
+      "risk_score": "LOW",
+      "status": "READY"
+    }
+  ],
+  "execution": {
+    "step_1": "Wait for $194.96 deposit to clear",
+    "step_2": "Monday Jul 21 morning — check INTC price",
+    "step_3": "If INTC above $93 → SELL 1 INTC $90 put",
+    "step_4": "If INTC below $92 → SKIP, go to NOK $9.50 put",
+    "step_5": "Close CSP at 50% profit OR let expire Friday",
+    "step_6": "Weekly review"
+  },
+  "position_rules": {
+    "max_csp_contracts": 1,
+    "max_collateral_pct": 0.50,
+    "close_at_profit_pct": 0.50,
+    "stop_loss_on_premium": 0.20
+  }
+}

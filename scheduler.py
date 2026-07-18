@@ -36,6 +36,8 @@ SCHEDULE = [
     (15,  0,  9, 0, 4, "routines.market_close"),
     # weekly:       4:00 PM Friday only (window 16:00-16:09)
     (16,  0,  9, 4, 4, "routines.weekly_review"),
+    # weekly_csp:   9:45 AM Monday-Friday (window 9:45-9:54) — generate CSP picks
+    (9,  45, 54, 0, 4, "routines.weekly_csp"),
 ]
 
 
@@ -161,6 +163,27 @@ def run_routine(module: str):
     mod.run()
 
 
+def _run_position_monitor(now: datetime.datetime) -> None:
+    """Run position_monitor.py on every tick during market hours (9:30–16:00 ET)."""
+    h, m, wd = now.hour, now.minute, now.weekday()
+    if wd > 4:
+        return
+    market_open = (h == 9 and m >= 30) or (10 <= h <= 15) or (h == 16 and m == 0)
+    if not market_open:
+        return
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "position_monitor",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "position_monitor.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.run()
+    except Exception as e:
+        log.warning("Position monitor error: %s", e)
+
+
 def main():
     now = datetime.datetime.now(ET)
     log.info(f"Scheduler fired: {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
@@ -176,21 +199,23 @@ def main():
 
     if routine is None:
         log.debug(f"No routine scheduled for {now.strftime('%H:%M')} — exiting")
-        return
-
-    log.info(f"Dispatching → {routine}")
-    try:
-        run_routine(routine)
-        _mark_ran(now, routine)
-        log.info(f"Routine complete: {routine}")
-    except Exception as e:
-        log.error(f"Routine FAILED: {routine} | {e}", exc_info=True)
+    else:
+        log.info(f"Dispatching → {routine}")
         try:
-            from core.notifier import send_error_alert
-            send_error_alert(routine, traceback.format_exc())
-        except Exception:
-            pass
-        sys.exit(1)
+            run_routine(routine)
+            _mark_ran(now, routine)
+            log.info(f"Routine complete: {routine}")
+        except Exception as e:
+            log.error(f"Routine FAILED: {routine} | {e}", exc_info=True)
+            try:
+                from core.notifier import send_error_alert
+                send_error_alert(routine, traceback.format_exc())
+            except Exception:
+                pass
+            sys.exit(1)
+
+    # Position monitor runs every tick during market hours (independent of routine)
+    _run_position_monitor(now)
 
 
 if __name__ == "__main__":
