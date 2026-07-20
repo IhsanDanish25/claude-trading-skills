@@ -134,7 +134,7 @@ def run():
         _research_syms: list[str] = []
         if top_vcps:
             _research_syms += [s["symbol"] for s in buy_list[:10]]
-        if "meanrev" in config.STRATEGY_MODE:
+        if "meanrev" in config.STRATEGY_MODES:
             try:
                 from core.meanrev_screener import screen as _mr_screen
                 _research_syms += [c["symbol"] for c in _mr_screen()[:10]]
