@@ -138,11 +138,12 @@ WATCHLIST = [
 ]
 
 # ── Strategy mode (comma-separated, run in order listed) ─────────────────────
-# Supported: pead, meanrev, insider, squeeze, breakout, earnmom, gapfill, momentum, sector
+# Supported: pead, meanrev, insider, squeeze, breakout, earnmom, gapfill, momentum, sector, vcp
 # Recommended: STRATEGY_MODE=pead,meanrev,insider,squeeze
 # breakout and earnmom are excluded from the recommended default — backtested
 # negative (Breakout Sharpe -0.38 p=0.585; EarnMom Sharpe -0.37, 31.4% win
-# rate). Sector/momentum/gapfill are opt-in until live-validated.
+# rate). Sector/momentum/gapfill/vcp are opt-in until live-validated (none of
+# the four appear in docs/dev/strategy-validation-status.md).
 _STRATEGY_RAW = os.environ.get("STRATEGY_MODE", "pead").lower()
 STRATEGY_MODES = [s.strip() for s in _STRATEGY_RAW.split(",") if s.strip()]
 
@@ -243,6 +244,13 @@ SECTOR_MIN_RS = float(os.environ.get("SECTOR_MIN_RS", "15.0"))
 SECTOR_HOLD_DAYS = int(os.environ.get("SECTOR_HOLD_DAYS", "14"))
 SECTOR_MAX_GAP_PCT = float(os.environ.get("SECTOR_MAX_GAP_PCT", "8.0"))
 SECTOR_LIMIT = int(os.environ.get("SECTOR_LIMIT", "3"))
+
+# ── VCP params (volatility-contraction breakout, Claude-scored in pre_market) ─
+# Consumes the buy_list pre_market already screened + scored (state/
+# pre_market_watchlist.json) rather than re-screening — opt-in, unvalidated.
+VCP_SIZE_PCT = float(os.environ.get("VCP_SIZE_PCT", "0.04"))
+VCP_STOP_PCT = float(os.environ.get("VCP_STOP_PCT", "0.08"))
+VCP_HOLD_DAYS = int(os.environ.get("VCP_HOLD_DAYS", "21"))
 
 # ── E4 Portable Alpha: idle cash → SPY ───────────────────────────────────────
 SPY_BASE_ENABLED = os.environ.get("SPY_BASE_ENABLED", "true").lower() == "true"

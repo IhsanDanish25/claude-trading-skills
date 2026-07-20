@@ -141,6 +141,27 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
         # Need to BUY more SPY
         buy_dollars = info["diff"]
         qty = max(1, int(buy_dollars / spy_price))
+
+        # Clamp to available buying power — mirrors the guardrail
+        # BrokerClient.buy() has (added for the same failure mode: sizing off
+        # the equity/target diff alone can exceed actual spendable cash).
+        # Skip (don't force qty=1) rather than submit an order Alpaca will reject.
+        available_cash = broker.buying_power()
+        order_value = qty * spy_price
+        if order_value > available_cash:
+            cash_qty = max(0, int(available_cash / spy_price))
+            if cash_qty < 1:
+                log.warning(
+                    "SPY base BUY SKIPPED — insufficient buying power ($%.2f) for 1 share @ $%.2f",
+                    available_cash, spy_price,
+                )
+                return {"action": "insufficient_cash", "reason": "insufficient buying power", **info}
+            log.warning(
+                "SPY base BUY CLAMPED — %d shares ($%.0f) exceeds buying power ($%.0f); reduced to %d shares",
+                qty, order_value, available_cash, cash_qty,
+            )
+            qty = cash_qty
+
         log.info(f"SPY base: BUYING {qty} shares (${buy_dollars:,.0f} underweight)")
         try:
             from alpaca.trading.enums import OrderSide, TimeInForce
