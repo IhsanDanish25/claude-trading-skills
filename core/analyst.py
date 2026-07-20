@@ -215,3 +215,68 @@ def detect_ftd(price_data: list[dict]) -> dict:
             "confidence": 0,
             "details": "parse error",
         }
+
+
+def _parse_json(raw: str) -> dict | list:
+    clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+    return json.loads(clean)
+
+
+def build_situation_report(event_data: dict) -> dict:
+    """
+    Synthesize today's macro context into a situation report.
+    Input: {date, breadth, high_impact_events_today, sector_rotation}
+    Output: {macro_risk, trade_bias_override, event_blocks, summary}
+    """
+    system = (
+        "You are a market intelligence analyst for a swing-trade bot. "
+        "Given today's macro data, assess the trading environment. "
+        "Respond ONLY with valid JSON. Schema: "
+        '{"macro_risk":"low|medium|high",'
+        '"trade_bias_override":null,'
+        '"event_blocks":[{"event":"","time":"","impact":""}],'
+        '"summary":"<2 sentences: what is happening today and how it affects swing trades>"} '
+        "trade_bias_override: set to 'cash' ONLY when Fed rate decision, CPI release, "
+        "or systemic crisis falls TODAY. Otherwise always null. "
+        "event_blocks: list only events happening TODAY that could cause extreme intraday moves."
+    )
+    user = "Today's market data:\n" + json.dumps(event_data, indent=2)
+    try:
+        raw = _ask(system, user, max_tokens=512)
+        return _parse_json(raw)
+    except Exception as e:
+        log.error("Situation report failed: %s", e)
+        return {
+            "macro_risk": "medium",
+            "trade_bias_override": None,
+            "event_blocks": [],
+            "summary": "Research unavailable — proceeding with defaults.",
+        }
+
+
+def check_stock_news_batch(stock_news: dict) -> dict:
+    """
+    Evaluate recent headlines for each stock and flag dangerous ones.
+    Input: {symbol: [headline1, headline2, ...]}
+    Output: {symbol: {sentiment, risk, skip, reason}}
+    """
+    if not stock_news:
+        return {}
+    system = (
+        "You are a pre-trade news risk screener for a swing-trade bot. "
+        "For each stock, evaluate the recent headlines provided. "
+        "Respond ONLY with a valid JSON object. One key per symbol. Schema per symbol: "
+        '{"sentiment":"positive|neutral|negative","risk":"low|medium|high",'
+        '"skip":false,"reason":"<1 sentence>"} '
+        "skip=true ONLY for: earnings miss, fraud/SEC investigation, delisting notice, "
+        "massive guidance cut, clinical trial failure, or catastrophic news. "
+        "Normal volatility, analyst upgrades/downgrades, sector news = skip=false. "
+        "Be conservative — only block on clearly company-destroying events."
+    )
+    user = "Stock headlines to evaluate:\n" + json.dumps(stock_news, indent=2)
+    try:
+        raw = _ask(system, user, max_tokens=1024)
+        return _parse_json(raw)
+    except Exception as e:
+        log.error("Stock news batch check failed: %s", e)
+        return {}

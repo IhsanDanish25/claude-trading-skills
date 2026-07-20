@@ -88,6 +88,10 @@ def _sector_gate(symbol: str, sector_counts: dict, fmp_key: str,
 
 ET  = pytz.timezone("America/New_York")
 
+# Populated from state/market_brief_<date>.json at run() start.
+# Read by strategy runners without changing their signatures.
+_today_brief: dict = {}
+
 # Strategy screeners — fail gracefully if FMP unavailable, but log the real
 # cause so an import bug doesn't masquerade as "FMP unavailable" forever.
 try:
@@ -509,6 +513,13 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today, sector_count
                                    gate="idempotency", reason="already bought today")
             continue
 
+        # News filter — skip if pre_market research flagged bad sentiment
+        _news = _today_brief.get("stock_news", {}).get(sym, {})
+        if _news.get("skip"):
+            log.info(f"  ✗ {sym} SKIP — news risk: {_news.get('reason', 'flagged by research')}")
+            trade_logger.log_event("order_skipped", "meanrev", sym,
+                                   gate="news_filter", reason=_news.get("reason", ""))
+            continue
 
         # Sector concentration guard
         _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
@@ -1161,6 +1172,14 @@ def _run_momentum(broker, cb, pv, slots, held, already_bought_today, sector_coun
             log.info(f"  ✗ {sym} SKIP — already bought today")
             continue
 
+        # News filter — skip if pre_market research flagged bad sentiment
+        _mnews = _today_brief.get("stock_news", {}).get(sym, {})
+        if _mnews.get("skip"):
+            log.info(f"  ✗ {sym} SKIP — news risk: {_mnews.get('reason', 'flagged by research')}")
+            trade_logger.log_event("order_skipped", "momentum", sym,
+                                   gate="news_filter", reason=_mnews.get("reason", ""))
+            continue
+
         fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
         if not _sector_gate(sym, sector_counts, fkp, "momentum", log):
             continue
@@ -1339,6 +1358,25 @@ def run():
     already_bought_today = _load_today_bought()
     if already_bought_today:
         log.info(f"Already bought today (idempotency): {sorted(already_bought_today)}")
+
+    # ── Load today's research brief (built by pre_market at 6 AM) ────────────
+    global _today_brief
+    try:
+        from core.researcher import load_today_brief
+        _today_brief = load_today_brief()
+        if _today_brief:
+            log.info("Research brief: risk=%s | %s",
+                     _today_brief.get("macro_risk", "?"),
+                     _today_brief.get("summary", "")[:80])
+            if _today_brief.get("trade_bias_override") == "cash":
+                _evt = (_today_brief.get("event_blocks") or [{}])[0]
+                log.warning("RESEARCH OVERRIDE: CASH — %s",
+                            _evt.get("event", "high-impact event today"))
+                return
+        else:
+            log.info("No research brief found — proceeding without news filter")
+    except Exception as _be:
+        log.warning("Research brief load failed (non-fatal): %s", _be)
 
     # ── Regime gate (shared by both strategies) ─────────────────────────────
     try:

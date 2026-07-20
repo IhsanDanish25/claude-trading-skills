@@ -128,7 +128,33 @@ def run():
     for n in news[:5]:
         log.info(f"  📰 [{n.get('symbol','')}] {n.get('title','')[:80]}")
 
-    # ── 6. Day plan summary ───────────────────────────────────────────────────
+    # ── 6. Daily research brief (sector rotation + stock news + macro) ────────
+    log.info("── Daily research brief")
+    try:
+        _research_syms: list[str] = []
+        if top_vcps:
+            _research_syms += [s["symbol"] for s in buy_list[:10]]
+        if "meanrev" in config.STRATEGY_MODE:
+            try:
+                from core.meanrev_screener import screen as _mr_screen
+                _research_syms += [c["symbol"] for c in _mr_screen()[:10]]
+            except Exception as _me:
+                log.debug("MeanRev screen for research failed: %s", _me)
+        _research_syms = list(dict.fromkeys(_research_syms))[:20]
+        from core.researcher import build_daily_brief
+        brief = build_daily_brief(breadth, calendar, _research_syms)
+        log.info("  Macro risk: %s | %s",
+                 brief.get("macro_risk", "?"),
+                 brief.get("summary", "")[:90])
+        _skips = [s for s, v in brief.get("stock_news", {}).items() if v.get("skip")]
+        if _skips:
+            log.warning("  News filter will skip at market-open: %s", _skips)
+        if brief.get("trade_bias_override"):
+            log.warning("  ⚠️  Trade bias override: %s", brief["trade_bias_override"])
+    except Exception as _re:
+        log.warning("  Research brief failed (non-fatal): %s", _re)
+
+    # ── 7. Day plan summary ───────────────────────────────────────────────────
     log.info("── Day plan")
     if regime["trade_bias"] == "cash":
         log.info("  ⚠️  CASH BIAS — no new entries today")
