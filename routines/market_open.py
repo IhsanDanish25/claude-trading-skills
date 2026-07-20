@@ -1307,6 +1307,152 @@ def _run_sector(broker, cb, pv, slots, held, already_bought_today, sector_counts
         sector_counts[c["sector"]] = sector_counts.get(c["sector"], 0) + 1
 
 
+def _run_vcp(broker, cb, pv, slots, held, already_bought_today, sector_counts):
+    """VCP: volatility-contraction breakout candidates. Consumes the buy_list
+    pre_market already screened and Claude-scored (state/pre_market_watchlist.json)
+    instead of re-screening. Opt-in only — unvalidated, not in the recommended
+    STRATEGY_MODE default (see docs/dev/strategy-validation-status.md)."""
+    watchlist_path = os.path.join(config.STATE_DIR, "pre_market_watchlist.json")
+    try:
+        with open(watchlist_path) as f:
+            watchlist = json.load(f)
+    except FileNotFoundError:
+        log.warning("VCP: no pre_market_watchlist.json today — skipping")
+        return
+    except Exception as e:
+        log.warning(f"VCP: watchlist load failed ({e}) — skipping")
+        return
+
+    candidates = watchlist.get("buy_list", [])
+    log.info(f"VCP: {len(candidates)} candidates from this morning's screen")
+    if not candidates:
+        return
+
+    for c in candidates:
+        sym = c["symbol"]
+        size_pct = config.VCP_SIZE_PCT
+        amount = pv * size_pct
+
+        trade_logger.log_event(
+            "signal_detected", "vcp", sym,
+            score=c.get("score"), reason=c.get("reason", ""),
+        )
+
+        if sym in held:
+            log.info(f"  ✗ {sym} SKIP — already holding")
+            trade_logger.log_event("order_skipped", "vcp", sym,
+                                   gate="already_held", reason="already holding")
+            continue
+        if sym in already_bought_today:
+            log.info(f"  ✗ {sym} SKIP — already bought today")
+            trade_logger.log_event("order_skipped", "vcp", sym,
+                                   gate="idempotency", reason="already bought today")
+            continue
+
+        _news = _today_brief.get("stock_news", {}).get(sym, {})
+        if _news.get("skip"):
+            log.info(f"  ✗ {sym} SKIP — news risk: {_news.get('reason', 'flagged by research')}")
+            trade_logger.log_event("order_skipped", "vcp", sym,
+                                   gate="news_filter", reason=_news.get("reason", ""))
+            continue
+
+        _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
+        if not _sector_gate(sym, sector_counts, _fkp, "vcp", log):
+            continue
+
+        log.info(f"VCP BUY {sym} | score={c.get('score')} | {str(c.get('reason', ''))[:60]} | ${amount:,.0f}")
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"  ✗ {sym} SKIP — cannot free cash from SPY base")
+                trade_logger.log_event("gate_failed", "vcp", sym,
+                                       gate="free_cash", amount=round(amount, 2),
+                                       reason="cannot free cash from SPY base")
+                continue
+            trade_logger.log_event("gate_passed", "vcp", sym,
+                                   gate="free_cash", amount=round(amount, 2))
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+                trade_logger.log_event("gate_passed", "vcp", sym,
+                                       gate="circuit_breaker", amount=round(amount, 2))
+            except EmergencyLiquidation as emerg:
+                log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
+                trade_logger.log_event("gate_failed", "vcp", sym,
+                                       gate="emergency_liquidation", reason=str(emerg))
+                raise
+            except TradingHalted as halt:
+                log.warning(f"  ✗ {sym} blocked by circuit breaker: {halt}")
+                trade_logger.log_event("gate_failed", "vcp", sym,
+                                       gate="circuit_breaker", reason=str(halt))
+                continue
+            result = broker.buy(
+                sym, dollar_amount=amount,
+                stop_loss_pct=config.VCP_STOP_PCT,
+                take_profit_pct=None,
+            )
+            if result.get("blocked"):
+                log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
+                trade_logger.log_event("order_skipped", "vcp", sym,
+                                       gate="broker_buy", reason=result.get("reason"))
+                continue
+            if not result.get("stop_attached"):
+                log.error(f"  ✗ {sym} stop NOT attached — flattening")
+                broker.sell(sym, qty=result["qty"])
+                trade_logger.log_event("order_skipped", "vcp", sym,
+                                       gate="stop_attach", reason="stop-loss attach failed — flattened",
+                                       qty=result["qty"], price=result["price"])
+                continue
+
+            log.info(f"  ✓ VCP {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                     f"SL={result['stop']} (hold {config.VCP_HOLD_DAYS}d)")
+            trade_logger.log_event("order_placed", "vcp", sym,
+                                   qty=result["qty"], price=result["price"],
+                                   stop=result["stop"], amount=round(amount, 2),
+                                   hold_days=config.VCP_HOLD_DAYS)
+
+            pead_track(sym, result["price"],
+                       surprise_pct=c.get("score", 0),
+                       report_date=datetime.date.today().isoformat(),
+                       strategy="vcp",
+                       hold_days=config.VCP_HOLD_DAYS)
+            send_trade_alert(
+                action="BUY", ticker=sym, shares=result["qty"],
+                price=result["price"], stop=result["stop"], target=None,
+                reason=f"VCP score={c.get('score')} {str(c.get('reason', ''))[:80]}",
+            )
+            _mark_bought(sym, result)
+            _append_trade_log({
+                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                "symbol": sym, "side": "buy", "qty": result.get("qty"),
+                "price": result.get("price"), "stop": result.get("stop"),
+                "target": None, "strategy": "vcp",
+                "score": c.get("score"),
+                "exit_date": None, "exit_price": None, "pnl_pct": None,
+            })
+            slots[0] -= 1
+            if slots[0] <= 0:
+                log.info("Slots exhausted — VCP stopping")
+                break
+        except Exception as e:
+            log.error(f"  ✗ VCP {sym} failed: {e}")
+
+
+# Strategy dispatch table, keyed by the values accepted in STRATEGY_MODE
+# (core/config.py). Module-level so it's inspectable/testable without calling
+# run(); run() iterates config.STRATEGY_MODES against this map in order.
+STRATEGY_HANDLERS = {
+    "pead":     _run_pead,
+    "meanrev":  _run_meanrev,
+    "insider":  _run_insider,
+    "squeeze":  _run_squeeze,
+    "breakout": _run_breakout,
+    "earnmom":  _run_earnmom,
+    "gapfill":  _run_gapfill,
+    "momentum": _run_momentum,
+    "sector":   _run_sector,
+    "vcp":      _run_vcp,
+}
+
+
 def run():
     config.validate()
     now = datetime.datetime.now(ET)
@@ -1428,21 +1574,10 @@ def run():
         log.info(f"Sector snapshot: {sector_counts}")
 
     # ── STRATEGY ROUTER ───────────────────────────────────────────────────────
-    # Run each strategy in priority order (PEAD → MEANREV → INSIDER → SQUEEZE →
-    # BREAKOUT → EARNMOM). Each runner consumes from the shared `slots` pool.
-    # Held-set and already_bought_today accumulate across runners so the same
-    # symbol is never double-bought within a single run.
-    STRATEGY_HANDLERS = {
-        "pead":     _run_pead,
-        "meanrev":  _run_meanrev,
-        "insider":  _run_insider,
-        "squeeze":  _run_squeeze,
-        "breakout":  _run_breakout,
-        "earnmom":  _run_earnmom,
-        "gapfill":  _run_gapfill,
-        "momentum": _run_momentum,
-        "sector":   _run_sector,
-    }
+    # Each runner consumes from the shared `slots` pool. Held-set and
+    # already_bought_today accumulate across runners so the same symbol is
+    # never double-bought within a single run. Handler map: STRATEGY_HANDLERS
+    # (module level, defined near the runners above).
     log.info(f"Strategy modes: {[s.upper() for s in config.STRATEGY_MODES]}")
 
     for strategy in config.STRATEGY_MODES:
