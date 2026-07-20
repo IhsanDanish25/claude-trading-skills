@@ -1,111 +1,192 @@
 """
-CSP SCREENER — Weekly Cash-Secured Put Generator
-Scans for optimal premium plays based on support + IV + days-to-expiry.
+CSP SCREENER — Weekly Cash-Secured Put Generator (v2)
+
+Pipeline:
+  1. Run meanrev screener → oversold stocks (RSI<30, below lower BB)
+  2. For each candidate, fetch real Alpaca put option chain
+  3. Find best 5% OTM strike expiring next Friday within budget
+  4. Sort by premium_pct (highest weekly income first)
+
+Why meanrev → CSP?
+  Oversold stocks have elevated IV → fatter premiums.
+  If assigned, you buy at a discount (meanrev thesis still holds).
+  Win rate is high: stock only needs to stay above an already-oversold strike.
 """
-import os, sys, json
-from datetime import datetime, timedelta
+from __future__ import annotations
+
+import datetime
+import logging
+import math
+import os
+import sys
+
 import pytz
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import logger, config
-from core.broker import BrokerClient
-from alpaca.data.requests import StockLatestQuoteRequest
-from alpaca.data import StockDataClient
+from core import config
 
-log = logger.setup("csp_screener")
+log = logging.getLogger(__name__)
+
 ET = pytz.timezone("America/New_York")
 
-
-def get_iv_and_strikes(symbol: str, ref_price: float) -> dict:
-    """Stub — returns mock premium estimates.
-    Replace with real options API call when available."""
-    # Simplified model: IV 30-50%, premium ≈ ref_price × 0.03 × DTE/7
-    import random
-    iv = random.uniform(0.30, 0.55)
-    dte = 7
-    premium_pct = iv * (dte / 365) * ref_price
-    return {
-        "symbol": symbol,
-        "ref_price": ref_price,
-        "iv": round(iv * 100, 1),
-        "strike_pct": 0.95,
-        "strike": round(ref_price * 0.95, 2),
-        "premium": round(premium_pct, 2),
-        "premium_pct": round(premium_pct / (ref_price * 0.95) * 100, 2),
-        "dte": dte,
-        "win_rate": round(random.uniform(70, 82), 1),
-    }
+_OTM_PCT = 0.95            # target strike 5% below current price
+_MAX_COLLATERAL_PCT = 0.85  # never tie up more than 85% of cash in one contract
+_MIN_PREMIUM_PCT = 0.30     # minimum 0.30% weekly return on collateral
+_IV_ESTIMATE = 0.40         # fallback IV when no live quote available
 
 
-def screen_csp_candidates(broker: BrokerClient, min_premium: float = 12) -> list:
+def _next_friday() -> str:
+    today = datetime.date.today()
+    days_ahead = (4 - today.weekday()) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    return (today + datetime.timedelta(days=days_ahead)).isoformat()
+
+
+def _estimate_premium(strike: float, dte: int, iv: float = _IV_ESTIMATE) -> float:
+    """Black-Scholes approximation for ATM put premium. Rough but directionally correct."""
+    return round(strike * iv * math.sqrt(dte / 365) * 0.4, 2)
+
+
+def _contract_premium(contract) -> float:
+    """Extract per-share premium from an Alpaca option contract object."""
+    for attr in ("close_price", "last_price", "ask_price", "bid_price"):
+        val = float(getattr(contract, attr, 0) or 0)
+        if val > 0:
+            return val
+    return 0.0
+
+
+def screen_csp_candidates(broker, min_premium_pct: float = _MIN_PREMIUM_PCT) -> list:
     """
-    Scan held positions + hot sectors for CSP plays.
-    Candidates: oversold stocks near support, OR high-quality names
-    the account already wants to own.
+    Return CSP candidates sorted by weekly premium_pct (highest first).
+    Each dict has: symbol, ref_price, rsi, strike, expiration, dte,
+                   premium, premium_pct, collateral, contract_symbol.
     """
-    candidates = []
+    acct = broker.get_account()
+    cash = float(acct.cash)
+    options_bp = float(getattr(acct, "options_buying_power", cash) or cash)
+    max_collateral = min(cash, options_bp) * _MAX_COLLATERAL_PCT
 
-    # 1. Held positions — sell covered puts if holding shares
-    for pos in broker.get_positions():
-        try:
-            price = float(pos.market_value) / float(pos.qty)
-            result = {
-                "symbol": pos.symbol,
-                "ref_price": round(price, 2),
-                "type": "covered_csp",
-                "action": "ROLL or CLOSE",
-                "note": f"Holding {pos.qty} shares at avg ${pos.avg_entry_price}"
-            }
-            candidates.append(result)
-        except Exception:
-            pass
+    log.info("CSP budget: cash=$%.2f options_bp=$%.2f max_collateral=$%.2f",
+             cash, options_bp, max_collateral)
 
-    # 2. Market oversold picks — these are the live CSP candidates
-    # Replace hardcoded list with VCP / mean-rev screen going forward
-    WATCH_LIST = [
-        ("INTC", 95.0, 90.0),   # support: $90
-        ("NOK", 10.10, 9.50),   # support: $9.50
-        ("AMD", 495.0, 480.0),  # support: $480
-    ]
+    if max_collateral < 50:
+        log.warning("Insufficient budget for CSP (need ≥$50 collateral, have $%.2f)", max_collateral)
+        return []
 
-    # Filter only if candidate premium is worth it
-    MAX_COLLATERAL_PCT = 0.15  # max $39 for $266 account
+    # Step 1 — oversold candidates from meanrev screener
+    raw_candidates: list[dict] = []
+    try:
+        from core.meanrev_screener import screen as _meanrev
+        raw_candidates = _meanrev()
+        log.info("MeanRev: %d oversold candidates", len(raw_candidates))
+    except Exception as e:
+        log.error("MeanRev screener failed: %s — using fallback watchlist", e)
 
-    for symbol, ref, support in WATCH_LIST:
-        strike = round(support, 2)
-        collateral = strike * 100
-        if collateral / config.equity() > MAX_COLLATERAL_PCT:
+    # Fallback: cheap liquid names from SP80 universe when meanrev finds nothing
+    if not raw_candidates:
+        fallback_syms = [s for s in getattr(config, "SP80_UNIVERSE", [])
+                         if s in ("F", "INTC", "NOK", "SNAP", "SOFI", "PLTR",
+                                  "BAC", "WFC", "C", "T", "VZ", "CSCO")]
+        raw_candidates = [{"symbol": s, "price": 0, "rsi": 35, "score": 50,
+                            "bb_position": 0} for s in fallback_syms[:10]]
+        log.info("Fallback watchlist: %s", [c["symbol"] for c in raw_candidates])
+
+    expiration = _next_friday()
+    results: list[dict] = []
+
+    for c in raw_candidates[:15]:
+        symbol = c.get("symbol", "")
+        if not symbol:
             continue
 
-        iv_model = get_iv_and_strikes(symbol, ref)
-        if iv_model["premium"] < min_premium:
-            log.info(f"  SKIP {symbol} — premium ${iv_model['premium']:.2f} below ${min_premium}")
+        ref_price = float(c.get("price") or 0)
+        if ref_price <= 0:
+            try:
+                ref_price = broker.get_price(symbol)
+            except Exception:
+                log.info("  SKIP %s — cannot fetch price", symbol)
+                continue
+
+        if ref_price <= 0:
             continue
 
-        candidates.append({
-            "symbol": symbol,
-            "ref_price": ref,
-            "support": support,
-            "strike": strike,
-            "premium": iv_model["premium"],
-            "premium_pct": iv_model["premium_pct"],
-            "dte": 7,
-            "win_rate": iv_model["win_rate"],
-            "collateral": collateral,
-            "type": "csp",
-            "action": "SELL",
-            "reason": f"Oversold at {ref}, support at {support}",
-            "assignment_value": collateral,
+        target_strike = round(ref_price * _OTM_PCT, 2)
+        est_collateral = target_strike * 100
+
+        if est_collateral > max_collateral:
+            log.info("  SKIP %s — collateral $%.0f > budget $%.0f",
+                     symbol, est_collateral, max_collateral)
+            continue
+
+        # Step 2 — real option chain from Alpaca
+        contracts = broker.get_put_contracts(
+            symbol, expiration, max_strike=target_strike * 1.10
+        )
+
+        if contracts:
+            # Pick closest strike at or below target
+            best = min(
+                contracts,
+                key=lambda ct: abs(float(getattr(ct, "strike_price", 0) or 0) - target_strike)
+            )
+            strike = float(getattr(best, "strike_price", target_strike) or target_strike)
+            contract_symbol = getattr(best, "symbol", "")
+            premium_per_share = _contract_premium(best)
+        else:
+            log.info("  %s — no live contracts, using estimated premium", symbol)
+            strike = target_strike
+            contract_symbol = ""
+            premium_per_share = 0.0
+
+        collateral = round(strike * 100, 2)
+        if collateral > max_collateral:
+            log.info("  SKIP %s — nearest strike $%.2f collateral $%.0f > budget",
+                     symbol, strike, collateral)
+            continue
+
+        # Fall back to BS estimate when no live quote
+        dte = max(1, (datetime.date.fromisoformat(expiration) - datetime.date.today()).days)
+        if premium_per_share <= 0:
+            premium_per_share = _estimate_premium(strike, dte)
+            log.info("  %s — estimated premium $%.2f/share (no live quote)", symbol, premium_per_share)
+
+        premium_contract = round(premium_per_share * 100, 2)
+        premium_pct = round(premium_contract / collateral * 100, 3) if collateral > 0 else 0
+
+        if premium_pct < min_premium_pct:
+            log.info("  SKIP %s — premium %.3f%% below min %.2f%%",
+                     symbol, premium_pct, min_premium_pct)
+            continue
+
+        results.append({
+            "symbol":           symbol,
+            "ref_price":        round(ref_price, 2),
+            "rsi":              round(float(c.get("rsi") or 0), 1),
+            "bb_position":      round(float(c.get("bb_position") or 0), 1),
+            "meanrev_score":    round(float(c.get("score") or 0), 1),
+            "strike":           strike,
+            "expiration":       expiration,
+            "dte":              dte,
+            "premium_per_share": premium_per_share,
+            "premium":          premium_contract,
+            "premium_pct":      premium_pct,
+            "collateral":       collateral,
+            "contract_symbol":  contract_symbol,
+            "type":             "csp",
+            "action":           "SELL",
         })
 
-    # Sort by premium (highest first)
-    candidates.sort(key=lambda x: x.get("premium", 0), reverse=True)
-    return candidates
+        log.info("  ★ %s strike=$%.2f premium=$%.2f (%.2f%%) collateral=$%.0f DTE=%d",
+                 symbol, strike, premium_contract, premium_pct, collateral, dte)
+
+    results.sort(key=lambda x: x["premium_pct"], reverse=True)
+    return results
 
 
 def pick_best(candidates: list) -> dict | None:
-    """Return the top CSP candidate that's actionable."""
     for c in candidates:
         if c.get("type") == "csp" and c.get("action") == "SELL":
             return c
@@ -113,33 +194,21 @@ def pick_best(candidates: list) -> dict | None:
 
 
 def run():
+    from core import logger
+    from core.broker import BrokerClient
     config.validate()
     logger.banner(log, "CSP SCREENER — Weekly Pick")
-
     broker = BrokerClient()
-    cash = float(broker.get_account().cash)
-
-    log.info(f"Cash available: ${cash:.2f}")
-
-    candidates = screen_csp_candidates(broker, min_premium=10)
-
-    log.info(f"Candidates found: {len(candidates)}")
-    for c in candidates:
-        if c["type"] == "csp":
-            log.info(f"  ★ {c['symbol']:6} strike=${c['strike']} "
-                     f"premium=${c['premium']:.2f} "
-                     f"win_rate={c['win_rate']}%")
-
+    candidates = screen_csp_candidates(broker)
+    log.info("Candidates: %d", len(candidates))
     best = pick_best(candidates)
     if best:
-        log.info(f"\n  TOP PICK: {best['symbol']} ${best['strike']} CSP")
-        log.info(f"  Premium:   ${best['premium']:.2f}")
-        log.info(f"  Collateral: ${best['collateral']:.2f}")
-        log.info(f"  Win rate:  {best['win_rate']}%")
-        return best
+        log.info("TOP PICK: %s $%.2f put | premium=$%.2f (%.2f%%) | collateral=$%.0f",
+                 best["symbol"], best["strike"], best["premium"],
+                 best["premium_pct"], best["collateral"])
     else:
-        log.info("  No actionable CSP this week")
-        return None
+        log.info("No actionable CSP this week")
+    return best
 
 
 if __name__ == "__main__":

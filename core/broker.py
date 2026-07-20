@@ -675,6 +675,27 @@ class BrokerClient:
             log.error(f"CSP order failed: {e}")
             return {"blocked": True, "reason": str(e)}
 
+    def get_put_contracts(self, symbol: str, expiration: str,
+                          max_strike: float = None) -> list:
+        """Fetch available put option contracts for a symbol on a given expiry date."""
+        try:
+            from alpaca.trading.requests import GetOptionContractsRequest
+            kwargs = dict(
+                underlying_symbols=[symbol.upper()],
+                expiration_date_gte=expiration,
+                expiration_date_lte=expiration,
+                _fcc_arg_type="put",
+                status="active",
+                limit=50,
+            )
+            if max_strike is not None:
+                kwargs["strike_price_lte"] = float(max_strike)
+            req = GetOptionContractsRequest(**kwargs)
+            return list(self.trade.get_option_contracts(req))
+        except Exception as e:
+            log.warning("Option chain %s/%s: %s", symbol, expiration, e)
+            return []
+
     def close_option(self, contract_symbol: str, qty: int = 1) -> dict:
         """Buy to close an existing short option position."""
         try:

@@ -80,17 +80,66 @@ def run():
     if regime in ("BULLISH", "NEUTRAL"):
 
         log.info(f"  ★ TOP PICK: {best['symbol']} ${best.get('strike', 'N/A')} CSP")
+        log.info(f"  RSI: {best.get('rsi', '?')} | MeanRev score: {best.get('meanrev_score', '?')}")
+        log.info(f"  Premium: ~${best.get('premium', 0):.2f} ({best.get('premium_pct', 0):.2f}%/week)")
+        log.info(f"  Collateral: ${best.get('collateral', 0):.2f} | DTE: {best.get('dte', 7)}")
 
         collateral_ratio = best.get("collateral", 0) / pv
-        if collateral_ratio > 0.40:
-            log.warning(f"  ⚠️  Collateral {collateral_ratio:.0%} exceeds 40% — reduce qty or skip")
+        if collateral_ratio > 0.85:
+            log.warning(f"  ⚠️  Collateral {collateral_ratio:.0%} exceeds 85% of portfolio — skipping")
             order["status"] = "REVIEW_NEEDED"
         else:
             order["status"] = "READY_TO_EXECUTE"
-
-        log.info(f"  Premium: ~${best.get('premium', 0):.2f}")
-        log.info(f"  Win rate: {best.get('win_rate', 0)}%")
-        log.info(f"  Collateral: ${best.get('collateral', 0):.2f}")
+            # Auto-execute: place the CSP order via Alpaca
+            opt_level = broker.options_level()
+            log.info(f"  Options level: {opt_level}")
+            if opt_level < 1:
+                log.error("  OPTIONS NOT APPROVED — skipping execution")
+                order["status"] = "OPTIONS_NOT_APPROVED"
+            elif cash < best.get("collateral", 0):
+                log.warning("  Insufficient cash ($%.2f) for collateral ($%.2f)",
+                            cash, best.get("collateral", 0))
+                order["status"] = "INSUFFICIENT_CASH"
+            else:
+                try:
+                    result = broker.sell_csp(
+                        symbol=best["symbol"],
+                        strike=best["strike"],
+                        expiration=best["expiration"],
+                        premium=best.get("premium_per_share"),
+                        qty=1,
+                    )
+                    if result.get("blocked"):
+                        log.warning("  CSP blocked: %s", result.get("reason"))
+                        order["status"] = "BLOCKED"
+                        order["block_reason"] = result.get("reason")
+                    else:
+                        order["status"] = "EXECUTED"
+                        order["execution"] = {
+                            k: v for k, v in result.items() if k != "order"
+                        }
+                        premium_collected = result.get("premium_collected", 0)
+                        log.info("  ✅ CSP EXECUTED: %s $%.2f put exp %s | premium=$%.2f",
+                                 best["symbol"], best["strike"],
+                                 best["expiration"], premium_collected)
+                        try:
+                            from core.notifier import send_trade_alert
+                            send_trade_alert(
+                                symbol=best["symbol"],
+                                side="sell_to_open",
+                                qty=1,
+                                price=best["strike"],
+                                strategy="weekly_csp",
+                                note=(f"CSP: ${best['strike']} put exp {best['expiration']} | "
+                                      f"premium=${premium_collected:.2f} | "
+                                      f"RSI={best.get('rsi', '?')}"),
+                            )
+                        except Exception as ne:
+                            log.warning("Notify failed: %s", ne)
+                except Exception as e:
+                    log.error("  CSP execution error: %s", e)
+                    order["status"] = "EXECUTION_FAILED"
+                    order["error"] = str(e)
 
     # ── Save order ──────────────────────────────────────────────────────────
     with open(STATE_FILE, "w") as f:
