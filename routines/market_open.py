@@ -1463,6 +1463,101 @@ def _run_vcp(broker, cb, pv, slots, held, already_bought_today, sector_counts):
             log.error(f"  ✗ VCP {sym} failed: {e}")
 
 
+def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts):
+    """Crypto momentum: buy BTC/USD, ETH/USD, SOL/USD on 24h breakout."""
+    from core.crypto_screener import screen as crypto_screen
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import MarketOrderRequest
+    import time as _time
+
+    log.info("Crypto: screening BTC/ETH/SOL for 24h momentum...")
+    candidates = crypto_screen()
+    log.info(f"Crypto: {len(candidates)} momentum candidates")
+    if not candidates:
+        return
+
+    size_pct = config.MAX_POSITION_SIZE_PCT
+
+    for c in candidates:
+        sym = c["symbol"]
+        amount = pv * size_pct
+
+        if sym in held or sym in already_bought_today:
+            log.info(f"  ✗ {sym} SKIP — already holding/bought today")
+            continue
+
+        log.info(f"Crypto BUY {sym} | momentum={c['momentum_pct']:+.1f}% | vol×{c['vol_ratio']:.1f} | ${amount:,.0f}")
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"  ✗ {sym} SKIP — cannot free cash from SPY base")
+                continue
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+            except EmergencyLiquidation as emerg:
+                log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
+                raise
+            except TradingHalted as halt:
+                log.warning(f"  ✗ {sym} blocked by circuit breaker: {halt}")
+                continue
+
+            notional = round(min(amount, broker.buying_power()), 2)
+            if notional < 1.0:
+                log.warning(f"  ✗ {sym} SKIP — notional ${notional:.2f} below $1 minimum")
+                continue
+
+            order = broker.trade.submit_order(MarketOrderRequest(
+                symbol=sym,
+                notional=notional,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.GTC,
+            ))
+            log.info(f"Crypto BUY {sym} ${notional:.2f} notional submitted [{str(order.id)[:8]}]")
+
+            fill_price = None
+            filled_qty = 0.0
+            for _ in range(10):
+                try:
+                    o = broker.trade.get_order_by_id(order.id)
+                    if o.filled_avg_price:
+                        fill_price = float(o.filled_avg_price)
+                        filled_qty = float(o.filled_qty) if o.filled_qty else round(notional / fill_price, 9)
+                        break
+                except Exception:
+                    pass
+                _time.sleep(0.5)
+
+            basis = fill_price or c["price"]
+            if filled_qty <= 0:
+                filled_qty = round(notional / basis, 9)
+
+            stop = round(basis * (1 - config.VCP_STOP_PCT), 2)
+            stop_attached, _ = broker.attach_stop_target(sym, filled_qty, stop, None)
+
+            log.info(f"  ✓ Crypto {sym} {filled_qty:.6f} @ ${basis:,.2f} SL=${stop:,.2f} stop_attached={stop_attached}")
+            send_trade_alert(
+                action="BUY",
+                ticker=sym.replace("/USD", ""),
+                shares=round(filled_qty, 6),
+                price=basis,
+                stop=stop,
+                target=None,
+                reason=f"Crypto momentum {c['momentum_pct']:+.1f}% vol×{c['vol_ratio']:.1f}",
+            )
+            _mark_bought(sym, {"qty": filled_qty, "price": basis})
+            _append_trade_log({
+                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                "symbol": sym, "side": "buy", "qty": filled_qty,
+                "price": basis, "stop": stop, "target": None, "strategy": "crypto",
+                "score": c.get("score"), "exit_date": None, "exit_price": None, "pnl_pct": None,
+            })
+            slots[0] -= 1
+            if slots[0] <= 0:
+                log.info("Slots exhausted — crypto stopping")
+                break
+        except Exception as e:
+            log.error(f"  ✗ Crypto {sym} failed: {e}")
+
+
 # Strategy dispatch table, keyed by the values accepted in STRATEGY_MODE
 # (core/config.py). Module-level so it's inspectable/testable without calling
 # run(); run() iterates config.STRATEGY_MODES against this map in order.
@@ -1477,6 +1572,7 @@ STRATEGY_HANDLERS = {
     "momentum": _run_momentum,
     "sector":   _run_sector,
     "vcp":      _run_vcp,
+    "crypto":   _run_crypto,
 }
 
 

@@ -24,8 +24,10 @@ try:
     from alpaca.trading.requests import GetPortfolioHistoryRequest
 except ImportError:
     GetPortfolioHistoryRequest = None
-from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import (
+    CryptoBarsRequest,
+    CryptoLatestTradeRequest,
     StockBarsRequest,
     StockLatestQuoteRequest,
     StockLatestTradeRequest,
@@ -55,6 +57,7 @@ class BrokerClient:
     def __init__(self):
         self.trade = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=False)
         self.data = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        self.crypto_data = CryptoHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
         log.info(f"Broker init [LIVE] → {ALPACA_BASE_URL}")
 
     # ── Account ───────────────────────────────────────────────────────────────
@@ -163,6 +166,28 @@ class BrokerClient:
         if last is not None and last > 0:
             return last
         raise RuntimeError(f"no usable price for {symbol}")
+
+    def get_crypto_price(self, symbol: str) -> float:
+        """Latest trade price for a crypto symbol (e.g. 'BTC/USD')."""
+        try:
+            resp = self.crypto_data.get_crypto_latest_trade(
+                CryptoLatestTradeRequest(symbol_or_symbols=symbol)
+            )
+            return float(resp[symbol].price)
+        except Exception as e:
+            log.warning("get_crypto_price failed for %s: %s — trying bars", symbol, e)
+        try:
+            import datetime, pytz
+            end = datetime.datetime.now(pytz.UTC)
+            start = end - datetime.timedelta(hours=2)
+            bars = self.crypto_data.get_crypto_bars(
+                CryptoBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute,
+                                  start=start, end=end)
+            )
+            df = bars[symbol].df
+            return float(df["close"].iloc[-1])
+        except Exception as e2:
+            raise RuntimeError(f"no usable crypto price for {symbol}: {e2}")
 
     # ── Trade execution ───────────────────────────────────────────────────────
     def attach_stop_target(
