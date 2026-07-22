@@ -1308,20 +1308,47 @@ def _run_sector(broker, cb, pv, slots, held, already_bought_today, sector_counts
 
 
 def _run_vcp(broker, cb, pv, slots, held, already_bought_today, sector_counts):
-    """VCP: volatility-contraction breakout candidates. Consumes the buy_list
-    pre_market already screened and Claude-scored (state/pre_market_watchlist.json)
-    instead of re-screening. Opt-in only — unvalidated, not in the recommended
-    STRATEGY_MODE default (see docs/dev/strategy-validation-status.md)."""
+    """VCP: volatility-contraction breakout candidates. Prefers the pre-market
+    Claude-scored watchlist (state/pre_market_watchlist.json); falls back to an
+    inline technical screen (raw scores, no Claude) if the file is missing or
+    stale (e.g. after a container restart mid-day)."""
     watchlist_path = os.path.join(config.STATE_DIR, "pre_market_watchlist.json")
+    watchlist = None
+    today = datetime.datetime.now(ET).date().isoformat()
+
     try:
         with open(watchlist_path) as f:
-            watchlist = json.load(f)
+            wl = json.load(f)
+        if wl.get("generated", "")[:10] == today:
+            watchlist = wl
+        else:
+            log.info(f"VCP: watchlist stale ({wl.get('generated','?')[:10]}) — running inline screen")
     except FileNotFoundError:
-        log.warning("VCP: no pre_market_watchlist.json today — skipping")
-        return
+        log.info("VCP: no pre_market_watchlist.json — running inline screen")
     except Exception as e:
-        log.warning(f"VCP: watchlist load failed ({e}) — skipping")
-        return
+        log.warning(f"VCP: watchlist load failed ({e}) — running inline screen")
+
+    if watchlist is None:
+        try:
+            raw = screen()[:15]
+            buy_list = [
+                {**s,
+                 "score": s.get("raw_score", s.get("score", 0)),
+                 "action": "BUY",
+                 "reason": f"inline screen raw={s.get('raw_score', s.get('score', 0))}"}
+                for s in sorted(raw, key=lambda x: x.get("raw_score", x.get("score", 0)), reverse=True)
+                if s.get("raw_score", s.get("score", 0)) >= 50
+            ]
+            watchlist = {"buy_list": buy_list, "generated": datetime.datetime.now(ET).isoformat()}
+            try:
+                with open(watchlist_path, "w") as f:
+                    json.dump(watchlist, f, indent=2)
+            except Exception:
+                pass
+            log.info(f"VCP: inline screen → {len(buy_list)} BUY candidates (raw score >= 50)")
+        except Exception as e:
+            log.error(f"VCP: inline screen failed ({e}) — skipping")
+            return
 
     candidates = watchlist.get("buy_list", [])
     log.info(f"VCP: {len(candidates)} candidates from this morning's screen")
