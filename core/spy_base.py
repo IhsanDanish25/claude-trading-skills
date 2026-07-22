@@ -36,7 +36,7 @@ def get_spy_position(broker: BrokerClient) -> dict:
     if not pos:
         return {"qty": 0, "value": 0.0, "avg_entry": 0.0}
     return {
-        "qty": int(float(pos.qty)),
+        "qty": float(pos.qty),
         "value": abs(float(pos.market_value or 0)),
         "avg_entry": float(pos.avg_entry_price),
     }
@@ -138,84 +138,63 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
         return {"action": "exceeded_max_pct", "reason": f"SPY would be {spy_pct:.0%}>max{max_pct:.0%}", **info}
 
     if info["diff"] > 0:
-        # Need to BUY more SPY
+        # Need to BUY more SPY — use notional so fractional shares work
         buy_dollars = info["diff"]
-        qty = max(1, int(buy_dollars / spy_price))
-
-        # Clamp to available buying power — mirrors the guardrail
-        # BrokerClient.buy() has (added for the same failure mode: sizing off
-        # the equity/target diff alone can exceed actual spendable cash).
-        # Skip (don't force qty=1) rather than submit an order Alpaca will reject.
-        available_cash = broker.buying_power()
-        order_value = qty * spy_price
-        if order_value > available_cash:
-            cash_qty = max(0, int(available_cash / spy_price))
-            if cash_qty < 1:
-                log.warning(
-                    "SPY base BUY SKIPPED — insufficient buying power ($%.2f) for 1 share @ $%.2f",
-                    available_cash, spy_price,
-                )
-                return {"action": "insufficient_cash", "reason": "insufficient buying power", **info}
-            log.warning(
-                "SPY base BUY CLAMPED — %d shares ($%.0f) exceeds buying power ($%.0f); reduced to %d shares",
-                qty, order_value, available_cash, cash_qty,
-            )
-            qty = cash_qty
-
-        log.info(f"SPY base: BUYING {qty} shares (${buy_dollars:,.0f} underweight)")
+        notional = round(buy_dollars, 2)
+        if notional < 1.0:
+            return {"action": "none", "reason": "below_min_notional", **info}
+        est_qty = round(notional / spy_price, 4)
+        log.info(f"SPY base: BUYING ${notional:,.2f} notional (~{est_qty} shares, underweight)")
         try:
             from alpaca.trading.enums import OrderSide, TimeInForce
             from alpaca.trading.requests import MarketOrderRequest
             broker.trade.submit_order(MarketOrderRequest(
-                symbol="SPY", qty=qty, side=OrderSide.BUY,
-                time_in_force=TimeInForce.GTC,
-                client_order_id=f"spy-rebal-buy-{qty}",
+                symbol="SPY", notional=notional, side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
             ))
-            log.info(f"SPY base: bought {qty} @ ~${spy_price:.2f}")
+            log.info(f"SPY base: bought ${notional:,.2f} @ ~${spy_price:.2f}")
             send_trade_alert(
                 action="BUY",
                 ticker="SPY",
-                shares=qty,
+                shares=est_qty,
                 price=spy_price,
                 stop=0,
                 target=0,
                 reason="SPY base rebalance — idle cash deployed",
             )
-            return {"action": "buy", "qty": qty, "price": spy_price, **info}
+            return {"action": "buy", "qty": est_qty, "notional": notional, "price": spy_price, **info}
         except Exception as e:
             log.error(f"SPY base buy failed: {e}")
             return {"action": "error", "error": str(e), **info}
 
     elif info["diff"] < 0:
-        # Need to SELL SPY to free cash
+        # Need to SELL SPY to free cash — use fractional qty
         sell_dollars = abs(info["diff"])
-        qty = min(info["spy_qty"], max(1, int(sell_dollars / spy_price)))
-        log.info(f"SPY base: SELLING {qty} shares (${sell_dollars:,.0f} overweight)")
+        sell_qty = round(min(info["spy_qty"], sell_dollars / spy_price), 9)
+        if sell_qty <= 0:
+            return {"action": "none", "reason": "no_spy_to_sell", **info}
+        log.info(f"SPY base: SELLING {sell_qty:.4f} shares (${sell_dollars:,.0f} overweight)")
         try:
             from alpaca.trading.enums import OrderSide, TimeInForce
             from alpaca.trading.requests import MarketOrderRequest
             broker.trade.submit_order(MarketOrderRequest(
-                symbol="SPY", qty=qty, side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC,
-                client_order_id=f"spy-rebal-sell-{qty}",
+                symbol="SPY", qty=sell_qty, side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
             ))
-            log.info(f"SPY base: sold {qty} @ ~${spy_price:.2f}")
+            log.info(f"SPY base: sold {sell_qty:.4f} @ ~${spy_price:.2f}")
             send_trade_alert(
                 action="SELL",
                 ticker="SPY",
-                shares=qty,
+                shares=sell_qty,
                 price=spy_price,
                 stop=0,
                 target=0,
                 reason="SPY base rebalance — reducing SPY (overweight)",
             )
-            return {"action": "sell", "qty": qty, "price": spy_price, **info}
+            return {"action": "sell", "qty": sell_qty, "price": spy_price, **info}
         except Exception as e:
             err_str = str(e).lower()
             if "40310000" in err_str or "insufficient qty" in err_str:
-                # Shares are locked in a stale OCO. Cancel all open SPY sell
-                # orders and retry once. This replicates safe_oco_attach's
-                # cancel-then-retry pattern for the SPY rebalance path.
                 import time as _time
                 cancelled = _cancel_stale_spy_orders(broker)
                 log.warning(f"SPY base sell: 40310000 — cancelled {cancelled} stale "
@@ -223,21 +202,20 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
                 _time.sleep(1)
                 try:
                     broker.trade.submit_order(MarketOrderRequest(
-                        symbol="SPY", qty=qty, side=OrderSide.SELL,
-                        time_in_force=TimeInForce.GTC,
-                        client_order_id=f"spy-rebal-sell-retry-{qty}",
+                        symbol="SPY", qty=sell_qty, side=OrderSide.SELL,
+                        time_in_force=TimeInForce.DAY,
                     ))
-                    log.info(f"SPY base: sold {qty} @ ~${spy_price:.2f} (retry after cancel)")
+                    log.info(f"SPY base: sold {sell_qty:.4f} @ ~${spy_price:.2f} (retry after cancel)")
                     send_trade_alert(
                         action="SELL",
                         ticker="SPY",
-                        shares=qty,
+                        shares=sell_qty,
                         price=spy_price,
                         stop=0,
                         target=0,
                         reason="SPY base rebalance — reducing SPY (retry after stale order cancel)",
                     )
-                    return {"action": "sell", "qty": qty, "price": spy_price, **info}
+                    return {"action": "sell", "qty": sell_qty, "price": spy_price, **info}
                 except Exception as retry_err:
                     log.error(f"SPY base sell (retry) failed: {retry_err}")
                     return {"action": "error", "error": str(retry_err), **info}
@@ -264,9 +242,9 @@ def free_cash_for_pead(broker: BrokerClient, amount_needed: float) -> bool:
         return False
 
     spy_price = broker.get_price("SPY")
-    sell_qty = min(spy_pos["qty"], max(1, int(shortfall / spy_price) + 1))
+    sell_qty = round(min(spy_pos["qty"], (shortfall / spy_price) * 1.01), 9)
 
-    log.info(f"SPY base: selling {sell_qty} SPY to fund PEAD entry (need ${shortfall:,.0f})")
+    log.info(f"SPY base: selling {sell_qty:.4f} SPY to fund PEAD entry (need ${shortfall:,.0f})")
     import time as _time
 
     from alpaca.trading.enums import OrderSide, TimeInForce
@@ -275,8 +253,7 @@ def free_cash_for_pead(broker: BrokerClient, amount_needed: float) -> bool:
     def _do_sell():
         return broker.trade.submit_order(MarketOrderRequest(
             symbol="SPY", qty=sell_qty, side=OrderSide.SELL,
-            time_in_force=TimeInForce.GTC,
-            client_order_id=f"spy-pead-sell-{sell_qty}",
+            time_in_force=TimeInForce.DAY,
         ))
 
     try:
