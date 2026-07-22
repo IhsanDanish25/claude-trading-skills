@@ -166,7 +166,7 @@ class BrokerClient:
 
     # ── Trade execution ───────────────────────────────────────────────────────
     def attach_stop_target(
-        self, symbol: str, qty: int, stop: float, target: float
+        self, symbol: str, qty: float, stop: float, target: float
     ) -> tuple[bool, bool]:
         """Attach a protective exit as a single OCO (one-cancels-other) order:
         a take-profit limit and a stop-loss that share the same shares. When
@@ -340,6 +340,63 @@ class BrokerClient:
             qty = cash_qty
 
         if qty < 1:
+            # Fractional fallback: when a dollar_amount was requested but price
+            # exceeds available cash for 1 whole share, use notional ordering.
+            if dollar_amount is not None:
+                notional = round(min(dollar_amount, remaining_cap, available_cash), 2)
+                if notional < 1.0:
+                    log.warning(
+                        "BUY %s BLOCKED — notional $%.2f below $1 minimum",
+                        symbol, notional,
+                    )
+                    return {"blocked": True, "reason": "insufficient_cash"}
+                order = self.trade.submit_order(
+                    MarketOrderRequest(
+                        symbol=symbol,
+                        notional=notional,
+                        side=OrderSide.BUY,
+                        time_in_force=TimeInForce.DAY,
+                    )
+                )
+                log.info(f"BUY {symbol} ${notional:.2f} notional (fractional) submitted [{str(order.id)[:8]}]")
+                market_open = self.is_market_open()
+                fill_price = None
+                filled_qty_f = 0.0
+                for i in range(10):
+                    if not market_open and i > 0:
+                        log.warning("Market closed — aborting fill poll for %s", symbol)
+                        break
+                    try:
+                        o = self.trade.get_order_by_id(order.id)
+                    except Exception as e:
+                        log.warning("poll order %s failed: %s", symbol, e)
+                        break
+                    if o.filled_avg_price:
+                        fill_price = float(o.filled_avg_price)
+                        filled_qty_f = float(o.filled_qty) if o.filled_qty else round(notional / fill_price, 9)
+                        break
+                    time.sleep(0.5)
+                basis = fill_price if fill_price else ref_price
+                if fill_price is None:
+                    log.warning(f"{symbol} not filled within 5s — using reference ${ref_price:.2f}")
+                    filled_qty_f = round(notional / ref_price, 9)
+                stop = round(basis * (1 - stop_loss_pct), 2)
+                target = round(basis * (1 + take_profit_pct), 2) if take_profit_pct is not None else None
+                stop_attached, target_attached = self.attach_stop_target(symbol, filled_qty_f, stop, target)
+                log.info(
+                    f"BUY {symbol} {filled_qty_f:.6f} @ ${basis:.2f} | SL={stop} "
+                    f"TP={'None (no cap)' if target is None else target} "
+                    f"| stop_attached={stop_attached} target_attached={target_attached}"
+                )
+                return {
+                    "order": order,
+                    "qty": filled_qty_f,
+                    "price": basis,
+                    "stop": stop,
+                    "target": target,
+                    "stop_attached": stop_attached,
+                    "target_attached": target_attached,
+                }
             log.warning(
                 "BUY %s BLOCKED — insufficient buying power ($%.2f) for 1 share @ $%.2f",
                 symbol,

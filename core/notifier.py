@@ -174,12 +174,16 @@ def send_trade_alert(
     risk_pct  = round((price - stop) / price * 100, 2) if stop else 0
     rr        = round((target - price) / (price - stop), 1) if stop and target and price != stop else "?"
 
+    stop_str = f"${stop:.2f}  ({risk_pct}% risk)" if stop else "—"
+    target_str = f"${target:.2f}" if target is not None else "—"
+    stop_plain = f"${stop:.2f}" if stop else "—"
+    target_plain = f"${target:.2f}" if target is not None else "—"
     body = f"""
     <div class="card"><h2><span class="badge badge-{badge_cls}">{action_up}</span> {ticker}</h2>
       {_row("Price", f"${price:.2f}")}
       {_row("Shares", str(shares))}
-      {_row("Stop loss", f"${stop:.2f}  ({risk_pct}% risk)", "red")}
-      {_row("Target", f"${target:.2f}", "green")}
+      {_row("Stop loss", stop_str, "red")}
+      {_row("Target", target_str, "green")}
       {_row("Risk / Reward", f"1 : {rr}")}
       {_row("Exposure", f"${shares * price:,.0f}")}
       {f'<div class="row"><span class="label">Confidence</span><span class="value">{confidence}/10</span></div>' if confidence else ""}
@@ -189,7 +193,7 @@ def send_trade_alert(
     html = _html(f"{action_up} {ticker}", f"{shares} shares @ ${price:.2f}", body)
     plain = (
         f"{action_up} {ticker}: {shares} sh @ ${price:.2f}\n"
-        f"Stop: ${stop:.2f} | Target: ${target:.2f} | R:R 1:{rr}\n"
+        f"Stop: {stop_plain} | Target: {target_plain} | R:R 1:{rr}\n"
         f"{reason}"
     )
     emoji = "🟢" if action_up == "BUY" else "🔴"
