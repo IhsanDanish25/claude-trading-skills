@@ -143,11 +143,12 @@ def _fetch_bars_batch(_symbols: list[str]) -> dict[str, list[dict]]:
             if len(close_series) < _SMA200_PERIOD + 1:
                 continue
 
-            high_series = data[sym]["High"].dropna()
-            low_series  = data[sym]["Low"].dropna()
-            vol_series  = data[sym]["Volume"].dropna()
+            open_series  = data[sym]["Open"].dropna()
+            high_series  = data[sym]["High"].dropna()
+            low_series   = data[sym]["Low"].dropna()
+            vol_series   = data[sym]["Volume"].dropna()
 
-            n = min(len(close_series), len(high_series), len(low_series), len(vol_series))
+            n = min(len(close_series), len(open_series), len(high_series), len(low_series), len(vol_series))
             if n < _SMA200_PERIOD + 1:
                 continue
 
@@ -157,7 +158,7 @@ def _fetch_bars_batch(_symbols: list[str]) -> dict[str, list[dict]]:
                 try:
                     bars.append({
                         "date":   row_date.strftime("%Y-%m-%d"),
-                        "open":   float(close_series.iloc[i]),
+                        "open":   float(open_series.iloc[i]),
                         "high":   float(high_series.iloc[i])   if i < len(high_series) else 0.0,
                         "low":    float(low_series.iloc[i])    if i < len(low_series)  else 0.0,
                         "close":  float(close_series.iloc[i]),
@@ -237,6 +238,11 @@ def screen() -> list[dict]:
             # Score: lower RSI = higher score
             score = max(0, MEANREV_RSI_THRESHOLD - rsi)
 
+            # Volume ratio: recent 5-day avg vs 20-day avg (>1 = elevated selling)
+            vols = [b.get("volume", 0) for b in bars if b.get("volume")]
+            recent_5d_vol = sum(vols[-5:]) / 5 if len(vols) >= 5 else avg_vol
+            volume_ratio  = round(recent_5d_vol / avg_vol, 2) if avg_vol > 0 else 1.0
+
             candidates.append({
                 "symbol":       sym,
                 "price":        price,
@@ -249,6 +255,7 @@ def screen() -> list[dict]:
                 "sma200":       round(sma200, 2),
                 "momentum_pct": round(momentum, 1),
                 "avg_volume":   round(avg_vol),
+                "volume_ratio": volume_ratio,
                 "score":        round(score, 2),
             })
         except Exception as e:

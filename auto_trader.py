@@ -10,6 +10,7 @@ Migrated to alpaca-py SDK (replaces deprecated alpaca_trade_api).
 All order lifecycle and account calls use the modern TradingClient API.
 """
 import os, json, logging, urllib.request, re, sys, time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
 from pathlib import Path
 from datetime import datetime, date
 import anthropic
@@ -233,11 +234,21 @@ def get_buffett_holdings():
         logger.warning("Buffett holdings failed: %s", e)
         return []
 
+_YF_TIMEOUT = 30  # seconds — prevents 15-min hangs when Yahoo DNS is unreachable
+
+def _yf_download(*args, **kwargs):
+    """yf.download() with a hard 30-second timeout via a background thread."""
+    import yfinance as yf
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(yf.download, *args, **kwargs)
+        return fut.result(timeout=_YF_TIMEOUT)
+
+
 def get_vix() -> float:
     """Fetch current VIX level via yfinance. Returns 20.0 on failure."""
     try:
         import yfinance as yf
-        data = yf.download("^VIX", period="2d", interval="1d", progress=False, auto_adjust=True)
+        data = _yf_download("^VIX", period="2d", interval="1d", progress=False, auto_adjust=True)
         return float(data["Close"].squeeze().dropna().iloc[-1])
     except Exception as e:
         logger.warning("VIX fetch failed: %s", e)
@@ -249,7 +260,7 @@ def get_spy_regime() -> bool:
     Returns True (safe to trade) or False (bear market — skip all buys)."""
     try:
         import yfinance as yf
-        data = yf.download("SPY", period="1y", interval="1d", progress=False, auto_adjust=True)
+        data = _yf_download("SPY", period="1y", interval="1d", progress=False, auto_adjust=True)
         closes = data["Close"].squeeze().dropna().tolist()
         if len(closes) < 200:
             return True  # not enough history — don't block
@@ -269,7 +280,7 @@ def get_rsi2(ticker: str) -> float:
     Returns 50.0 on failure (neutral — won't block the trade)."""
     try:
         import yfinance as yf
-        data = yf.download(ticker, period="10d", interval="1d", progress=False, auto_adjust=True)
+        data = _yf_download(ticker, period="10d", interval="1d", progress=False, auto_adjust=True)
         closes = data["Close"].squeeze().dropna().tolist()
         if len(closes) < 3:
             return 50.0
@@ -297,8 +308,8 @@ def rank_by_relative_strength(candidates: list, period_days: int = 126) -> list:
         if not tickers:
             return candidates
         syms = tickers + ["SPY"]
-        data = yf.download(syms, period="7mo", interval="1d",
-                           progress=False, auto_adjust=True, group_by="ticker")
+        data = _yf_download(syms, period="7mo", interval="1d",
+                            progress=False, auto_adjust=True, group_by="ticker")
         spy_closes = data["SPY"]["Close"].dropna().tolist() if "SPY" in data.columns.get_level_values(0) else []
         spy_ret = (spy_closes[-1] / spy_closes[-period_days] - 1) if len(spy_closes) >= period_days else 0.0
 
@@ -352,8 +363,8 @@ def check_weekly_uptrend(ticker: str) -> bool:
     """Return True if the weekly chart is in uptrend (price > weekly SMA20, weekly RSI > 40)."""
     try:
         import yfinance as yf
-        data = yf.download(ticker, period="2y", interval="1wk",
-                           progress=False, auto_adjust=True)
+        data = _yf_download(ticker, period="2y", interval="1wk",
+                            progress=False, auto_adjust=True)
         closes = data["Close"].squeeze().dropna().tolist()
         if len(closes) < 20:
             return True  # not enough history — don't filter out
