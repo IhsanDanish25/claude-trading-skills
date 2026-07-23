@@ -39,7 +39,7 @@ from core.config import (
 from core import clock
 from core.fmp import _get, _STABLE as _stable, fmp_remaining_calls
 
-import yfinance as yf
+from core.yf_utils import yf_download
 
 log = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ def _fetch_bars_batch(symbols: list[str]) -> dict[str, list[dict]]:
     if not symbols:
         return {}
     try:
-        data = yf.download(
+        data = yf_download(
             symbols,
             period="1y",
             progress=False,

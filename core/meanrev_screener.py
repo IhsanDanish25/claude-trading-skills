@@ -26,7 +26,7 @@ import math
 import logging
 import datetime
 
-import yfinance as yf
+from core.yf_utils import yf_download
 
 from core.config import SP80_UNIVERSE, MEANREV_STOP_PCT, MEANREV_MIN_PRICE
 from core.config import MEANREV_RSI_THRESHOLD, MEANREV_BB_THRESHOLD
@@ -109,7 +109,7 @@ def _fetch_bars_batch(_symbols: list[str]) -> dict[str, list[dict]]:
 
     # Fetch all symbols in one yfinance call (no API key needed)
     try:
-        data = yf.download(
+        data = yf_download(
             _symbols,
             period="1y",
             progress=False,

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 
-import yfinance as yf
+from core.yf_utils import yf_download
 
 from core.config import (
     SQUEEZE_HOLD_DAYS, SQUEEZE_STOP_PCT, SQUEEZE_SIZE_PCT,
@@ -45,7 +45,7 @@ def _fetch_bars_batch(symbols: list[str]) -> dict[str, list[dict]]:
     if not symbols:
         return {}
     try:
-        data = yf.download(symbols, period="1y", progress=False,
+        data = yf_download(symbols, period="1y", progress=False,
                            auto_adjust=False, group_by="ticker")
     except Exception:
         return {}

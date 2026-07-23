@@ -26,7 +26,7 @@ import logging
 import datetime
 import statistics
 
-import yfinance as yf
+from core.yf_utils import yf_download
 
 from core.config import (
     BREAKOUT_HOLD_DAYS, BREAKOUT_STOP_PCT, BREAKOUT_SIZE_PCT,
@@ -67,7 +67,7 @@ def _fetch_bars_batch(symbols: list[str]) -> dict[str, list[dict]]:
     if not symbols:
         return {}
     try:
-        data = yf.download(symbols, period="1y", progress=False,
+        data = yf_download(symbols, period="1y", progress=False,
                            auto_adjust=False, group_by="ticker")
     except Exception:
         return {}
