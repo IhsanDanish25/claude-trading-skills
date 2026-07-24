@@ -244,12 +244,25 @@ def _yf_download(*args, **kwargs):
         return fut.result(timeout=_YF_TIMEOUT)
 
 
+def _extract_closes(col) -> list:
+    """Safely extract a list of floats from a yfinance Close column.
+
+    yfinance 1.x returns a DataFrame (not Series) for data["Close"] when
+    multi_level_index=True.  squeeze() normally reduces it but can fail when
+    the frame has unexpected shape, so we peel to a Series explicitly.
+    """
+    import pandas as pd
+    if isinstance(col, pd.DataFrame):
+        col = col.iloc[:, 0]
+    return col.dropna().tolist()
+
+
 def get_vix() -> float:
     """Fetch current VIX level via yfinance. Returns 20.0 on failure."""
     try:
         import yfinance as yf
         data = _yf_download("^VIX", period="2d", interval="1d", progress=False, auto_adjust=True)
-        return float(data["Close"].squeeze().dropna().iloc[-1])
+        return float(_extract_closes(data["Close"])[-1])
     except Exception as e:
         logger.warning("VIX fetch failed: %s", e)
         return 20.0
@@ -261,7 +274,7 @@ def get_spy_regime() -> bool:
     try:
         import yfinance as yf
         data = _yf_download("SPY", period="1y", interval="1d", progress=False, auto_adjust=True)
-        closes = data["Close"].squeeze().dropna().tolist()
+        closes = _extract_closes(data["Close"])
         if len(closes) < 200:
             return True  # not enough history — don't block
         sma200 = sum(closes[-200:]) / 200
@@ -281,7 +294,7 @@ def get_rsi2(ticker: str) -> float:
     try:
         import yfinance as yf
         data = _yf_download(ticker, period="10d", interval="1d", progress=False, auto_adjust=True)
-        closes = data["Close"].squeeze().dropna().tolist()
+        closes = _extract_closes(data["Close"])
         if len(closes) < 3:
             return 50.0
         deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
@@ -310,13 +323,13 @@ def rank_by_relative_strength(candidates: list, period_days: int = 126) -> list:
         syms = tickers + ["SPY"]
         data = _yf_download(syms, period="7mo", interval="1d",
                             progress=False, auto_adjust=True, group_by="ticker")
-        spy_closes = data["SPY"]["Close"].dropna().tolist() if "SPY" in data.columns.get_level_values(0) else []
+        spy_closes = _extract_closes(data["SPY"]["Close"]) if "SPY" in data.columns.get_level_values(0) else []
         spy_ret = (spy_closes[-1] / spy_closes[-period_days] - 1) if len(spy_closes) >= period_days else 0.0
 
         rs_map: dict[str, float] = {}
         for sym in tickers:
             try:
-                closes = data[sym]["Close"].dropna().tolist()
+                closes = _extract_closes(data[sym]["Close"])
                 if len(closes) >= period_days:
                     stock_ret = closes[-1] / closes[-period_days] - 1
                     rs_map[sym] = round((stock_ret - spy_ret) * 100, 2)
@@ -365,7 +378,7 @@ def check_weekly_uptrend(ticker: str) -> bool:
         import yfinance as yf
         data = _yf_download(ticker, period="2y", interval="1wk",
                             progress=False, auto_adjust=True)
-        closes = data["Close"].squeeze().dropna().tolist()
+        closes = _extract_closes(data["Close"])
         if len(closes) < 20:
             return True  # not enough history — don't filter out
         sma20 = sum(closes[-20:]) / 20
