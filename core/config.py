@@ -156,14 +156,20 @@ PEAD_MIN_PRICE = float(os.environ.get("PEAD_MIN_PRICE", "10.0"))
 PEAD_MIN_AVG_VOLUME = float(os.environ.get("PEAD_MIN_AVG_VOLUME", "500000"))
 PEAD_SIZE_PCT = float(os.environ.get("PEAD_SIZE_PCT", "0.05"))
 
-# ── MeanRev params (RSI < 30 + Bollinger oversold + above SMA200) ─────────────
+# ── MeanRev params (RSI oversold + Bollinger pullback + above SMA200) ─────────
+# RSI_THRESHOLD 35: catches more setups in bull markets without being sloppy
+# (30 was too strict — produced 0 candidates every day in the current rally)
+# BB_THRESHOLD 2.0: allow price up to 2% above lower BB (band touch is rare
+# on large-caps; $0.00 buffer meant 0 candidates even when stocks were clearly
+# oversold and just above the band)
 MEANREV_HOLD_DAYS = int(os.environ.get("MEANREV_HOLD_DAYS", "14"))
 MEANREV_STOP_PCT = float(os.environ.get("MEANREV_STOP_PCT", "0.05"))
 MEANREV_SIZE_PCT = float(os.environ.get("MEANREV_SIZE_PCT", "0.03"))
 MEANREV_MIN_PRICE = float(os.environ.get("MEANREV_MIN_PRICE", "10.0"))
-MEANREV_RSI_THRESHOLD = float(os.environ.get("MEANREV_RSI_THRESHOLD", "30.0"))
-MEANREV_BB_THRESHOLD = float(os.environ.get("MEANREV_BB_THRESHOLD", "0.0"))
-# 0.0 = price at lower Bollinger Band; negative = below lower band
+MEANREV_RSI_THRESHOLD = float(os.environ.get("MEANREV_RSI_THRESHOLD", "35.0"))
+MEANREV_BB_THRESHOLD = float(os.environ.get("MEANREV_BB_THRESHOLD", "2.0"))
+# dollar buffer above lower BB: 0.0 = price must be at/below the band exactly;
+# 2.0 = allow price up to $2 above lower band (band touch is rare on daily closes)
 MEANREV_MIN_AVG_VOLUME = float(os.environ.get("MEANREV_MIN_AVG_VOLUME", "500000"))
 MEANREV_LIMIT = int(os.environ.get("MEANREV_LIMIT", "5"))
 
