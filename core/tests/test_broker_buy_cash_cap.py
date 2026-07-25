@@ -17,7 +17,21 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
+import core.broker as broker_mod
 from core.broker import BrokerClient
+
+
+@pytest.fixture(autouse=True)
+def _force_regular_hours(monkeypatch):
+    # buy() now selects a market vs. an extended-hours limit order via
+    # trading_window.order_type_for(), which reads the wall clock. These are
+    # regular-hours sizing/guardrail tests, so pin it to "market" to keep the
+    # suite deterministic no matter when it runs.
+    monkeypatch.setattr(
+        broker_mod.trading_window, "order_type_for", lambda *a, **k: "market"
+    )
 
 
 class _FakeTradeClient:

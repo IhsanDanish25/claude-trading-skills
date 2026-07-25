@@ -45,9 +45,12 @@ SCHEDULE = [
 # persistent volume, so ran-today state survives container restarts and
 # catch-up doesn't re-fire routines that already ran.
 from core.config import STATE_DIR
+from core import trading_window
 
 CATCHUP_FILE = os.path.join(STATE_DIR, ".scheduler_ran_today.json")
-CATCHUP_MAX_AGE_HOURS = 2.0
+# The fixed CATCHUP_MAX_AGE_HOURS=2.0 stale cap is retired. Staleness is now
+# decided by core.trading_window.should_run_catchup (24/5 window + per-routine
+# deadline + once-per-session + holiday calendar). See core/trading_window.py.
 
 # ── Fix 8: Alpaca-backed dedup (resilient to Railway ephemeral filesystem) ───
 def _market_open_ran_today() -> bool:
@@ -95,14 +98,30 @@ def get_routine(now: datetime.datetime):
 
 
 def get_catchup_routine(now: datetime.datetime):
-    """If we're past a routine's window and it hasn't run today, catch up.
-    Only catches up market_open and midday_review (the buy routines).
-    Stale cap: skip catch-ups that are more than CATCHUP_MAX_AGE_HOURS late."""
+    """If we're past a routine's window and the 24/5 trading-window logic still
+    permits a late run, catch up. Only market_open and midday_review (the buy
+    routines) are catch-up eligible.
+
+    The old fixed 2.0h stale cap is retired: whether a late run is allowed is
+    now decided by core.trading_window.should_run_catchup, which permits a
+    catch-up anywhere inside Alpaca's 24/5 window, before the routine's deadline,
+    once per session, and not on a market holiday."""
     h, m, wd = now.hour, now.minute, now.weekday()
     if wd > 4:
         return None
 
     ran_today = _load_ran_today(now)
+
+    # Build the broker once for the holiday calendar check. We never pass
+    # calendar_check=None (that would let catch-up fire on market holidays); if
+    # the broker is unreachable we skip catch-up this tick and retry next tick.
+    try:
+        from core.broker import BrokerClient
+        broker = BrokerClient()
+    except Exception as e:
+        log.warning("Catch-up: broker unavailable for calendar check (%s) — "
+                    "skipping catch-up this tick", e)
+        return None
 
     catchup_targets = [
         (9, 35, 44, "routines.market_open"),
@@ -117,14 +136,22 @@ def get_catchup_routine(now: datetime.datetime):
         if module == "routines.market_open" and _market_open_ran_today():
             log.info("market_open: ran today (Alpaca history confirms)")
             continue
+
+        # Only catch up AFTER the scheduled window has passed. get_routine()
+        # already handles on-time dispatch, so a catch-up before the window
+        # would fire the routine early.
         scheduled = now.replace(hour=sched_h, minute=m_max, second=0, microsecond=0)
-        age_hours = (now - scheduled).total_seconds() / 3600.0
-        past_window = age_hours >= 0
-        if past_window and age_hours <= CATCHUP_MAX_AGE_HOURS:
-            return module
-        if past_window and age_hours > CATCHUP_MAX_AGE_HOURS:
-            log.info(f"Skipping stale catch-up for {module} "
-                     f"({age_hours:.1f}h late, cap={CATCHUP_MAX_AGE_HOURS}h)")
+        if (now - scheduled).total_seconds() < 0:
+            continue
+
+        decision = trading_window.should_run_catchup(
+            module, now=now, calendar_check=broker.is_market_open_on
+        )
+        if not decision:
+            log.info("Skipping catch-up for %s: %s", module, decision.reason)
+            continue
+        log.info("Running catch-up for %s: %s", module, decision.reason)
+        return module
 
     return None
 
@@ -182,7 +209,13 @@ def main():
         log.info(f"Dispatching → {routine}")
         try:
             run_routine(routine)
+            # SUCCESS path only (never a finally): a routine that crashed
+            # half-way must be able to retry on the next tick. _mark_ran writes
+            # the legacy file ledger; trading_window.mark_ran writes the
+            # per-session ledger that should_run_catchup reads for its
+            # once-per-session double-fire guard.
             _mark_ran(now, routine)
+            trading_window.mark_ran(routine, now)
             log.info(f"Routine complete: {routine}")
         except Exception as e:
             log.error(f"Routine FAILED: {routine} | {e}", exc_info=True)

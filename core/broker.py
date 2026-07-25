@@ -48,6 +48,7 @@ from core.config import (
 )
 from core.order_utils import order_field
 from core.safe_oco_attach import safe_attach_oco
+from core import trading_window
 
 log = logging.getLogger(__name__)
 ET = pytz.timezone("America/New_York")
@@ -248,6 +249,28 @@ class BrokerClient:
             log.error(f"  ↳ Order attach FAILED [{symbol}]: {e}")
             return False, False
 
+    def _ext_hours_limit_price(self, symbol: str, side: str, ref_price: float) -> float:
+        """Marketable limit price for an extended-hours order.
+
+        Buys sit ~20bps above the ask, sells ~20bps below the bid, so a thin
+        after-hours book can still fill without the runaway slippage a market
+        order would take. Falls back to a buffered reference price when the
+        quote is unusable. A non-fill is an acceptable outcome; a bad fill is
+        not — on a small account one bad fill is several percent of equity.
+        """
+        buf = 0.002  # 20 bps
+        try:
+            q = self.get_latest_quotes([symbol])[symbol]
+            bid = float(getattr(q, "bid_price", 0) or 0)
+            ask = float(getattr(q, "ask_price", 0) or 0)
+            if side == "buy" and ask > 0:
+                return round(ask * (1 + buf), 2)
+            if side == "sell" and bid > 0:
+                return round(bid * (1 - buf), 2)
+        except Exception as e:
+            log.warning("ext-hours limit quote failed for %s: %s", symbol, e)
+        return round(ref_price * (1 + buf) if side == "buy" else ref_price * (1 - buf), 2)
+
     def buy(
         self,
         symbol: str,
@@ -365,6 +388,17 @@ class BrokerClient:
             qty = cash_qty
 
         if qty < 1:
+            # Extended-hours books are limit + whole-share only: Alpaca rejects
+            # notional/fractional orders outside 09:30-16:00 ET, so the
+            # fractional fallback below cannot run then. Block rather than
+            # attempt an order that would be rejected (or fill badly).
+            if trading_window.order_type_for() == "limit":
+                log.warning(
+                    "BUY %s BLOCKED — fractional/notional order not permitted "
+                    "outside regular hours (extended-hours books are limit + "
+                    "whole-share only)", symbol,
+                )
+                return {"blocked": True, "reason": "no_fractional_extended_hours"}
             # Fractional fallback: when a dollar_amount was requested but price
             # exceeds available cash for 1 whole share, use notional ordering.
             if dollar_amount is not None:
@@ -430,16 +464,35 @@ class BrokerClient:
             )
             return {"blocked": True, "reason": "insufficient_cash"}
 
-        # 1. Simple market BUY
-        order = self.trade.submit_order(
-            MarketOrderRequest(
-                symbol=symbol,
-                qty=qty,
-                side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
+        # 1. Entry order — market during regular hours, marketable limit in the
+        #    extended-hours window (thin books; a market order can fill far from
+        #    the quote). order_type_for() returns 'limit' outside 09:30-16:00 ET.
+        if trading_window.order_type_for() == "limit":
+            limit_price = self._ext_hours_limit_price(symbol, "buy", ref_price)
+            order = self.trade.submit_order(
+                LimitOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                    limit_price=limit_price,
+                    extended_hours=True,
+                )
             )
-        )
-        log.info(f"BUY {symbol} x{qty} (market) submitted [{str(order.id)[:8]}]")
+            log.info(
+                f"BUY {symbol} x{qty} (ext-hours limit @ ${limit_price}) "
+                f"submitted [{str(order.id)[:8]}]"
+            )
+        else:
+            order = self.trade.submit_order(
+                MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                )
+            )
+            log.info(f"BUY {symbol} x{qty} (market) submitted [{str(order.id)[:8]}]")
 
         # 2. Poll for the actual fill price (up to ~5s); exit early if market closed
         market_open = self.is_market_open()
@@ -609,6 +662,20 @@ class BrokerClient:
 
     def next_close(self):
         return self.trade.get_clock().next_close
+
+    def is_market_open_on(self, day) -> bool:
+        """True if the US equity market holds a regular session on ``day``.
+
+        Backs core.trading_window's holiday check. Uses Alpaca's calendar
+        endpoint: a date with no calendar entry is a weekend or market holiday
+        (closed). Accepts a datetime.date or datetime.datetime.
+        """
+        from alpaca.trading.requests import GetCalendarRequest
+
+        if isinstance(day, datetime.datetime):
+            day = day.date()
+        cal = self.trade.get_calendar(GetCalendarRequest(start=day, end=day))
+        return bool(cal)
 
     # ── Options trading (CSP / Cash-Secured Puts) ─────────────────────────────────
     def sell_csp(
