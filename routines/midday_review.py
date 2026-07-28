@@ -24,6 +24,8 @@ from core.edge     import should_pyramid, compute_trail_stop
 from core.spy_base import rebalance_to_spy, log_status as spy_log, is_base_symbol
 from core.order_utils import order_field as _order_field
 from core.notifier import send_trade_alert
+from core.pead_tracker import remove_position as pead_untrack
+from core.safe_oco_attach import cancel_open_sell_orders
 
 log = logger.setup("midday")
 ET  = pytz.timezone("America/New_York")
@@ -83,6 +85,30 @@ def _load_pyramided() -> set:
 def _save_pyramided(symbols: set) -> None:
     with open(PYRAMID_STATE_PATH, "w") as f:
         json.dump(sorted(symbols), f)
+
+
+def profit_exit_action(pnl_pct: float, qty: int, threshold_pct: float) -> str | None:
+    """Decide review-time profit-taking for a position.
+
+    Returns:
+      "trim" — sell PARTIAL_PROFIT_SIZE (e.g. 50%) and trail the rest (qty >= 2)
+      "full" — sell the whole position (qty == 1, can't be trimmed)
+      None   — below threshold, or qty < 1 (nothing to do)
+
+    `pnl_pct` is a percentage (e.g. 6.0 for +6%); `threshold_pct` is a fraction
+    (e.g. 0.06). Single-share positions get a full exit because a 50% trim is
+    impossible on 1 share — without this they would never auto-realize profit
+    at review time and could only exit via the trailing stop, a Claude SELL, or
+    the hold-period limit (the case that let CNC ride past its target on
+    2026-07-28).
+    """
+    if pnl_pct < threshold_pct * 100:
+        return None
+    if qty >= 2:
+        return "trim"
+    if qty == 1:
+        return "full"
+    return None
 
 
 def run():
@@ -233,8 +259,9 @@ def run():
             log.info(f"  {sym:6} | entry=${entry:.2f} | now=${current:.2f} | "
                      f"P&L={pnl_pct:+.2f}% (${unrealized:+,.0f})")
 
-            # ── Partial profit (#6): take 50% off at +PARTIAL_PROFIT_PCT ──────
-            if pnl_pct >= config.PARTIAL_PROFIT_PCT * 100 and qty >= 2:
+            # ── Profit-taking (#6): trim 50% (multi-share) or full-exit (1 share)
+            _profit_action = profit_exit_action(pnl_pct, qty, config.PARTIAL_PROFIT_PCT)
+            if _profit_action == "trim":
                 trim_qty = max(1, int(qty * config.PARTIAL_PROFIT_SIZE))
                 try:
                     cur_price = quotes.get(sym, {}).get("price", 0)
@@ -255,6 +282,34 @@ def run():
                     qty -= trim_qty
                 except Exception as e:
                     log.error(f"  ✗ Partial profit {sym} failed: {e}")
+
+            # ── Full profit (single share): 1 share can't be trimmed 50%, so
+            # realize the FULL share at the same threshold. Cancel the resting
+            # stop first (it holds the share → a plain sell would be rejected
+            # for insufficient qty), then market-close.
+            elif _profit_action == "full":
+                try:
+                    cur_price = quotes.get(sym, {}).get("price", 0)
+                    cancel_open_sell_orders(broker, sym)
+                    broker.sell(sym)  # close the whole 1-share position
+                    send_trade_alert(
+                        action="SELL",
+                        ticker=sym,
+                        shares=qty,
+                        price=cur_price,
+                        stop=0,
+                        target=0,
+                        reason=f"Full profit at +{pnl_pct:.1f}% — single share (cannot trim 50%)",
+                    )
+                    log.info(f"  💰 {sym}: full-profit exit — sold {qty} share at +{pnl_pct:.1f}%")
+                    pead_untrack(sym)
+                    continue  # position closed — skip trail / pyramid / Claude review
+                except Exception as e:
+                    log.error(f"  ✗ Full-profit exit {sym} failed: {e} — re-attaching stop")
+                    try:
+                        broker.attach_stop_target(sym, qty, stop, None)
+                    except Exception as e2:
+                        log.error(f"  ✗ Re-attach stop after failed {sym} exit: {e2}")
 
             # ── Intraday trail (#12): ratchet stop up on winners ─────────────
             if config.TRAIL_INTRADAY and current > entry:
