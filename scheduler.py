@@ -49,6 +49,19 @@ from core.config import STATE_DIR
 CATCHUP_FILE = os.path.join(STATE_DIR, ".scheduler_ran_today.json")
 CATCHUP_MAX_AGE_HOURS = 2.0
 
+# market_open is the routine everything else depends on: it sets the
+# day_start_value.json equity anchor (which the circuit breaker's daily P&L
+# math reads all day) and generates the day's entire VCP/PEAD entry universe.
+# Missing it isn't like missing midday_review — it silently blanks out the
+# whole trading day. Late container restarts have pushed the scheduler's
+# first tick past the default 2h cap three times running, so give market_open
+# a much wider catch-up window: entries are still valid any time before the
+# 15:45 ET entry-window cutoff (see routines/market_open.py:is_entry_window).
+MARKET_OPEN_CATCHUP_MAX_AGE_HOURS = 6.0
+CATCHUP_MAX_AGE_HOURS_BY_MODULE = {
+    "routines.market_open": MARKET_OPEN_CATCHUP_MAX_AGE_HOURS,
+}
+
 # ── Fix 8: Alpaca-backed dedup (resilient to Railway ephemeral filesystem) ───
 def _market_open_ran_today() -> bool:
     """
@@ -120,13 +133,31 @@ def get_catchup_routine(now: datetime.datetime):
         scheduled = now.replace(hour=sched_h, minute=m_max, second=0, microsecond=0)
         age_hours = (now - scheduled).total_seconds() / 3600.0
         past_window = age_hours >= 0
-        if past_window and age_hours <= CATCHUP_MAX_AGE_HOURS:
+        cap = CATCHUP_MAX_AGE_HOURS_BY_MODULE.get(module, CATCHUP_MAX_AGE_HOURS)
+        if past_window and age_hours <= cap:
             return module
-        if past_window and age_hours > CATCHUP_MAX_AGE_HOURS:
+        if past_window and age_hours > cap:
             log.info(f"Skipping stale catch-up for {module} "
-                     f"({age_hours:.1f}h late, cap={CATCHUP_MAX_AGE_HOURS}h)")
+                     f"({age_hours:.1f}h late, cap={cap}h)")
+            if module == "routines.market_open":
+                _alert_market_open_skipped(age_hours, cap)
 
     return None
+
+
+def _alert_market_open_skipped(age_hours: float, cap: float) -> None:
+    """market_open being skipped is never allowed to be silent: it means no
+    day_start equity anchor and no entries for the whole session."""
+    try:
+        from core.notifier import send_error_alert
+        send_error_alert(
+            "routines.market_open",
+            f"market_open catch-up SKIPPED — {age_hours:.1f}h late "
+            f"(cap={cap:.1f}h). No day-start equity anchor and no entries "
+            f"will be generated today.",
+        )
+    except Exception:
+        log.warning("Could not send market_open-skipped alert", exc_info=True)
 
 
 def _load_ran_today(now: datetime.datetime) -> set:

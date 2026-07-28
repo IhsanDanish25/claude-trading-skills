@@ -97,12 +97,27 @@ def build_plan(broker: BrokerClient, target_positions: int,
 
     trims = []
     max_frac = max_pct / 100
+    # over_cap tracks every survivor whose market value breaches the cap,
+    # independent of whether a whole-share trim could be computed for it.
+    # Previously `within_caps` was gated on `not trims`, and a breach whose
+    # excess was worth less than one share (int() truncation -> trim_shares
+    # == 0) silently dropped out of `trims` — so a position logged as
+    # "OVER CAP" in the per-position display could still produce a
+    # contradictory "Already within caps — no action needed" verdict in the
+    # very same run.
+    over_cap = []
     for r in survivors:
         max_dollars = equity * max_frac
         if r["market_value"] > max_dollars:
+            over_cap.append(r)
             price_per_share = r["market_value"] / r["qty"] if r["qty"] else 0
             excess_dollars = r["market_value"] - max_dollars
             trim_shares = int(excess_dollars / price_per_share) if price_per_share else 0
+            # A real breach must always produce a real decision — trim at
+            # least 1 share rather than truncating a small excess to 0 and
+            # no-op'ing on a position we just flagged as over cap.
+            if trim_shares == 0 and price_per_share and r["qty"] >= 1:
+                trim_shares = 1
             if trim_shares > 0:
                 trims.append({**r, "trim_shares": trim_shares,
                               "post_trim_value": r["market_value"] - trim_shares * price_per_share,
@@ -115,7 +130,7 @@ def build_plan(broker: BrokerClient, target_positions: int,
     survivor_value = sum(r["market_value"] for r in survivors) - total_trim_value
     post_deployed_pct = (survivor_value / equity * 100) if equity else 0
 
-    within_caps = len(rows) <= target_positions and not trims
+    within_caps = len(rows) <= target_positions and not over_cap
     if within_caps:
         return {
             "status": "within_caps",
@@ -124,6 +139,7 @@ def build_plan(broker: BrokerClient, target_positions: int,
             "base_positions": base_rows,
             "position_count": len(rows), "target_positions": target_positions,
             "deployed_pct": sum(r["pct_of_equity"] for r in rows),
+            "max_pct": max_pct,
         }
 
     return {

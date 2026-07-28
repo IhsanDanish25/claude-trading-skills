@@ -39,6 +39,14 @@ _FMP_HALT_AT = 220
 # Usage: from core import fmp; fmp.fmp_remaining_calls() -> int
 _fmp_session: requests.Session | None = None
 
+# 402 Payment Required means the FMP subscription itself is unpaid/expired —
+# a billing problem, not a transient network/rate-limit blip. Retrying it
+# every tick just re-hammers a dead account and spams warnings. Once we see
+# a 402, disable FMP entirely for the rest of the day and go straight to
+# Alpaca-only quotes; re-probe once per calendar day in case billing is
+# fixed.
+_fmp_payment_required_day: datetime.date | None = None
+
 
 def _ensure_session() -> requests.Session:
     """Construct a requests.Session with exponential-backoff retry.
@@ -67,10 +75,31 @@ def fmp_remaining_calls() -> int:
     return max(0, _FMP_HALT_AT - _FMP_CALLS_TODAY)
 
 
+def _fmp_billing_disabled() -> bool:
+    return _fmp_payment_required_day == datetime.date.today()
+
+
+def _mark_fmp_payment_required() -> None:
+    """Record a 402 from FMP and disable further calls for the rest of today."""
+    global _fmp_payment_required_day, _fmp_fallback_active
+    today = datetime.date.today()
+    if _fmp_payment_required_day != today:
+        log.error(
+            "FMP returned 402 Payment Required (billing/subscription issue) — "
+            "disabling FMP for the rest of today, falling back to Alpaca-only quotes"
+        )
+    _fmp_payment_required_day = today
+    _fmp_fallback_active = True
+
+
 def _get(url: str, params: dict = None) -> dict | list:
     """GET with 5-min TTL cache. url must be a full URL."""
     if not FMP_API_KEY:
         log.error("FMP_API_KEY is empty — skipping API call to %s", url)
+        return []
+    if _fmp_billing_disabled():
+        # Already confirmed 402 today — don't re-hit a billing-blocked
+        # account on every tick, and don't spam the warning either.
         return []
     params = params or {}
     params["apikey"] = FMP_API_KEY
@@ -96,6 +125,9 @@ def _get(url: str, params: dict = None) -> dict | list:
 
     _ensure_session()
     r = _fmp_session.get(url, params=params, timeout=15)
+    if r.status_code == 402:
+        _mark_fmp_payment_required()
+        return []
     if r.status_code == 429:
         # Rate-limited — session retry exhausted; degrade gracefully.
         # yfinance fallback will kick in for quote/bar calls
@@ -171,6 +203,37 @@ def _alpaca_change_pct(symbol: str) -> float:
     return 0.0
 
 
+def _alpaca_quote(symbol: str) -> dict:
+    """Alpaca-only quote (price + day change%), normalised to the FMP quote
+    shape. Used whenever FMP is unavailable — rate-limited, plan-restricted,
+    or billing-disabled (402) — so quote callers never depend on FMP."""
+    global _alpaca_data_client
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest, StockLatestTradeRequest
+        from alpaca.data.timeframe import TimeFrame
+        from alpaca.data.enums import DataFeed
+        if _alpaca_data_client is None:
+            _alpaca_data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        now   = datetime.datetime.now(pytz.utc)
+        start = now - datetime.timedelta(days=5)
+        bars  = _alpaca_data_client.get_stock_bars(
+            StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
+                             start=start, end=now, feed=DataFeed.IEX)
+        )[symbol]
+        trade = _alpaca_data_client.get_stock_latest_trade(
+            StockLatestTradeRequest(symbol_or_symbols=symbol, feed=DataFeed.IEX)
+        )[symbol]
+        price = float(trade.price)
+        change_pct = 0.0
+        if len(bars) >= 2 and bars[-2].close:
+            change_pct = round((price - bars[-2].close) / bars[-2].close * 100, 4)
+        return {"price": price, "changesPercentage": change_pct}
+    except Exception as e:
+        log.warning("Alpaca quote fallback %s failed: %s", symbol, e)
+        return {}
+
+
 def _spy_quote_fmp() -> dict:
     """FMP quote for SPY — returns {} on any failure (402/429/timeout)."""
     try:
@@ -179,31 +242,13 @@ def _spy_quote_fmp() -> dict:
         return {}
 
 
-def _spy_quote_yf() -> dict:
-    """yfinance fallback for SPY — pure python, no rate-limit or plan restriction."""
-    try:
-        import yfinance as yf
-        t = yf.Ticker("SPY")
-        fi = t.fast_info
-        price = float(fi.last_price) if fi.last_price else 0.0
-        hist = t.history(period="5d")
-        prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
-        change_pct = round((price - prev_close) / prev_close * 100, 4) if prev_close > 0 else 0.0
-        return {
-            "changesPercentage": change_pct,
-            "price": price,
-        }
-    except Exception:
-        return {}
-
-
 def get_market_breadth() -> dict:
-    """SPY (FMP → yfinance fallback) + QQQ/IWM (Alpaca IEX, no FMP)."""
+    """SPY (FMP → Alpaca fallback) + QQQ/IWM (Alpaca IEX, no FMP)."""
     spy = _spy_quote_fmp()
     if not spy:
         global _fmp_fallback_active
         _fmp_fallback_active = True
-        spy = _spy_quote_yf()
+        spy = _alpaca_quote("SPY")
         if not spy:
             spy = {"changesPercentage": 0.0, "price": 0.0}
     try:
@@ -319,30 +364,6 @@ def get_screener_universe(
 
 
 # ── yfinance Fallback ──────────────────────────────────────────────────────────
-def _yfinance_quote(symbol: str) -> dict:
-    """Fallback quote via yfinance when FMP is rate-limited/unavailable."""
-    global _fmp_fallback_active
-    try:
-        import yfinance as yf
-        ticker = yf.Ticker(symbol)
-        price = ticker.fast_info.last_price
-        if not isinstance(price, (int, float)):
-            price = 0.0
-        # Normalize to match FMP shape
-        return {
-            "price": price,
-            "changesPercentage": 0,  # yfinance free tier doesn't have change%
-            "yearHigh": ticker.info.get("fifty_two_week_high", 0),
-            "yearLow": ticker.info.get("fifty_two_week_low", 0),
-            "avgVolume": ticker.info.get("average_volume", 0),
-            "volume": ticker.info.get("volume", 0),
-            "marketCap": ticker.info.get("market_cap", 0),
-        }
-    except Exception as e:
-        log.debug("yfinance quote %s failed: %s", symbol, e)
-        return {}
-
-
 def _yfinance_bars(symbol: str, days: int = 60) -> list[dict]:
     """Fallback OHLCV via yfinance when FMP is unavailable."""
     global _fmp_fallback_active
@@ -371,7 +392,8 @@ def _yfinance_bars(symbol: str, days: int = 60) -> list[dict]:
 
 # ── Public API with built-in fallback ─────────────────────────────────────────
 def get_quote(symbol: str) -> dict:
-    """Quote via FMP, falls back to yfinance on failure/rate-limit."""
+    """Quote via FMP, falls back to Alpaca-only quotes on failure/rate-limit/
+    billing (402)."""
     global _fmp_fallback_active
     try:
         result = _quote(symbol)
@@ -381,9 +403,9 @@ def get_quote(symbol: str) -> dict:
     except Exception as e:
         log.warning("FMP quote %s failed: %s", symbol, e)
 
-    # FMP failed — try yfinance
+    # FMP failed (or is billing-disabled) — fall back to Alpaca
     _fmp_fallback_active = True
-    return _yfinance_quote(symbol)
+    return _alpaca_quote(symbol)
 
 
 def get_daily_bars(symbol: str, days: int = 60) -> list[dict]:

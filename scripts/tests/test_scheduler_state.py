@@ -14,8 +14,14 @@ from core import config
 
 def _tuesday_1315():
     # Tuesday 2026-07-07 13:15 ET — past midday window (12:09), within 2h cap;
-    # market_open (09:44) is 3.5h stale.
+    # market_open (09:44) is 3.5h stale — within its widened 6h cap.
     return scheduler.ET.localize(datetime.datetime(2026, 7, 7, 13, 15))
+
+
+def _tuesday_1715():
+    # Tuesday 2026-07-07 17:15 ET — market_open (09:44) is 7.5h stale, past
+    # even the widened 6h cap.
+    return scheduler.ET.localize(datetime.datetime(2026, 7, 7, 17, 15))
 
 
 class TestStatePersistence:
@@ -41,6 +47,8 @@ class TestStatePersistence:
         monkeypatch.setattr(scheduler, "STATE_DIR", str(tmp_path))
         monkeypatch.setattr(scheduler, "CATCHUP_FILE",
                             str(tmp_path / ".scheduler_ran_today.json"))
+        # Isolate midday_review's catch-up behavior from market_open's.
+        monkeypatch.setattr(scheduler, "_market_open_ran_today", lambda: True)
         now = _tuesday_1315()
 
         assert scheduler.get_catchup_routine(now) == "routines.midday_review"
@@ -52,8 +60,42 @@ class TestStatePersistence:
         monkeypatch.setattr(scheduler, "STATE_DIR", str(tmp_path))
         monkeypatch.setattr(scheduler, "CATCHUP_FILE",
                             str(tmp_path / ".scheduler_ran_today.json"))
+        monkeypatch.setattr(scheduler, "_market_open_ran_today", lambda: True)
         now = _tuesday_1315()
         scheduler._mark_ran(now, "routines.midday_review")
 
         next_day = now + datetime.timedelta(days=1)
         assert scheduler.get_catchup_routine(next_day) == "routines.midday_review"
+
+
+class TestMarketOpenWidenedCatchup:
+    """Regression: market_open used the same 2h catch-up cap as every other
+    routine, so a late container restart (3x running) silently dropped the
+    day's entire entry universe and day-start equity anchor. market_open now
+    gets a wider 6h cap, and a skipped catch-up alerts instead of going
+    silent."""
+
+    def test_market_open_catches_up_within_widened_cap(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(scheduler, "STATE_DIR", str(tmp_path))
+        monkeypatch.setattr(scheduler, "CATCHUP_FILE",
+                            str(tmp_path / ".scheduler_ran_today.json"))
+        monkeypatch.setattr(scheduler, "_market_open_ran_today", lambda: False)
+        now = _tuesday_1315()  # market_open 3.5h stale — within the 6h cap
+
+        assert scheduler.get_catchup_routine(now) == "routines.market_open"
+
+    def test_market_open_skipped_beyond_widened_cap_and_alerts(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(scheduler, "STATE_DIR", str(tmp_path))
+        monkeypatch.setattr(scheduler, "CATCHUP_FILE",
+                            str(tmp_path / ".scheduler_ran_today.json"))
+        monkeypatch.setattr(scheduler, "_market_open_ran_today", lambda: False)
+        alerts = []
+        monkeypatch.setattr(scheduler, "_alert_market_open_skipped",
+                            lambda age_hours, cap: alerts.append((age_hours, cap)))
+        now = _tuesday_1715()  # market_open 7.5h stale — past the 6h cap
+        # midday_review (12:09) is also stale (5.1h > its 2h cap) by 17:15,
+        # so neither routine catches up — but market_open's skip must alert.
+
+        assert scheduler.get_catchup_routine(now) is None
+        assert len(alerts) == 1
+        assert alerts[0][1] == scheduler.MARKET_OPEN_CATCHUP_MAX_AGE_HOURS

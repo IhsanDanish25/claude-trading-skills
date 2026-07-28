@@ -517,6 +517,18 @@ class BrokerClient:
             old_label = (
                 f"${old_stop:.2f}" if isinstance(old_stop, (int, float)) else str(old_stop or "?")
             )
+            # Stop-direction guard: for a long position, "tightening" means
+            # raising the stop toward the current price. A new stop at or
+            # below the existing one is a loosen (or no-op), not a tighten —
+            # accepting it silently would let a model-issued order widen risk
+            # while the logs still claim "tightened". Reject and warn instead.
+            if isinstance(old_stop, (int, float)) and new_stop <= old_stop:
+                log.warning(
+                    "tighten_stop %s: refusing to loosen stop %s → $%.2f "
+                    "(new stop must be > current stop for a long position)",
+                    symbol, old_label, new_stop,
+                )
+                return False
             self.trade.replace_order_by_id(
                 str(order.id),
                 ReplaceOrderRequest(stop_price=new_stop),

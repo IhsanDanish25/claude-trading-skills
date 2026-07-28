@@ -128,8 +128,18 @@ def run():
     pos_count = broker.position_count()
     log.info(f"Portfolio: ${pv:,.2f} | Positions: {pos_count}")
 
+    acct = broker.get_account()
+    equity_now = float(acct.equity)
+
+    # day_start anchor: prefer today's pre-market snapshot (day_start_value.json,
+    # written by pre_market/market_open). If that's missing or stale (e.g. a
+    # skipped catch-up window — see scheduler.py), fall back to Alpaca's own
+    # last_equity (prior trading day's close equity), NOT the current portfolio
+    # value. Falling back to current pv made day_start == equity_now by
+    # construction, so day_pnl always computed to ~0.00% regardless of the
+    # real intraday move — masking real P&L from the circuit breaker.
     day_start_path = os.path.join(config.STATE_DIR, "day_start_value.json")
-    day_start = pv
+    day_start = float(getattr(acct, "last_equity", 0) or 0) or equity_now
     try:
         import json as _json
         with open(day_start_path) as _f:
@@ -139,7 +149,6 @@ def run():
     except (FileNotFoundError, ValueError, KeyError):
         pass
 
-    equity_now = float(broker.get_account().equity)
     day_pnl = (equity_now - day_start) / day_start * 100
     # Use the same hard halt threshold as CircuitBreaker (5% default).
     # market_open.py uses cb.max_daily_loss * 100; mirror it here directly

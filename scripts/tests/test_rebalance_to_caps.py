@@ -133,3 +133,39 @@ def test_spy_not_exempt_when_base_disabled(monkeypatch):
         | {t["symbol"] for t in plan["trims"]}
     )
     assert "SPY" in all_symbols_touched
+
+
+def test_within_caps_never_contradicts_a_flagged_over_cap_position(monkeypatch):
+    """Regression: a survivor whose excess-over-cap was worth less than one
+    whole share used to truncate out of `trims` (int() rounding), so
+    `within_caps` (gated on `not trims`) came back True even though the
+    per-position OVER CAP display flag (pct_of_equity > max_pct) was True for
+    the same position in the same run — "CNC ... OVER CAP" immediately
+    followed by "Already within caps — no action needed"."""
+    monkeypatch.setattr(config, "SPY_BASE_ENABLED", False)
+    # CNC: 1 share at $234/share = 23.4% of $100k equity, vs a 10% cap.
+    # Excess over cap ($13,400) is less than the price of 1 share ($234),
+    # BUT 23.4% is nowhere close to the 10% cap by dollars, either — this
+    # reproduces the reported contradiction, not a boundary rounding case.
+    positions = [_pos("CNC", qty=1, market_value=23_400.0, avg_entry_price=200.0)]
+    broker = _FakeBroker(positions, equity=100_000.0, cash=76_600.0)
+
+    plan = build_plan(broker, target_positions=10, max_pct=10.0, keep_symbols=None)
+
+    assert plan["status"] == "needs_rebalance"
+    assert any(t["symbol"] == "CNC" for t in plan["trims"])
+
+
+def test_within_caps_dict_carries_actual_max_pct_for_display(monkeypatch):
+    """Regression: the within_caps branch omitted "max_pct" from the returned
+    dict, so format_plan()'s OVER CAP flag fell back to the module-level
+    config default instead of the caller's actual --max-pct, which could
+    itself disagree with the true cap used to compute `within_caps`."""
+    monkeypatch.setattr(config, "SPY_BASE_ENABLED", False)
+    positions = [_pos("AAA", qty=10, market_value=1_000.0)]
+    broker = _FakeBroker(positions, equity=100_000.0, cash=99_000.0)
+
+    plan = build_plan(broker, target_positions=10, max_pct=25.0, keep_symbols=None)
+
+    assert plan["status"] == "within_caps"
+    assert plan["max_pct"] == 25.0
