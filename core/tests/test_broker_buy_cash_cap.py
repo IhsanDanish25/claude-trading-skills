@@ -95,3 +95,17 @@ def test_buy_cash_cap_applies_after_risk_parity_sizing():
     assert result.get("blocked") is None
     assert result["qty"] == 2  # int(250 / 100)
     assert broker.trade.submitted[-1].qty == 2
+
+
+def test_buy_blocks_instead_of_fractional_when_whole_share_unaffordable():
+    # Whole-share policy: a dollar_amount request whose share price exceeds the
+    # affordable whole-share budget must BLOCK — never submit a fractional
+    # (notional) order — because a fractional position can't carry a GTC stop
+    # and would be immediately flattened, leaving it effectively unprotected.
+    # Mirrors the live 2026-07-28 AAPL/TXN churn (share $339/$275, ~$26 budget).
+    broker = _make_broker(ref_price=339.0, equity=264.0, buying_power=205.0)
+
+    result = broker.buy("AAPL", dollar_amount=26.0, stop_loss_pct=0.05, take_profit_pct=0.10)
+
+    assert result == {"blocked": True, "reason": "insufficient_cash"}
+    assert broker.trade.submitted == []  # no fractional order placed
