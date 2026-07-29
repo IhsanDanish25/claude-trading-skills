@@ -401,11 +401,27 @@ def run():
         top    = raw[:10]
 
         if top:
+            price_by_symbol = {c["symbol"]: c.get("price", 0) for c in top}
             scored = score_vcp_candidates(top)
             buys   = [s for s in scored if s.get("action") == "BUY" and s.get("score", 0) >= 75]
             already_bought_today = _load_today_bought()
             if already_bought_today:
                 buys = [s for s in buys if s["symbol"] not in already_bought_today]
+
+            # Affordability filter BEFORE the [:3] truncation below — score_vcp_candidates
+            # sorts by signal quality, not price, so an unaffordable top pick would
+            # otherwise crowd out a cheaper, buyable one further down the list.
+            affordable_buys = []
+            for s in buys:
+                price = price_by_symbol.get(s["symbol"], 0)
+                budget = broker.affordable_budget(s["symbol"])
+                if price <= 0 or price > budget:
+                    log.info(f"  ✗ {s['symbol']:6} SKIP — price ${price:.2f} exceeds "
+                             f"affordable budget ${budget:.2f}")
+                    continue
+                affordable_buys.append(s)
+            buys = affordable_buys
+
             log.info(f"  High-confidence midday setups: {len(buys)}")
             for s in buys[:3]:
                 if s["symbol"] in already_bought_today:

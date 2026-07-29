@@ -86,6 +86,32 @@ def _sector_gate(symbol: str, sector_counts: dict, fmp_key: str,
     sector_counts[sector] = current + 1
     return True
 
+
+def _affordable_candidates(broker, candidates: list, strategy: str, log) -> list:
+    """Drop candidates priced above what the account can currently afford as a
+    whole share, using each candidate's own affordable_budget() (which nets
+    out any existing position in that symbol). Screeners rank by signal
+    strength, not price — on a small account the top-ranked names are often
+    unaffordable, so this must run BEFORE any candidates[:slots] truncation,
+    or an expensive top candidate silently crowds out a cheaper one further
+    down the list that the account could actually buy.
+    """
+    affordable = []
+    for c in candidates:
+        sym = c["symbol"]
+        price = c.get("price", 0)
+        budget = broker.affordable_budget(sym)
+        if price <= 0 or price > budget:
+            log.info(f"  ✗ {sym} SKIP — price ${price:.2f} exceeds affordable budget ${budget:.2f}")
+            trade_logger.log_event(
+                "order_skipped", strategy, sym, gate="affordability",
+                reason=f"price ${price:.2f} > budget ${budget:.2f}",
+                price=price, budget=round(budget, 2),
+            )
+            continue
+        affordable.append(c)
+    return affordable
+
 ET  = pytz.timezone("America/New_York")
 
 # Populated from state/market_brief_<date>.json at run() start.
@@ -340,6 +366,11 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
             estimated_eps=c.get("estimated_eps"),
         )
 
+    candidates = _affordable_candidates(broker, candidates, "pead", log)
+    if not candidates:
+        log.info("PEAD: no affordable candidates — done")
+        return
+
     buys_taken = 0
     for c in candidates[:slots[0]]:
         sym = c["symbol"]
@@ -490,6 +521,11 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today, sector_count
     if not candidates:
         return
 
+    candidates = _affordable_candidates(broker, candidates, "meanrev", log)
+    if not candidates:
+        log.info("MeanRev: no affordable candidates — done")
+        return
+
     for c in candidates:
         sym = c["symbol"]
         price = c["price"]
@@ -610,6 +646,11 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today, sector_count
     if not candidates:
         return
 
+    candidates = _affordable_candidates(broker, candidates, "insider", log)
+    if not candidates:
+        log.info("Insider: no affordable candidates — done")
+        return
+
     for c in candidates:
         sym = c["symbol"]
         size_pct = config.INSIDER_SIZE_PCT
@@ -725,6 +766,11 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today, sector_count
     candidates = screen_squeeze()
     log.info(f"Squeeze: {len(candidates)} candidates")
     if not candidates:
+        return
+
+    candidates = _affordable_candidates(broker, candidates, "squeeze", log)
+    if not candidates:
+        log.info("Squeeze: no affordable candidates — done")
         return
 
     for c in candidates:
