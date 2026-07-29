@@ -131,7 +131,7 @@ def startup_health_check() -> None:
         modes = [s.strip() for s in strategy_mode.split(",") if s.strip()]
         log.info("  STRATEGY_MODE: %s (%d strategies)", ", ".join(modes), len(modes))
     else:
-        log.info("  STRATEGY_MODE: pead (default)")
+        log.info("  STRATEGY_MODE: pead,meanrev,insider,squeeze (default)")
 
     notify_to = os.environ.get("NOTIFY_TO", "")
     if notify_to:

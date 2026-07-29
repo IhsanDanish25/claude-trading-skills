@@ -144,7 +144,7 @@ WATCHLIST = [
 # negative (Breakout Sharpe -0.38 p=0.585; EarnMom Sharpe -0.37, 31.4% win
 # rate). Sector/momentum/gapfill/vcp are opt-in until live-validated (none of
 # the four appear in docs/dev/strategy-validation-status.md).
-_STRATEGY_RAW = os.environ.get("STRATEGY_MODE", "pead").lower()
+_STRATEGY_RAW = os.environ.get("STRATEGY_MODE", "pead,meanrev,insider,squeeze").lower()
 STRATEGY_MODES = [s.strip() for s in _STRATEGY_RAW.split(",") if s.strip()]
 
 # ── PEAD params ───────────────────────────────────────────────────────────────
