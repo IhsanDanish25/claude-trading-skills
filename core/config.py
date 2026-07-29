@@ -63,10 +63,10 @@ def validate() -> None:
 
 # ── Trading params ────────────────────────────────────────────────────────────
 MAX_POSITION_SIZE_PCT = float(
-    os.environ.get("MAX_POSITION_SIZE_PCT", os.environ.get("MAX_POSITION_PCT", "0.05"))
+    os.environ.get("MAX_POSITION_SIZE_PCT", os.environ.get("MAX_POSITION_PCT", "0.08"))
 )
 MAX_OPEN_POSITIONS = int(
-    os.environ.get("MAX_OPEN_POSITIONS", os.environ.get("MAX_POSITIONS", "10"))
+    os.environ.get("MAX_OPEN_POSITIONS", os.environ.get("MAX_POSITIONS", "12"))
 )
 STOP_LOSS_PCT = float(os.environ.get("STOP_LOSS_PCT", "0.02"))
 TAKE_PROFIT_PCT = float(os.environ.get("TAKE_PROFIT_PCT", "0.06"))
@@ -74,7 +74,7 @@ MIN_RELATIVE_VOLUME = float(os.environ.get("MIN_REL_VOL", "1.5"))
 MIN_PRICE = float(os.environ.get("MIN_PRICE", "5.0"))
 MAX_PRICE = float(os.environ.get("MAX_PRICE", "500.0"))
 MIN_COMPOSITE_SCORE = int(os.environ.get("MIN_COMPOSITE_SCORE", "20"))
-RISK_PCT = float(os.environ.get("RISK_PCT", "0.01"))
+RISK_PCT = float(os.environ.get("RISK_PCT", "0.0125"))
 MAX_SPREAD_PCT = float(os.environ.get("MAX_SPREAD_PCT", "0.02"))  # wide-spread guard in get_price
 
 # ── Edge upgrades ─────────────────────────────────────────────────────────────
