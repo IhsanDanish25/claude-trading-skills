@@ -311,6 +311,12 @@ class BrokerClient:
             # SIZE_PCT ceiling: prevent single-name from exceeding MAX_POSITION_SIZE_PCT
             size_qty = max(1, int(remaining_cap / ref_price))
             qty = min(risk_qty, size_qty)
+            if dollar_amount is not None:
+                # Caller's intended notional (e.g. a strategy's *_SIZE_PCT) is an
+                # additional ceiling on top of risk-parity/MAX_POSITION_SIZE_PCT —
+                # it only tightens sizing, never loosens the other guardrails.
+                dollar_qty = max(1, int(dollar_amount / ref_price))
+                qty = min(qty, dollar_qty)
         else:
             qty = 0
 

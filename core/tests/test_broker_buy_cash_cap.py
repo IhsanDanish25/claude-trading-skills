@@ -97,6 +97,48 @@ def test_buy_cash_cap_applies_after_risk_parity_sizing():
     assert broker.trade.submitted[-1].qty == 2
 
 
+def test_buy_uses_dollar_amount_as_additional_size_cap(monkeypatch):
+    # Risk-parity sizing alone would pick a much larger qty than the
+    # strategy's intended dollar_amount; dollar_amount must additionally cap it
+    # so per-strategy *_SIZE_PCT values (e.g. PEAD_SIZE_PCT) actually take effect.
+    monkeypatch.setattr("core.broker.RISK_PCT", 0.10)  # generous risk budget
+    monkeypatch.setattr("core.broker.MAX_POSITION_SIZE_PCT", 0.50)  # generous cap
+    broker = _make_broker(ref_price=100.0, equity=100_000.0, buying_power=100_000.0)
+
+    result = broker.buy("AAPL", dollar_amount=1_000.0, stop_loss_pct=0.05, take_profit_pct=0.10)
+
+    assert result.get("blocked") is None
+    assert result["qty"] == 10  # int(1000 / 100), not the much larger risk-parity qty
+    assert broker.trade.submitted[-1].qty == 10
+
+
+def test_buy_dollar_amount_does_not_relax_existing_caps(monkeypatch):
+    # A generous dollar_amount must not let the order exceed the tighter of
+    # the risk-parity / MAX_POSITION_SIZE_PCT ceilings — dollar_amount only tightens.
+    monkeypatch.setattr("core.broker.RISK_PCT", 0.01)
+    monkeypatch.setattr("core.broker.MAX_POSITION_SIZE_PCT", 0.05)
+    broker = _make_broker(ref_price=100.0, equity=100_000.0, buying_power=100_000.0)
+
+    result = broker.buy("AAPL", dollar_amount=50_000.0, stop_loss_pct=0.05, take_profit_pct=0.10)
+
+    # risk_qty = int(100000*0.01/(100*0.05)) = 200; size_qty = int(100000*0.05/100) = 50
+    # qty = min(200, 50) = 50 — the $50,000 dollar_amount cap (500 shares) doesn't bind.
+    assert result.get("blocked") is None
+    assert result["qty"] == 50
+    assert broker.trade.submitted[-1].qty == 50
+
+
+def test_buy_without_dollar_amount_unaffected():
+    # Backward-compat: omitting dollar_amount still falls back to pure
+    # risk-parity/size-cap sizing.
+    broker = _make_broker(ref_price=100.0, equity=100_000.0, buying_power=100_000.0)
+
+    result = broker.buy("AAPL", stop_loss_pct=0.05, take_profit_pct=0.10)
+
+    assert result.get("blocked") is None
+    assert broker.trade.submitted[-1].qty == result["qty"]
+
+
 def test_buy_blocks_instead_of_fractional_when_whole_share_unaffordable():
     # Whole-share policy: a dollar_amount request whose share price exceeds the
     # affordable whole-share budget must BLOCK — never submit a fractional
