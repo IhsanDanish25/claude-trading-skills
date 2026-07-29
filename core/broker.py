@@ -248,6 +248,20 @@ class BrokerClient:
             log.error(f"  ↳ Order attach FAILED [{symbol}]: {e}")
             return False, False
 
+    def affordable_budget(self, symbol: str) -> float:
+        """Max dollars available for a NEW whole-share buy of symbol right now —
+        the tighter of the MAX_POSITION_SIZE_PCT cap (net of any existing
+        position in symbol) and available buying power. Callers use this to
+        pre-filter screener candidates by price before attempting a buy() that
+        would just get blocked — cheap enough to call per-candidate.
+        """
+        equity = self.portfolio_value()
+        max_position_dollars = equity * MAX_POSITION_SIZE_PCT
+        existing_pos = self.get_position(symbol)
+        existing_value = abs(float(existing_pos.market_value or 0)) if existing_pos is not None else 0.0
+        remaining_cap = max(0.0, max_position_dollars - existing_value)
+        return min(remaining_cap, self.buying_power())
+
     def buy(
         self,
         symbol: str,

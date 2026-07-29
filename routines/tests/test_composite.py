@@ -10,6 +10,14 @@ os.environ.setdefault("COMPOSITE_USE_FMP", "false")
 
 from core import composite as cp  # noqa: E402
 
+# USE_FMP is fixed at core.composite's first import in the pytest process. If
+# another test file (import order is alphabetical) transitively imports
+# core.composite first — e.g. via routines/market_open.py — before the env
+# var above is set, the setdefault() is a no-op against the already-cached
+# module. Set the flag directly so this file's GROUP B tests are correct
+# regardless of what else got collected/imported first.
+cp.USE_FMP = False
+
 
 def _make_bars(start=60.0, n=210, drift=0.4, vol=2_000_000):
     """Synthetic daily bars, newest-first (as core.screener produces)."""

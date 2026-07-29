@@ -72,7 +72,7 @@ STOP_LOSS_PCT = float(os.environ.get("STOP_LOSS_PCT", "0.02"))
 TAKE_PROFIT_PCT = float(os.environ.get("TAKE_PROFIT_PCT", "0.06"))
 MIN_RELATIVE_VOLUME = float(os.environ.get("MIN_REL_VOL", "1.5"))
 MIN_PRICE = float(os.environ.get("MIN_PRICE", "5.0"))
-MAX_PRICE = float(os.environ.get("MAX_PRICE", "500.0"))
+MAX_PRICE = float(os.environ.get("MAX_PRICE", "100.0"))
 MIN_COMPOSITE_SCORE = int(os.environ.get("MIN_COMPOSITE_SCORE", "20"))
 RISK_PCT = float(os.environ.get("RISK_PCT", "0.0125"))
 MAX_SPREAD_PCT = float(os.environ.get("MAX_SPREAD_PCT", "0.02"))  # wide-spread guard in get_price
@@ -144,7 +144,7 @@ WATCHLIST = [
 # negative (Breakout Sharpe -0.38 p=0.585; EarnMom Sharpe -0.37, 31.4% win
 # rate). Sector/momentum/gapfill/vcp are opt-in until live-validated (none of
 # the four appear in docs/dev/strategy-validation-status.md).
-_STRATEGY_RAW = os.environ.get("STRATEGY_MODE", "pead").lower()
+_STRATEGY_RAW = os.environ.get("STRATEGY_MODE", "pead,meanrev,insider,squeeze").lower()
 STRATEGY_MODES = [s.strip() for s in _STRATEGY_RAW.split(",") if s.strip()]
 
 # ── PEAD params ───────────────────────────────────────────────────────────────
