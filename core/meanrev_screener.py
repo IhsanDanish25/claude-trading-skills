@@ -28,7 +28,7 @@ import datetime
 
 from core.yf_utils import yf_download
 
-from core.config import SP80_UNIVERSE, MEANREV_STOP_PCT, MEANREV_MIN_PRICE
+from core.config import SP80_UNIVERSE, MEANREV_STOP_PCT, MEANREV_MIN_PRICE, MEANREV_MAX_PRICE
 from core.config import MEANREV_RSI_THRESHOLD, MEANREV_BB_THRESHOLD
 from core.config import MEANREV_MIN_AVG_VOLUME, MEANREV_LIMIT
 
@@ -201,7 +201,7 @@ def screen() -> list[dict]:
 
             price = closes[-1]   # newest bar
 
-            if price < MEANREV_MIN_PRICE:
+            if price < MEANREV_MIN_PRICE or price > MEANREV_MAX_PRICE:
                 continue
 
             avg_vol = _avg_volume(bars)

@@ -347,6 +347,7 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
         lookback_days=config.PEAD_LOOKBACK_DAYS,
         min_surprise_pct=config.PEAD_MIN_SURPRISE_PCT,
         min_price=config.PEAD_MIN_PRICE,
+        max_price=config.PEAD_MAX_PRICE,
         min_avg_volume=config.PEAD_MIN_AVG_VOLUME,
     )
     log.info(f"PEAD: {len(candidates)} candidates with surprise >= {config.PEAD_MIN_SURPRISE_PCT}%")

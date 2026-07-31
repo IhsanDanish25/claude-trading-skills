@@ -261,6 +261,7 @@ def screen_earnings(
     lookback_days: int = 7,
     min_surprise_pct: float = 10.0,
     min_price: float = 10.0,
+    max_price: float = float("inf"),
     min_avg_volume: float = 500_000.0,
 ) -> list[dict]:
     """Stocks that reported in the last `lookback_days` calendar days and beat
@@ -337,7 +338,7 @@ def screen_earnings(
         info = liq.get(sym)
         if not info:
             continue
-        if info["price"] <= min_price or info["avg_volume"] <= min_avg_volume:
+        if info["price"] <= min_price or info["price"] > max_price or info["avg_volume"] <= min_avg_volume:
             continue
         c["price"] = round(info["price"], 2)
         candidates.append(c)

@@ -153,6 +153,11 @@ PEAD_STOP_PCT = float(os.environ.get("PEAD_STOP_PCT", "0.15"))
 PEAD_LOOKBACK_DAYS = int(os.environ.get("PEAD_LOOKBACK_DAYS", "7"))
 PEAD_MIN_SURPRISE_PCT = float(os.environ.get("PEAD_MIN_SURPRISE_PCT", "10.0"))
 PEAD_MIN_PRICE = float(os.environ.get("PEAD_MIN_PRICE", "10.0"))
+# Small live account (~$268 equity, 8% position cap ≈ $21/slot) can't afford
+# whole shares above ~$25 — cap the screener's own price range so it surfaces
+# affordable names instead of ranking by surprise% alone and getting filtered
+# out downstream by _affordable_candidates() after burning the run on nothing.
+PEAD_MAX_PRICE = float(os.environ.get("PEAD_MAX_PRICE", "25.0"))
 PEAD_MIN_AVG_VOLUME = float(os.environ.get("PEAD_MIN_AVG_VOLUME", "500000"))
 PEAD_SIZE_PCT = float(os.environ.get("PEAD_SIZE_PCT", "0.05"))
 
@@ -166,6 +171,9 @@ MEANREV_HOLD_DAYS = int(os.environ.get("MEANREV_HOLD_DAYS", "14"))
 MEANREV_STOP_PCT = float(os.environ.get("MEANREV_STOP_PCT", "0.05"))
 MEANREV_SIZE_PCT = float(os.environ.get("MEANREV_SIZE_PCT", "0.03"))
 MEANREV_MIN_PRICE = float(os.environ.get("MEANREV_MIN_PRICE", "10.0"))
+# Same affordability rationale as PEAD_MAX_PRICE above — keep the screener's
+# range inside what an ~$21/slot account can actually buy as a whole share.
+MEANREV_MAX_PRICE = float(os.environ.get("MEANREV_MAX_PRICE", "25.0"))
 MEANREV_RSI_THRESHOLD = float(os.environ.get("MEANREV_RSI_THRESHOLD", "35.0"))
 MEANREV_BB_THRESHOLD = float(os.environ.get("MEANREV_BB_THRESHOLD", "2.0"))
 # dollar buffer above lower BB: 0.0 = price must be at/below the band exactly;
