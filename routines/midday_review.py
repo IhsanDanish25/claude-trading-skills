@@ -176,9 +176,17 @@ def run():
                     # _order_field: str(enum) is 'OrderType.STOP', so the old
                     # str().lower() comparison never matched and this guard
                     # was dead — every midday re-attached protection OCOs.
+                    # Substring match (not "==") because attach_stop_target
+                    # always sets a limit_price alongside stop_price, so
+                    # Alpaca classifies these orders as "stop_limit", not
+                    # "stop" — an exact match here left the guard dead again,
+                    # causing every midday run to re-attach an OCO on top of
+                    # an already-protected position, cancel the good stop on
+                    # the resulting insufficient-qty retry, and end up naked
+                    # if the retry then failed.
                     otype = _order_field(o, "type")
                     oside = _order_field(o, "side")
-                    if otype in ("stop", "trailing_stop") and oside == "sell":
+                    if "stop" in otype and oside == "sell":
                         stop_orders.add(o.symbol)
                 except Exception:
                     pass
@@ -191,6 +199,7 @@ def run():
                 except Exception as e:
                     log.warning(f"  Cancel order fail: {e}")
 
+        flattened_symbols = set()
         for p in positions:
             # SPY base is a cash-parking holding managed by spy_base — never
             # attach a protection OCO to it. Also cancel any legacy OCO so
@@ -222,7 +231,24 @@ def run():
             target = round(entry * (1 + config.TAKE_PROFIT_PCT), 2)
             log.info(f"  Attaching protection: {p.symbol} "
                      f"(entry=${entry:.2f} stop=${stop} target=${target})")
-            broker.attach_stop_target(p.symbol, qty, stop, target)
+            stop_attached, _ = broker.attach_stop_target(p.symbol, qty, stop, target)
+            if not stop_attached:
+                # attach_stop_target already double-checked with Alpaca and
+                # confirmed no live stop exists — don't leave the position
+                # naked, flatten it like market_open does on the same failure.
+                log.error(f"  ✗ {p.symbol}: stop-loss attach FAILED (verified against "
+                          f"Alpaca) — flattening to avoid an unprotected position")
+                try:
+                    cancel_open_sell_orders(broker, p.symbol)
+                    broker.sell(p.symbol, qty=qty)
+                    send_trade_alert(
+                        action="FLATTEN", ticker=p.symbol, shares=qty, price=cur if cur > 0 else entry,
+                        reason="Midday stop-loss re-attach failed — position closed to avoid naked exposure",
+                    )
+                    flattened_symbols.add(p.symbol)
+                except Exception as e:
+                    log.error(f"  ✗ {p.symbol}: flatten-on-attach-failure ALSO failed: {e} "
+                              f"— position remains unprotected, needs manual review")
 
         # Brief pause to let Alpaca propagate the new OCO orders before
         # we try to update them in the review loop below.
@@ -240,6 +266,10 @@ def run():
 
         for p in positions:
             sym          = p.symbol
+            # Already closed above because its stop-loss attach failed even
+            # after Alpaca verification — nothing left to review.
+            if sym in flattened_symbols:
+                continue
             # SPY base is managed by spy_base — exclude it from partial
             # profit trims, intraday trailing, and the Claude review so a
             # SELL decision can't liquidate the cash-parking base.

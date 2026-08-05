@@ -41,12 +41,15 @@ DAILY_CLOSE_LOG = os.path.join(config.STATE_DIR, "daily_close_log.json")
 def _build_stop_map(open_orders) -> dict:
     """sym -> current stop price for open sell stop orders. Uses order_field
     because str(enum) is 'OrderType.STOP' — the old comparison left this map
-    permanently empty."""
+    permanently empty. Substring match (not "==") because attach_stop_target
+    always sets a limit_price alongside stop_price, so Alpaca classifies
+    these orders as "stop_limit", not "stop" — an exact match here left the
+    map empty for every real position's protective order."""
     stop_map = {}
     for o in open_orders or []:
         try:
             sp = getattr(o, "stop_price", None)
-            if (order_field(o, "type") == "stop"
+            if ("stop" in order_field(o, "type")
                     and order_field(o, "side") == "sell"
                     and isinstance(sp, (int, float))):
                 stop_map[o.symbol] = float(sp)

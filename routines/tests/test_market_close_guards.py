@@ -29,6 +29,14 @@ class TestBuildStopMap:
         ]
         assert market_close._build_stop_map(orders) == {"AAPL": 95.0}
 
+    def test_maps_stop_limit_orders(self):
+        """Regression: attach_stop_target always sets a limit_price alongside
+        stop_price, so Alpaca classifies the resulting order as STOP_LIMIT,
+        not STOP — an exact "== stop" match left the map empty for every
+        real protective order actually placed by the broker."""
+        orders = [_order("BAC", OrderType.STOP_LIMIT, stop_price=57.74)]
+        assert market_close._build_stop_map(orders) == {"BAC": 57.74}
+
     def test_ignores_orders_without_numeric_stop(self):
         orders = [_order("AAPL", OrderType.STOP, stop_price=None)]
         assert market_close._build_stop_map(orders) == {}
