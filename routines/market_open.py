@@ -446,6 +446,7 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
                 send_trade_alert(
                     action="FLATTEN", ticker=sym, shares=result["qty"],
                     price=result["price"],
+                    stop=result.get("stop", 0), target=result.get("target", 0),
                     reason="PEAD stop-loss attach failed — position rejected",
                 )
                 trade_logger.log_event("order_skipped", "pead", sym,
