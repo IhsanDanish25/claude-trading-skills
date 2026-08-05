@@ -243,6 +243,7 @@ def run():
                     broker.sell(p.symbol, qty=qty)
                     send_trade_alert(
                         action="FLATTEN", ticker=p.symbol, shares=qty, price=cur if cur > 0 else entry,
+                        stop=stop, target=target,
                         reason="Midday stop-loss re-attach failed — position closed to avoid naked exposure",
                     )
                     flattened_symbols.add(p.symbol)
@@ -468,6 +469,12 @@ def run():
                     if not result.get("stop_attached"):
                         log.error(f"  ✗ {s['symbol']} bought but stop NOT attached — flattening")
                         broker.sell(s["symbol"], qty=result["qty"])
+                        send_trade_alert(
+                            action="FLATTEN", ticker=s["symbol"], shares=result["qty"],
+                            price=result["price"],
+                            stop=result.get("stop", 0), target=result.get("target", 0),
+                            reason="Midday scan buy stop-loss attach failed — position closed to avoid naked exposure",
+                        )
                         continue
                     send_trade_alert(
                         action="BUY",
