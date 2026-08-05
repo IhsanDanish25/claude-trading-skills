@@ -264,12 +264,26 @@ class BrokerClient:
         return True, target is not None
 
     def _verify_stop_live(
-        self, symbol: str, max_attempts: int = 6, delay: float = 0.5
+        self, symbol: str, max_attempts: int = 6, delay: float = 1.5,
+        backoff: float = 1.5, max_delay: float = 4.0,
     ) -> bool:
         """Poll Alpaca's open orders for a resting sell stop/stop-limit/OCO
         order on symbol. Used right after submission to confirm the order
         Alpaca accepted synchronously is still alive, rather than trusting
-        that submit_order() not raising means the order exists."""
+        that submit_order() not raising means the order exists.
+
+        Uses growing (backoff) delays rather than a fixed short interval.
+        Live data from the 2026-08-05 WFC/BAC/NKE incident showed Alpaca's
+        open-orders listing can lag an accepted OCO submission by ~3
+        seconds — exactly the old fixed 6x0.5s (~3s) window this replaces.
+        All three symbols' protective OCOs were still cancelled (by our own
+        flatten path, not rejected by Alpaca) within ~3.0-3.1s of
+        submission, meaning the order was genuinely live and simply not
+        yet visible when we gave up — a false negative, not a real
+        rejection. The wider, backed-off window here trades a few extra
+        seconds of latency on the (now rarer) failure path for not
+        needlessly flattening a protected position."""
+        cur_delay = delay
         for attempt in range(max_attempts):
             try:
                 open_orders = self.get_open_orders()
@@ -288,7 +302,8 @@ class BrokerClient:
                     if "stop" in order_field(o, "type"):
                         return True
             if attempt < max_attempts - 1:
-                time.sleep(delay)
+                time.sleep(cur_delay)
+                cur_delay = min(cur_delay * backoff, max_delay)
         return False
 
     def affordable_budget(self, symbol: str) -> float:

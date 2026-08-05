@@ -65,6 +65,38 @@ class TestVerifyStopLive:
         fake.get_open_orders.side_effect = Exception("network blip")
         assert BrokerClient._verify_stop_live(fake, "BAC", max_attempts=1, delay=0) is False
 
+    def test_finds_order_that_only_appears_on_a_later_attempt(self):
+        """Regression for the 2026-08-05 WFC/BAC/NKE incident: Alpaca's
+        open-orders listing didn't reflect the just-submitted OCO stop for
+        ~3s, which the old 6x0.5s (~3s total) window could miss entirely.
+        The order must be found once it becomes visible, however late,
+        as long as it's within max_attempts."""
+        fake = _fake_broker()
+        fake.get_open_orders.side_effect = [
+            [],  # attempt 1: not visible yet (Alpaca lag)
+            [],  # attempt 2: still not visible
+            [_order("BAC", OrderType.STOP_LIMIT)],  # attempt 3: now visible
+        ]
+        assert BrokerClient._verify_stop_live(fake, "BAC", max_attempts=5, delay=0) is True
+        assert fake.get_open_orders.call_count == 3
+
+    def test_default_window_backs_off_and_waits_longer_than_old_3s_total(self, monkeypatch):
+        """The old default (6 attempts x fixed 0.5s) gave up after ~3s total —
+        exactly the lag observed live on 2026-08-05 for all three symbols.
+        The new default must poll for meaningfully longer, with delays that
+        grow (backoff) rather than stay flat."""
+        fake = _fake_broker()
+        fake.get_open_orders.return_value = []
+
+        sleeps = []
+        monkeypatch.setattr("core.broker.time.sleep", lambda s: sleeps.append(s))
+
+        assert BrokerClient._verify_stop_live(fake, "BAC") is False
+        assert sum(sleeps) > 3.0
+        # Growing (backoff) delays, not a flat interval.
+        assert sleeps == sorted(sleeps)
+        assert sleeps[-1] > sleeps[0]
+
 
 class TestAttachStopTargetVerification:
     def test_reports_not_attached_when_alpaca_verification_fails(self):

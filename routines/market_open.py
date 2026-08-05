@@ -13,7 +13,7 @@ import pytz
 from core import logger, config
 from core.broker import BrokerClient
 from core.screener import screen
-from core.notifier import send_trade_alert
+from core.notifier import send_trade_alert, notify_flatten_failed
 from core import composite
 from core.universe import build_universe
 from circuit_breaker import CircuitBreaker, TradingHalted, EmergencyLiquidation
@@ -442,13 +442,23 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
                 continue
             if not result.get("stop_attached"):
                 log.error(f"✗ {sym} bought but stop NOT attached — flattening")
-                broker.sell(sym, qty=result["qty"])
-                send_trade_alert(
-                    action="FLATTEN", ticker=sym, shares=result["qty"],
-                    price=result["price"],
-                    stop=result.get("stop", 0), target=result.get("target", 0),
-                    reason="PEAD stop-loss attach failed — position rejected",
-                )
+                try:
+                    broker.sell(sym, qty=result["qty"])
+                    send_trade_alert(
+                        action="FLATTEN", ticker=sym, shares=result["qty"],
+                        price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason="PEAD stop-loss attach failed — position rejected",
+                    )
+                except Exception as fe:
+                    log.error(f"  ✗ {sym}: flatten-on-attach-failure ALSO failed: {fe} "
+                              f"— position remains unprotected, needs manual review")
+                    notify_flatten_failed(
+                        ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason=f"PEAD stop-loss attach AND flatten both failed ({fe}) — "
+                               f"position may be UNPROTECTED, needs immediate manual review",
+                    )
                 trade_logger.log_event("order_skipped", "pead", sym,
                                        gate="stop_attach", reason="stop-loss attach failed — flattened",
                                        qty=result["qty"], price=result["price"])
@@ -596,7 +606,22 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today, sector_count
                 continue
             if not result.get("stop_attached"):
                 log.error(f"  ✗ {sym} stop NOT attached — flattening")
-                broker.sell(sym, qty=result["qty"])
+                try:
+                    broker.sell(sym, qty=result["qty"])
+                    send_trade_alert(
+                        action="FLATTEN", ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason="MeanRev stop-loss attach failed — position closed to avoid naked exposure",
+                    )
+                except Exception as fe:
+                    log.error(f"  ✗ {sym}: flatten-on-attach-failure ALSO failed: {fe} "
+                              f"— position remains unprotected, needs manual review")
+                    notify_flatten_failed(
+                        ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason=f"MeanRev stop-loss attach AND flatten both failed ({fe}) — "
+                               f"position may be UNPROTECTED, needs immediate manual review",
+                    )
                 trade_logger.log_event("order_skipped", "meanrev", sym,
                                        gate="stop_attach", reason="stop-loss attach failed — flattened",
                                        qty=result["qty"], price=result["price"])
@@ -717,7 +742,23 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today, sector_count
                                        gate="broker_buy", reason=result.get("reason"))
                 continue
             if not result.get("stop_attached"):
-                broker.sell(sym, qty=result["qty"])
+                log.error(f"  ✗ {sym} stop NOT attached — flattening")
+                try:
+                    broker.sell(sym, qty=result["qty"])
+                    send_trade_alert(
+                        action="FLATTEN", ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason="Insider stop-loss attach failed — position closed to avoid naked exposure",
+                    )
+                except Exception as fe:
+                    log.error(f"  ✗ {sym}: flatten-on-attach-failure ALSO failed: {fe} "
+                              f"— position remains unprotected, needs manual review")
+                    notify_flatten_failed(
+                        ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason=f"Insider stop-loss attach AND flatten both failed ({fe}) — "
+                               f"position may be UNPROTECTED, needs immediate manual review",
+                    )
                 trade_logger.log_event("order_skipped", "insider", sym,
                                        gate="stop_attach", reason="stop-loss attach failed — flattened",
                                        qty=result["qty"], price=result["price"])
@@ -840,7 +881,23 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today, sector_count
                                        gate="broker_buy", reason=result.get("reason"))
                 continue
             if not result.get("stop_attached"):
-                broker.sell(sym, qty=result["qty"])
+                log.error(f"  ✗ {sym} stop NOT attached — flattening")
+                try:
+                    broker.sell(sym, qty=result["qty"])
+                    send_trade_alert(
+                        action="FLATTEN", ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason="Squeeze stop-loss attach failed — position closed to avoid naked exposure",
+                    )
+                except Exception as fe:
+                    log.error(f"  ✗ {sym}: flatten-on-attach-failure ALSO failed: {fe} "
+                              f"— position remains unprotected, needs manual review")
+                    notify_flatten_failed(
+                        ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason=f"Squeeze stop-loss attach AND flatten both failed ({fe}) — "
+                               f"position may be UNPROTECTED, needs immediate manual review",
+                    )
                 trade_logger.log_event("order_skipped", "squeeze", sym,
                                        gate="stop_attach", reason="stop-loss attach failed — flattened",
                                        qty=result["qty"], price=result["price"])
@@ -959,7 +1016,23 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today, sector_coun
                                        gate="broker_buy", reason=result.get("reason"))
                 continue
             if not result.get("stop_attached"):
-                broker.sell(sym, qty=result["qty"])
+                log.error(f"  ✗ {sym} stop NOT attached — flattening")
+                try:
+                    broker.sell(sym, qty=result["qty"])
+                    send_trade_alert(
+                        action="FLATTEN", ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason="Breakout stop-loss attach failed — position closed to avoid naked exposure",
+                    )
+                except Exception as fe:
+                    log.error(f"  ✗ {sym}: flatten-on-attach-failure ALSO failed: {fe} "
+                              f"— position remains unprotected, needs manual review")
+                    notify_flatten_failed(
+                        ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason=f"Breakout stop-loss attach AND flatten both failed ({fe}) — "
+                               f"position may be UNPROTECTED, needs immediate manual review",
+                    )
                 trade_logger.log_event("order_skipped", "breakout", sym,
                                        gate="stop_attach", reason="stop-loss attach failed — flattened",
                                        qty=result["qty"], price=result["price"])
@@ -1078,7 +1151,23 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today, sector_count
                                        gate="broker_buy", reason=result.get("reason"))
                 continue
             if not result.get("stop_attached"):
-                broker.sell(sym, qty=result["qty"])
+                log.error(f"  ✗ {sym} stop NOT attached — flattening")
+                try:
+                    broker.sell(sym, qty=result["qty"])
+                    send_trade_alert(
+                        action="FLATTEN", ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason="EarnMom stop-loss attach failed — position closed to avoid naked exposure",
+                    )
+                except Exception as fe:
+                    log.error(f"  ✗ {sym}: flatten-on-attach-failure ALSO failed: {fe} "
+                              f"— position remains unprotected, needs manual review")
+                    notify_flatten_failed(
+                        ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason=f"EarnMom stop-loss attach AND flatten both failed ({fe}) — "
+                               f"position may be UNPROTECTED, needs immediate manual review",
+                    )
                 trade_logger.log_event("order_skipped", "earnmom", sym,
                                        gate="stop_attach", reason="stop-loss attach failed — flattened",
                                        qty=result["qty"], price=result["price"])
@@ -1180,8 +1269,23 @@ def _run_gapfill(broker, cb, pv, slots, held, already_bought_today, sector_count
             log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
             continue
         if not result.get("stop_attached"):
-            broker.sell(sym, qty=result["qty"])
-            log.info(f"  ✗ {sym} stop-attach failed — flattened {result['qty']} sh")
+            log.error(f"  ✗ {sym} stop NOT attached — flattening")
+            try:
+                broker.sell(sym, qty=result["qty"])
+                send_trade_alert(
+                    action="FLATTEN", ticker=sym, shares=result["qty"], price=result["price"],
+                    stop=result.get("stop", 0), target=result.get("target", 0),
+                    reason="GapFill stop-loss attach failed — position closed to avoid naked exposure",
+                )
+            except Exception as fe:
+                log.error(f"  ✗ {sym}: flatten-on-attach-failure ALSO failed: {fe} "
+                          f"— position remains unprotected, needs manual review")
+                notify_flatten_failed(
+                    ticker=sym, shares=result["qty"], price=result["price"],
+                    stop=result.get("stop", 0), target=result.get("target", 0),
+                    reason=f"GapFill stop-loss attach AND flatten both failed ({fe}) — "
+                           f"position may be UNPROTECTED, needs immediate manual review",
+                )
             continue
 
         log.info(f"  ✓ GapFill {sym} {result['qty']} sh @ ${result['price']:.2f} "
@@ -1263,8 +1367,23 @@ def _run_momentum(broker, cb, pv, slots, held, already_bought_today, sector_coun
             log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
             continue
         if not result.get("stop_attached"):
-            broker.sell(sym, qty=result["qty"])
-            log.info(f"  ✗ {sym} stop-attach failed — flattened {result['qty']} sh")
+            log.error(f"  ✗ {sym} stop NOT attached — flattening")
+            try:
+                broker.sell(sym, qty=result["qty"])
+                send_trade_alert(
+                    action="FLATTEN", ticker=sym, shares=result["qty"], price=result["price"],
+                    stop=result.get("stop", 0), target=result.get("target", 0),
+                    reason="Momentum stop-loss attach failed — position closed to avoid naked exposure",
+                )
+            except Exception as fe:
+                log.error(f"  ✗ {sym}: flatten-on-attach-failure ALSO failed: {fe} "
+                          f"— position remains unprotected, needs manual review")
+                notify_flatten_failed(
+                    ticker=sym, shares=result["qty"], price=result["price"],
+                    stop=result.get("stop", 0), target=result.get("target", 0),
+                    reason=f"Momentum stop-loss attach AND flatten both failed ({fe}) — "
+                           f"position may be UNPROTECTED, needs immediate manual review",
+                )
             continue
 
         log.info(f"  ✓ Momentum {sym} {result['qty']} sh @ ${result['price']:.2f} "
@@ -1336,8 +1455,23 @@ def _run_sector(broker, cb, pv, slots, held, already_bought_today, sector_counts
             log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
             continue
         if not result.get("stop_attached"):
-            broker.sell(sym, qty=result["qty"])
-            log.info(f"  ✗ {sym} stop-attach failed — flattened {result['qty']} sh")
+            log.error(f"  ✗ {sym} stop NOT attached — flattening")
+            try:
+                broker.sell(sym, qty=result["qty"])
+                send_trade_alert(
+                    action="FLATTEN", ticker=sym, shares=result["qty"], price=result["price"],
+                    stop=result.get("stop", 0), target=result.get("target", 0),
+                    reason="Sector stop-loss attach failed — position closed to avoid naked exposure",
+                )
+            except Exception as fe:
+                log.error(f"  ✗ {sym}: flatten-on-attach-failure ALSO failed: {fe} "
+                          f"— position remains unprotected, needs manual review")
+                notify_flatten_failed(
+                    ticker=sym, shares=result["qty"], price=result["price"],
+                    stop=result.get("stop", 0), target=result.get("target", 0),
+                    reason=f"Sector stop-loss attach AND flatten both failed ({fe}) — "
+                           f"position may be UNPROTECTED, needs immediate manual review",
+                )
             continue
 
         log.info(f"  ✓ Sector {sym} {result['qty']} sh @ ${result['price']:.2f} "
@@ -1471,7 +1605,22 @@ def _run_vcp(broker, cb, pv, slots, held, already_bought_today, sector_counts):
                 continue
             if not result.get("stop_attached"):
                 log.error(f"  ✗ {sym} stop NOT attached — flattening")
-                broker.sell(sym, qty=result["qty"])
+                try:
+                    broker.sell(sym, qty=result["qty"])
+                    send_trade_alert(
+                        action="FLATTEN", ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason="VCP stop-loss attach failed — position closed to avoid naked exposure",
+                    )
+                except Exception as fe:
+                    log.error(f"  ✗ {sym}: flatten-on-attach-failure ALSO failed: {fe} "
+                              f"— position remains unprotected, needs manual review")
+                    notify_flatten_failed(
+                        ticker=sym, shares=result["qty"], price=result["price"],
+                        stop=result.get("stop", 0), target=result.get("target", 0),
+                        reason=f"VCP stop-loss attach AND flatten both failed ({fe}) — "
+                               f"position may be UNPROTECTED, needs immediate manual review",
+                    )
                 trade_logger.log_event("order_skipped", "vcp", sym,
                                        gate="stop_attach", reason="stop-loss attach failed — flattened",
                                        qty=result["qty"], price=result["price"])

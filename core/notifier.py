@@ -200,6 +200,27 @@ def send_trade_alert(
     return send(f"{emoji} {action_up} {ticker} — {shares} sh @ ${price:.2f}", plain, html)
 
 
+def notify_flatten_failed(
+    ticker: str, shares: int, price: float, stop: float, target: float, reason: str
+) -> bool:
+    """Best-effort EMERGENCY alert for when a flatten-on-attach-failure
+    itself fails (e.g. the cancel/sell in the flatten path raises).
+
+    Callers already log this case via log.error(); this additionally makes
+    sure a human is paged instead of the position sitting in an unknown
+    protection state with only a log line to find it. Never raises — a
+    notifier hiccup here must not mask or replace the original error.
+    """
+    try:
+        return send_trade_alert(
+            action="EMERGENCY", ticker=ticker, shares=shares, price=price,
+            stop=stop, target=target, reason=reason,
+        )
+    except Exception as e:
+        log.error("notify_flatten_failed: alert itself failed for %s: %s", ticker, e)
+        return False
+
+
 def send_eod_summary(
     date: str,
     portfolio_value: float,

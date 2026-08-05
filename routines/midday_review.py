@@ -23,7 +23,7 @@ from core.screener import screen
 from core.edge     import should_pyramid, compute_trail_stop
 from core.spy_base import rebalance_to_spy, log_status as spy_log, is_base_symbol
 from core.order_utils import order_field as _order_field
-from core.notifier import send_trade_alert
+from core.notifier import send_trade_alert, notify_flatten_failed
 from core.pead_tracker import remove_position as pead_untrack
 from core.safe_oco_attach import cancel_open_sell_orders
 
@@ -250,6 +250,12 @@ def run():
                 except Exception as e:
                     log.error(f"  ✗ {p.symbol}: flatten-on-attach-failure ALSO failed: {e} "
                               f"— position remains unprotected, needs manual review")
+                    notify_flatten_failed(
+                        ticker=p.symbol, shares=qty, price=cur if cur > 0 else entry,
+                        stop=stop, target=target,
+                        reason=f"Midday stop-loss re-attach AND flatten both failed ({e}) — "
+                               f"position may be UNPROTECTED, needs immediate manual review",
+                    )
 
         # Brief pause to let Alpaca propagate the new OCO orders before
         # we try to update them in the review loop below.
@@ -468,13 +474,25 @@ def run():
                         continue
                     if not result.get("stop_attached"):
                         log.error(f"  ✗ {s['symbol']} bought but stop NOT attached — flattening")
-                        broker.sell(s["symbol"], qty=result["qty"])
-                        send_trade_alert(
-                            action="FLATTEN", ticker=s["symbol"], shares=result["qty"],
-                            price=result["price"],
-                            stop=result.get("stop", 0), target=result.get("target", 0),
-                            reason="Midday scan buy stop-loss attach failed — position closed to avoid naked exposure",
-                        )
+                        try:
+                            broker.sell(s["symbol"], qty=result["qty"])
+                            send_trade_alert(
+                                action="FLATTEN", ticker=s["symbol"], shares=result["qty"],
+                                price=result["price"],
+                                stop=result.get("stop", 0), target=result.get("target", 0),
+                                reason="Midday scan buy stop-loss attach failed — position closed to avoid naked exposure",
+                            )
+                        except Exception as fe:
+                            log.error(f"  ✗ {s['symbol']}: flatten-on-attach-failure ALSO "
+                                      f"failed: {fe} — position remains unprotected, needs "
+                                      f"manual review")
+                            notify_flatten_failed(
+                                ticker=s["symbol"], shares=result["qty"], price=result["price"],
+                                stop=result.get("stop", 0), target=result.get("target", 0),
+                                reason=f"Midday scan buy stop-loss attach AND flatten both "
+                                       f"failed ({fe}) — position may be UNPROTECTED, needs "
+                                       f"immediate manual review",
+                            )
                         continue
                     send_trade_alert(
                         action="BUY",
