@@ -1730,6 +1730,27 @@ def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts
             stop = round(basis * (1 - config.VCP_STOP_PCT), 2)
             stop_attached, _ = broker.attach_stop_target(sym, filled_qty, stop, None)
 
+            if not stop_attached:
+                log.error(f"  ✗ {sym} stop NOT attached — flattening")
+                display_sym = sym.replace("/USD", "")
+                try:
+                    broker.sell(sym, qty=filled_qty)
+                    send_trade_alert(
+                        action="FLATTEN", ticker=display_sym, shares=round(filled_qty, 6),
+                        price=basis, stop=stop, target=0,
+                        reason="Crypto stop-loss attach failed — position closed to avoid naked exposure",
+                    )
+                except Exception as fe:
+                    log.error(f"  ✗ {sym}: flatten-on-attach-failure ALSO failed: {fe} "
+                              f"— position remains unprotected, needs manual review")
+                    notify_flatten_failed(
+                        ticker=display_sym, shares=round(filled_qty, 6), price=basis,
+                        stop=stop, target=0,
+                        reason=f"Crypto stop-loss attach AND flatten both failed ({fe}) — "
+                               f"position may be UNPROTECTED, needs immediate manual review",
+                    )
+                continue
+
             log.info(f"  ✓ Crypto {sym} {filled_qty:.6f} @ ${basis:,.2f} SL=${stop:,.2f} stop_attached={stop_attached}")
             send_trade_alert(
                 action="BUY",

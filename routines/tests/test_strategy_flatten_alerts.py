@@ -165,3 +165,59 @@ class TestVcpFlattenAlert:
 
         emergency.assert_called_once()
         assert emergency.call_args.kwargs["ticker"] == "ABC"
+
+
+class TestCryptoFlattenAlert:
+    """_run_crypto used to log stop_attached=False and still send a BUY
+    alert unconditionally — it never flattened the position at all, unlike
+    every other strategy runner. Regression: a failed stop-attach on a
+    crypto buy must now flatten and alert exactly like the equity
+    strategies, not leave the position naked while reporting a BUY."""
+
+    def _setup(self, monkeypatch, broker):
+        _common_patches(monkeypatch)
+        monkeypatch.setattr(market_open, "free_cash_for_pead", lambda broker, amount: True)
+        import core.crypto_screener as crypto_screener_module
+        monkeypatch.setattr(crypto_screener_module, "screen", lambda: [
+            {"symbol": "BTC/USD", "momentum_pct": 5.0, "vol_ratio": 2.0, "price": 50_000.0},
+        ])
+
+        broker.buying_power.return_value = 10_000.0
+        order = MagicMock(id="order-1")
+        broker.trade.submit_order.return_value = order
+        filled_order = MagicMock(filled_avg_price="50000.0", filled_qty="0.02")
+        broker.trade.get_order_by_id.return_value = filled_order
+        broker.attach_stop_target.return_value = (False, None)
+
+    def test_flatten_on_stop_attach_failure_sends_alert(self, monkeypatch):
+        broker = MagicMock()
+        cb = MagicMock()
+        self._setup(monkeypatch, broker)
+
+        alert = MagicMock()
+        monkeypatch.setattr(market_open, "send_trade_alert", alert)
+
+        market_open._run_crypto(broker=broker, cb=cb, pv=100_000.0, slots=[5],
+                                 held=set(), already_bought_today=set(), sector_counts={})
+
+        broker.sell.assert_called_once_with("BTC/USD", qty=0.02)
+        alert.assert_called_once()
+        kwargs = alert.call_args.kwargs
+        assert kwargs["action"] == "FLATTEN"
+        assert kwargs["ticker"] == "BTC"
+
+    def test_flatten_failure_itself_sends_emergency_alert(self, monkeypatch):
+        broker = MagicMock()
+        cb = MagicMock()
+        self._setup(monkeypatch, broker)
+        broker.sell.side_effect = Exception("insufficient qty available for order")
+
+        monkeypatch.setattr(market_open, "send_trade_alert", MagicMock())
+        emergency = MagicMock()
+        monkeypatch.setattr(market_open, "notify_flatten_failed", emergency)
+
+        market_open._run_crypto(broker=broker, cb=cb, pv=100_000.0, slots=[5],
+                                 held=set(), already_bought_today=set(), sector_counts={})
+
+        emergency.assert_called_once()
+        assert emergency.call_args.kwargs["ticker"] == "BTC"

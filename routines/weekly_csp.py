@@ -37,13 +37,22 @@ def run():
         from core.fmp import get_market_breadth
         breadth = get_market_breadth()
         spy_chg = breadth.get("spy_change_pct", 0)
-        regimes = {
-            spy_chg >= 0.3: "BULLISH",
-            spy_chg >= 0:   "NEUTRAL",
-            spy_chg >= -0.5: "DEFENSIVE",
-            True:           "AVOID_CSP",
-        }
-        regime = next(v for k, v in regimes.items() if k)
+        # NOTE: these branches used to be a dict literal keyed on the boolean
+        # expressions themselves. For any spy_chg, every threshold from
+        # `>= 0.3` down to `>= -0.5` that holds evaluates to the same key
+        # (True), so later entries silently overwrote earlier ones and the
+        # dict always collapsed to just {True: "AVOID_CSP"} (or, when no
+        # threshold held, {False: "DEFENSIVE", True: "AVOID_CSP"}) — regime
+        # was AVOID_CSP on every single run regardless of spy_chg, so CSP
+        # execution never fired. An if/elif chain doesn't have this problem.
+        if spy_chg >= 0.3:
+            regime = "BULLISH"
+        elif spy_chg >= 0:
+            regime = "NEUTRAL"
+        elif spy_chg >= -0.5:
+            regime = "DEFENSIVE"
+        else:
+            regime = "AVOID_CSP"
         log.info(f"  Regime: {regime} | SPY: {spy_chg:+.2f}%")
     except Exception as e:
         log.warning(f"Breadth check failed: {e} — assuming NEUTRAL")
@@ -55,7 +64,14 @@ def run():
         return
 
     # ── Screen candidates ──────────────────────────────────────────────────
-    candidates = screen_csp_candidates(broker, min_premium=10)
+    # screen_csp_candidates's real parameter is min_premium_pct (a percent-of-
+    # collateral weekly-return threshold, default 0.30%) — the previous
+    # `min_premium=10` call used a kwarg that doesn't exist on the function at
+    # all (TypeError on every run) and, even fixed to the right name, `10`
+    # would mean "require a 10% weekly return," which no realistic weekly CSP
+    # clears. Use the screener's own documented default instead of guessing
+    # a number for a unit this call was never actually written against.
+    candidates = screen_csp_candidates(broker)
     log.info(f"  Candidates: {len(candidates)}")
 
     best = pick_best(candidates)
