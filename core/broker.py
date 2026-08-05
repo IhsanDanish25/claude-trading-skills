@@ -243,10 +243,53 @@ class BrokerClient:
 
         try:
             safe_attach_oco(self, symbol, qty, stop, target, _submit)
-            return True, target is not None
         except Exception as e:
             log.error(f"  ↳ Order attach FAILED [{symbol}]: {e}")
             return False, False
+
+        # submit_order() not raising only proves Alpaca accepted the HTTP
+        # request — it does NOT prove the order survived Alpaca's async risk
+        # checks (e.g. wash-trade / PDT / not-yet-settled-buy), which can
+        # accept-then-reject an order moments after the synchronous response.
+        # Poll Alpaca's own open-orders list to confirm the stop is actually
+        # resting there before reporting success to callers.
+        if not self._verify_stop_live(symbol):
+            log.error(
+                f"  ↳ Stop order attach for {symbol} reported success but no "
+                f"live stop/OCO order was found on Alpaca afterward — "
+                f"treating as NOT attached"
+            )
+            return False, False
+
+        return True, target is not None
+
+    def _verify_stop_live(
+        self, symbol: str, max_attempts: int = 6, delay: float = 0.5
+    ) -> bool:
+        """Poll Alpaca's open orders for a resting sell stop/stop-limit/OCO
+        order on symbol. Used right after submission to confirm the order
+        Alpaca accepted synchronously is still alive, rather than trusting
+        that submit_order() not raising means the order exists."""
+        for attempt in range(max_attempts):
+            try:
+                open_orders = self.get_open_orders()
+            except Exception as e:
+                log.warning(
+                    "  ↳ verify stop [%s]: could not list open orders (attempt %d/%d): %s",
+                    symbol, attempt + 1, max_attempts, e,
+                )
+                open_orders = None
+            if open_orders:
+                for o in open_orders:
+                    if o.symbol != symbol:
+                        continue
+                    if order_field(o, "side") != "sell":
+                        continue
+                    if "stop" in order_field(o, "type"):
+                        return True
+            if attempt < max_attempts - 1:
+                time.sleep(delay)
+        return False
 
     def affordable_budget(self, symbol: str) -> float:
         """Max dollars available for a NEW whole-share buy of symbol right now —
