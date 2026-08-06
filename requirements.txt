@@ -1,5 +1,8 @@
 # ── Web dashboard (Streamlit) ─────────────────────────────────────────────────
-streamlit>=1.42.0
+# Pinned: streamlit's bundled starlette_gzip_middleware.py breaks against
+# starlette>=1.4.0 (missing thread_minimum_size kwarg) -> 500s on every request.
+streamlit==1.61.1
+starlette<1.4.0
 claude-agent-sdk>=0.2.102
 python-dotenv>=1.0.0
 nest-asyncio>=1.6.0
