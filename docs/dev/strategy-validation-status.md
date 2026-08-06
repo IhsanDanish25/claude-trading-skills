@@ -75,11 +75,13 @@ buy-and-hold. Insider and Squeeze remain untested (paid FMP tier, §2.5).
 - Fails `not_overfit` (IS/OOS ratio -2.44 — in-sample was positive at +7.9%,
   out-of-sample went negative at -3.2%, the classic overfit signature) and
   `significant` (p=0.659, far above the 0.05 bar). Only clears `trade_count`.
-- PEAD is nonetheless the current default (`STRATEGY_MODE=pead`) because it
-  is the only strategy that has run live long enough to have a real
-  execution track record — its backtest failing these gates is a known,
-  open risk, not an oversight. Do not increase PEAD sizing on the strength
-  of this backtest.
+- **Dropped from `STRATEGY_MODE`** as of the 2026-08-06 reconciliation
+  (`core/config.py` default is now `breakout,meanrev,earnmom,insider`) —
+  fails significance under both tested methodologies (158 trades p=0.262;
+  871 trades p=0.659) and shows the overfit signature above. The strategy
+  code and its own params (`PEAD_*` in `core/config.py`) remain in the repo
+  as opt-in/unvalidated; do not re-add it to the default without a backtest
+  that clears `trustworthy`.
 
 ### 2.2 Mean Reversion
 
