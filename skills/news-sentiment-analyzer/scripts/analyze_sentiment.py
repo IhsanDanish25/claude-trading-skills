@@ -4,17 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
-import requests
+import yfinance as yf
 
-
-FMP_BASE = "https://financialmodelingprep.com/api"
 
 BULLISH_WORDS = {
     "surge", "soar", "rally", "beat", "strong", "upgrade", "outperform", "buy",
@@ -50,36 +46,34 @@ def score_headline(text: str) -> float:
     return max(-1.0, min(1.0, score / max(len(words) * 0.1, 1)))
 
 
-def fetch_news_fmp(symbol: str, api_key: str, limit: int = 50) -> list[dict]:
+def fetch_news_yfinance(symbol: str, limit: int = 50) -> list[dict]:
+    """Free, keyless news source — yfinance wraps Yahoo Finance's public news feed.
+
+    FMP's news endpoints (both legacy /v3/stock_news and current /stable/news/*)
+    are paywalled and return 403/402 on a free-tier key, so this is the only
+    source that actually returns data without a paid subscription.
+    """
     try:
-        r = requests.get(f"{FMP_BASE}/v3/stock_news", params={
-            "tickers": symbol,
-            "limit": limit,
-            "apikey": api_key,
-        }, timeout=15)
-        r.raise_for_status()
-        return r.json() if isinstance(r.json(), list) else []
+        raw = yf.Ticker(symbol).news or []
     except Exception as exc:
-        print(f"  FMP news error ({symbol}): {exc}", file=sys.stderr)
+        print(f"  yfinance news error ({symbol}): {exc}", file=sys.stderr)
         return []
 
-
-def fetch_news_general(api_key: str, limit: int = 100) -> list[dict]:
-    try:
-        r = requests.get(f"{FMP_BASE}/v3/stock_news", params={
-            "limit": limit,
-            "apikey": api_key,
-        }, timeout=15)
-        r.raise_for_status()
-        return r.json() if isinstance(r.json(), list) else []
-    except Exception as exc:
-        print(f"  FMP general news error: {exc}", file=sys.stderr)
-        return []
+    articles = []
+    for item in raw[:limit]:
+        content = item.get("content", item)
+        pub_date = content.get("pubDate", "")
+        articles.append({
+            "title": content.get("title", ""),
+            "text": content.get("summary", "") or content.get("description", ""),
+            "publishedDate": pub_date[:10] if pub_date else "",
+        })
+    return articles
 
 
-def analyze_symbol(symbol: str, api_key: str, days: int) -> dict:
+def analyze_symbol(symbol: str, days: int) -> dict:
     print(f"  Fetching news for {symbol}...", end=" ", flush=True)
-    articles = fetch_news_fmp(symbol, api_key, limit=50)
+    articles = fetch_news_yfinance(symbol, limit=50)
     cutoff = (date.today() - timedelta(days=days)).isoformat()
     recent = [a for a in articles if a.get("publishedDate", "") >= cutoff]
 
@@ -115,18 +109,17 @@ def analyze_symbol(symbol: str, api_key: str, days: int) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="News Sentiment Analyzer")
-    parser.add_argument("--api-key", help="FMP API key (or set FMP_API_KEY)")
+    parser.add_argument(
+        "--api-key",
+        help="Unused — kept for backward compatibility. News now comes from "
+             "yfinance (free), since FMP's news endpoints are paywalled.",
+    )
     parser.add_argument("--symbol", help="Single symbol")
     parser.add_argument("--symbols", nargs="+")
     parser.add_argument("--keyword", help="Theme/keyword mode")
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--output-dir", default="reports/")
     args = parser.parse_args()
-
-    api_key = args.api_key or os.environ.get("FMP_API_KEY", "")
-    if not api_key:
-        print("Error: FMP_API_KEY not set.", file=sys.stderr)
-        sys.exit(1)
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d")
@@ -142,7 +135,7 @@ def main() -> None:
     else:
         symbols = ["AAPL", "MSFT", "NVDA", "TSLA", "META"]
 
-    results = [analyze_symbol(sym, api_key, args.days) for sym in symbols]
+    results = [analyze_symbol(sym, args.days) for sym in symbols]
     results.sort(key=lambda x: x["sentiment"], reverse=True)
 
     metadata = {

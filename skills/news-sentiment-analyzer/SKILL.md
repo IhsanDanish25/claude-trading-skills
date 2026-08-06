@@ -16,8 +16,7 @@ Score recent news headlines for bullish/bearish sentiment, track sentiment momen
 
 ## Prerequisites
 
-- FMP API key (`FMP_API_KEY`) for structured news feed
-- No key required for WebSearch-based news (fallback mode)
+- No API key required — news comes from yfinance (Yahoo Finance's public feed), which is already a repo dependency. FMP's news endpoints are paywalled on the free tier and are not used.
 
 ## Workflow
 

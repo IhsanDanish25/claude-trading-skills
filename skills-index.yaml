@@ -1198,14 +1198,14 @@ skills:
   display_name: News Sentiment Analyzer
   category: market-intelligence
   status: production
-  summary: NLP-score recent news headlines bullish/bearish using FMP news feed.
+  summary: NLP-score recent news headlines bullish/bearish using yfinance's free news feed.
   timeframe: daily
   difficulty: beginner
   integrations:
-  - id: fmp
+  - id: yfinance
     type: market_data
     requirement: required
-    note: FMP stock news API
+    note: Free news feed via yfinance (FMP's news endpoints are paywalled on free tier)
   inputs:
   - symbol_list
   outputs:

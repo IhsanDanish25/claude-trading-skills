@@ -221,6 +221,7 @@ The table below is **auto-generated** from `skills-index.yaml` by `scripts/gener
 |-------|---------|--------------|--------|-------|
 | **Backtest Expert** | ❌ Not used | ❌ Not used | ❌ Not used | User provides strategy parameters |
 | **Breadth Chart Analyst** | ❌ Not used | ❌ Not used | ❌ Not used | Chart screenshot input |
+| **Breakout Scanner** | ❌ Not used | ❌ Not used | ❌ Not used | Free price data via yfinance |
 | **Breakout Trade Planner** | ❌ Not used | ❌ Not used | ❌ Not used | Consumes VCP screener output; pure calculation + Alpaca order templates |
 | **CANSLIM Screener** | ✅ Required | ❌ Not used | ❌ Not used | US stock fundamentals via FMP |
 | **Data Quality Checker** | ❌ Not used | ❌ Not used | ❌ Not used | Local markdown validation; works offline |
@@ -228,6 +229,7 @@ The table below is **auto-generated** from `skills-index.yaml` by `scripts/gener
 | **Downtrend Duration Analyzer** | ❌ Not used | ❌ Not used | ❌ Not used | Duration analysis from market data; pure calculation |
 | **Dual Axis Skill Reviewer** | ❌ Not used | ❌ Not used | ❌ Not used | Deterministic scoring + optional LLM review |
 | **Earnings Calendar** | ✅ Required | ❌ Not used | ❌ Not used | Financial Modeling Prep API |
+| **Earnings Momentum Tracker** | ✅ Required | ❌ Not used | ❌ Not used | FMP earnings calendar + price data |
 | **Earnings Trade Analyzer** | ✅ Required | ❌ Not used | ❌ Not used | Financial Modeling Prep API |
 | **Economic Calendar Fetcher** | ✅ Required | ❌ Not used | ❌ Not used | Financial Modeling Prep API |
 | **Edge Candidate Agent** | 🟡 Optional | ❌ Not used | ❌ Not used | Optional OHLCV via FMP for edge ticket export |
@@ -241,15 +243,20 @@ The table below is **auto-generated** from `skills-index.yaml` by `scripts/gener
 | **FTD Detector** | ✅ Required | ❌ Not used | ❌ Not used | Daily QQQ/SPY OHLCV via FMP |
 | **Finviz Screener** | ❌ Not used | 🟡 Optional | ❌ Not used | FINVIZ Elite API |
 | **IBD Distribution Day Monitor** | ✅ Required | ❌ Not used | ❌ Not used | Financial Modeling Prep API |
+| **Insider Buying Detector** | ✅ Required | ❌ Not used | ❌ Not used | FMP insider transactions API |
 | **Institutional Flow Tracker** | ✅ Required | ❌ Not used | ❌ Not used | Financial Modeling Prep API |
 | **Kanchi Dividend Review Monitor** | 🟡 Optional (Recommended) | ❌ Not used | ❌ Not used | Dividend / price monitoring via FMP |
 | **Kanchi Dividend SOP** | 🟡 Optional (Recommended) | ❌ Not used | ❌ Not used | US dividend stock data via FMP |
 | **Kanchi Dividend US Tax Accounting** | ❌ Not used | ❌ Not used | ❌ Not used | US tax workflow guidance; pure calculation |
 | **Macro Regime Detector** | ❌ Not used | ❌ Not used | ❌ Not used | Cross-asset ratio data via yfinance or local CSV |
+| **Macro Signal Monitor** | ❌ Not used | ❌ Not used | ❌ Not used | Free macro data via yfinance |
 | **Market Breadth Analyzer** | ❌ Not used | ❌ Not used | ❌ Not used | TraderMonty public CSV; no API key required |
 | **Market Environment Analysis** | ❌ Not used | ❌ Not used | ❌ Not used | Global market data via WebSearch / WebFetch; Optional chart image inputs for technical interpretation |
 | **Market News Analyst** | ❌ Not used | ❌ Not used | ❌ Not used | Web search / fetch |
 | **Market Top Detector** | ❌ Not used | ❌ Not used | ❌ Not used | Public market data CSVs; no API key required |
+| **Mean Reversion Screener** | ❌ Not used | ❌ Not used | ❌ Not used | Free price data via yfinance |
+| **News Sentiment Analyzer** | ❌ Not used | ❌ Not used | ❌ Not used | Free news feed via yfinance (FMP's news endpoints are paywalled on free tier) |
+| **Options Flow Scanner** | ❌ Not used | ❌ Not used | ❌ Not used | Free options chain data via yfinance; no API key needed |
 | **Options Strategy Advisor** | 🟡 Optional | ❌ Not used | ❌ Not used | Financial Modeling Prep API |
 | **PEAD Screener** | ✅ Required | ❌ Not used | ❌ Not used | Financial Modeling Prep API |
 | **Pair Trade Screener** | ✅ Required | ❌ Not used | ❌ Not used | Financial Modeling Prep API |
@@ -258,6 +265,8 @@ The table below is **auto-generated** from `skills-index.yaml` by `scripts/gener
 | **Position Sizer** | ❌ Not used | ❌ Not used | ❌ Not used | Pure calculation; works offline |
 | **Scenario Analyzer** | ❌ Not used | ❌ Not used | ❌ Not used | Headline / news search via WebSearch |
 | **Sector Analyst** | ❌ Not used | ❌ Not used | ❌ Not used | Chart screenshot input |
+| **Sector Rotation Detector** | ❌ Not used | ❌ Not used | ❌ Not used | Free ETF price data via yfinance |
+| **Short Squeeze Scanner** | ✅ Required | ❌ Not used | ❌ Not used | FMP short interest + quote API |
 | **Signal Postmortem** | ❌ Not used | ❌ Not used | ❌ Not used | Postmortem framework; pure calculation |
 | **Skill Designer** | ❌ Not used | ❌ Not used | ❌ Not used | Generates skill scaffolding from idea specs |
 | **Skill Idea Miner** | ❌ Not used | ❌ Not used | ❌ Not used | Mines session logs for skill ideas |
@@ -265,6 +274,7 @@ The table below is **auto-generated** from `skills-index.yaml` by `scripts/gener
 | **Stanley Druckenmiller Investment** | ❌ Not used | ❌ Not used | ❌ Not used | Synthesizes outputs from upstream skills; pure calculation |
 | **Strategy Pivot Designer** | ❌ Not used | ❌ Not used | ❌ Not used | Pivot proposal generator; pure calculation |
 | **Technical Analyst** | ❌ Not used | ❌ Not used | ❌ Not used | Chart screenshot input |
+| **Technical Indicator Suite** | ❌ Not used | ❌ Not used | ❌ Not used | Free price data via yfinance |
 | **Theme Detector** | 🟡 Optional | 🟡 Optional (Recommended) | ❌ Not used | Financial Modeling Prep API |
 | **Trade Hypothesis Ideator** | ❌ Not used | ❌ Not used | ❌ Not used | Hypothesis generation from journal/data inputs; pure calculation |
 | **Trade Performance Coach** | ❌ Not used | ❌ Not used | ❌ Not used | Works from local trader-memory / postmortem / journal records; no network or paid API required |
