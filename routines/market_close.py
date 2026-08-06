@@ -125,6 +125,16 @@ def _late_trail(broker: BrokerClient) -> int:
     return tightened
 
 
+def _resolve_eod_stop(base_stop: float, action: str, new_stop) -> float:
+    """Stop price to re-attach after the EOD cancel-all, given Claude's
+    decision. TIGHTEN_STOP only wins if new_stop is a real number tighter
+    (higher) than the entry-based default — a missing/garbage/looser
+    new_stop falls back to base_stop rather than weakening protection."""
+    if action == "TIGHTEN_STOP" and isinstance(new_stop, (int, float)) and new_stop > base_stop:
+        return round(float(new_stop), 2)
+    return base_stop
+
+
 def run():
     config.validate()
     logger.banner(log, "MARKET CLOSE — 3:00 PM ET")
@@ -251,6 +261,7 @@ def run():
         if pos_data:
             log.info(f"── Claude: EOD position review ({len(pos_data)} positions)")
             decisions = review_open_positions(pos_data, regime["regime"])
+            pos_by_symbol = {p["symbol"]: p for p in pos_data}
             for d in decisions:
                 sym    = d.get("symbol", "")
                 action = d.get("action", "HOLD")
@@ -263,6 +274,38 @@ def run():
                         log.info(f"  ✓ EOD sold {sym}")
                     except Exception as e:
                         log.error(f"  ✗ {e}")
+                    continue
+
+                # HOLD / TIGHTEN_STOP: the cancel-all-orders step above just
+                # stripped this position's stop-loss, and no later routine
+                # re-arms one until midday_review at noon tomorrow — a ~21hr
+                # unprotected window spanning the overnight gap and the next
+                # session's open. Re-attach immediately so nothing rides
+                # naked overnight.
+                p_info = pos_by_symbol.get(sym)
+                if not p_info:
+                    continue
+                qty    = p_info["qty"]
+                target = p_info["target"]
+                stop   = _resolve_eod_stop(p_info["stop"], action, d.get("new_stop"))
+                stop_attached, _ = broker.attach_stop_target(sym, qty, stop, target)
+                if stop_attached:
+                    log.info(f"  ✓ {sym}: protection re-attached (stop=${stop} target=${target})")
+                else:
+                    log.error(f"  ✗ {sym}: stop-loss re-attach FAILED after EOD cancel-all "
+                              f"(verified against Alpaca) — flattening to avoid an unprotected "
+                              f"overnight position")
+                    try:
+                        broker.sell(sym, qty=qty)
+                        send_trade_alert(
+                            action="FLATTEN", ticker=sym, shares=qty,
+                            price=p_info.get("current_price", 0),
+                            stop=stop, target=target,
+                            reason="EOD stop-loss re-attach failed — closed to avoid naked overnight exposure",
+                        )
+                    except Exception as e:
+                        log.error(f"  ✗ {sym}: flatten-on-attach-failure ALSO failed: {e} "
+                                  f"— position remains unprotected overnight, needs manual review")
 
     # ── FTD detection on SPY ──────────────────────────────────────────────────
     log.info("── FTD detection (SPY)")

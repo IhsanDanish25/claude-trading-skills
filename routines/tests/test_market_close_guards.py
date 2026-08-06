@@ -42,6 +42,30 @@ class TestBuildStopMap:
         assert market_close._build_stop_map(orders) == {}
 
 
+class TestResolveEodStop:
+    """_resolve_eod_stop decides the stop re-attached after market_close's
+    cancel-all-orders step. Regression coverage for the 21hr unprotected
+    window: a HOLD/TIGHTEN_STOP decision used to leave positions with no
+    stop at all from 3pm ET until midday_review the next day."""
+
+    def test_hold_uses_base_stop(self):
+        assert market_close._resolve_eod_stop(9.19, "HOLD", None) == 9.19
+
+    def test_tighten_stop_with_better_price_wins(self):
+        assert market_close._resolve_eod_stop(9.19, "TIGHTEN_STOP", 9.50) == 9.50
+
+    def test_tighten_stop_with_looser_price_falls_back(self):
+        """A new_stop below the entry-based default would weaken protection
+        — ignore it and keep the safer base stop."""
+        assert market_close._resolve_eod_stop(9.19, "TIGHTEN_STOP", 8.90) == 9.19
+
+    def test_tighten_stop_missing_new_stop_falls_back(self):
+        assert market_close._resolve_eod_stop(9.19, "TIGHTEN_STOP", None) == 9.19
+
+    def test_tighten_stop_non_numeric_new_stop_falls_back(self):
+        assert market_close._resolve_eod_stop(9.19, "TIGHTEN_STOP", "not-a-number") == 9.19
+
+
 class TestTodaysTradesAndSkippedRoutines:
     """EOD summary helpers reading state/trade_log.jsonl and
     state/skipped_routines.json — feeds the daily summary email so trades
