@@ -14,6 +14,7 @@ In-process cached — repeated calls in the same run cost 0 HTTP requests.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import datetime
 import logging
 import re
@@ -25,6 +26,23 @@ import requests
 from core.config import INSIDER_LOOKBACK_DAYS
 
 log = logging.getLogger(__name__)
+
+# Bounded concurrency for the filing-fetch phase. Each filing fetch takes
+# ~1-3s (two URL attempts + sec.gov latency), so 8 workers keeps aggregate
+# throughput comfortably under SEC's "no more than 10 requests/second" fair
+# -use guidance without needing a shared rate limiter.
+_MAX_WORKERS = 8
+
+# Hard wall-clock budget for fetching+parsing all filings. Fetching used to
+# be fully serial (200+ filings at ~3s each = 10+ minutes) which regularly
+# blew through the caller's own subprocess timeout (worker.py's 540s cap on
+# scheduler.py) before a single P-Purchase was scored — the routine was
+# killed mid-fetch, never marked "ran", and retried from scratch on the next
+# tick, burning the whole 2h catch-up window without ever completing.
+# Bounding this phase means the function always returns in time to be
+# scored, even in the worst case (SEC slow, or an unusually large filing
+# batch) — degrading to partial results instead of getting killed outright.
+_FETCH_BUDGET_SEC = 150
 
 _HEADERS = {
     "User-Agent": "TradingBot research@email.com",
@@ -360,26 +378,43 @@ def get_insider_transactions(days_lookback: int | None = None) -> list[dict]:
     filing_urls = list(cik_to_url.values())
     log.info("  Unique companies: %d", len(filing_urls))
 
-    # Batch fetch filings with SEC rate limits
+    def _fetch_one(url: str) -> list[dict]:
+        cik    = _cik_from_url(url)
+        ticker = ticker_map.get(cik, "") if cik else ""
+        txns   = _fetch_and_parse(url, ticker)
+        time.sleep(0.15)  # per-worker floor, keeps aggregate rate SEC-friendly
+        return txns
+
     all_txns: list[dict] = []
-    BATCH      = 80
-    BATCH_PAUSE = 6   # 80 calls × 0.1s = 8s, use 6s pause
+    deadline = time.monotonic() + _FETCH_BUDGET_SEC
+    fetched = 0
 
-    for i in range(0, len(filing_urls), BATCH):
-        batch = filing_urls[i : i + BATCH]
-        batch_n = i // BATCH + 1
-        log.info(f"  Batch {batch_n} — fetching {len(batch)} filings…")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+        futures = {pool.submit(_fetch_one, url) for url in filing_urls}
+        remaining = max(0.0, deadline - time.monotonic())
+        done, not_done = concurrent.futures.wait(futures, timeout=remaining)
 
-        for url in batch:
-            cik    = _cik_from_url(url)
-            ticker = ticker_map.get(cik, "") if cik else ""
-            txns   = _fetch_and_parse(url, ticker)
-            all_txns.extend(txns)
-            time.sleep(0.15)
+        for fut in done:
+            try:
+                all_txns.extend(fut.result())
+                fetched += 1
+            except Exception as e:
+                log.debug("EDGAR fetch failed: %s", e)
 
-        if i + BATCH < len(filing_urls):
-            log.info("  Sleep %ds (SEC rate limit)", BATCH_PAUSE)
-            time.sleep(BATCH_PAUSE)
+        if not_done:
+            # Cancel whatever hasn't started yet; futures already running are
+            # left to finish naturally when the `with` block exits below —
+            # bounded by _MAX_WORKERS in-flight requests at ~20s worst case.
+            for fut in not_done:
+                fut.cancel()
+            log.warning(
+                "  EDGAR fetch budget (%ds) exhausted after %d/%d filings — "
+                "scoring with partial results",
+                _FETCH_BUDGET_SEC, fetched, len(filing_urls),
+            )
+
+    if fetched == len(filing_urls):
+        log.info("  Fetched %d/%d filings", fetched, len(filing_urls))
 
     # Date filter
     cutoff_dt = cutoff
