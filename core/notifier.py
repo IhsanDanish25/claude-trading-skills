@@ -211,6 +211,8 @@ def send_eod_summary(
     spy_change_pct: float,
     ftd_detected: bool,
     force_closed: list[str] | None = None,
+    trades_today: list[dict] | None = None,
+    skipped_routines: list[dict] | None = None,
 ) -> bool:
     pnl_color = "green" if unrealized_pnl >= 0 else "red"
     spy_color = "green" if spy_change_pct >= 0 else "red"
@@ -221,6 +223,33 @@ def send_eod_summary(
     if force_closed:
         rows = "".join(f'<div class="row"><span class="label">{s}</span><span class="value red">Force closed (-3%)</span></div>' for s in force_closed)
         closed_html = f'<div class="card"><h2>Force Closed</h2>{rows}</div>'
+
+    trades_html = ""
+    trades_plain = "None"
+    if trades_today:
+        rows = "".join(
+            f'<div class="row"><span class="label">{t.get("side", "?").upper()} {t.get("symbol", "?")}</span>'
+            f'<span class="value">{t.get("qty", "?")} sh @ ${t.get("price", 0):.2f} [{t.get("strategy", "?")}]</span></div>'
+            for t in trades_today
+        )
+        trades_html = f'<div class="card"><h2>Trades Today ({len(trades_today)})</h2>{rows}</div>'
+        trades_plain = "; ".join(
+            f"{t.get('side', '?').upper()} {t.get('symbol', '?')} {t.get('qty', '?')}sh@${t.get('price', 0):.2f}"
+            for t in trades_today
+        )
+
+    skipped_html = ""
+    skipped_plain = ""
+    if skipped_routines:
+        rows = "".join(
+            f'<div class="row"><span class="label">{s.get("module", "?")}</span>'
+            f'<span class="value yellow">skipped — {s.get("reason", "?")}</span></div>'
+            for s in skipped_routines
+        )
+        skipped_html = f'<div class="card"><h2>⚠️ Skipped Routines Today</h2>{rows}</div>'
+        skipped_plain = "\nSKIPPED: " + "; ".join(
+            f"{s.get('module', '?')} ({s.get('reason', '?')})" for s in skipped_routines
+        )
 
     body = f"""
     <div class="card"><h2>Portfolio EOD</h2>
@@ -235,14 +264,18 @@ def send_eod_summary(
       {_row("Bias", bias.upper())}
       {_row("FTD detected", "YES ✓" if ftd_detected else "No")}
     </div>
+    {trades_html}
     {closed_html}
+    {skipped_html}
     """
     html = _html("EOD Summary", date, body)
     plain = (
         f"EOD Summary — {date}\n"
         f"Portfolio: ${portfolio_value:,.2f} | Cash: ${cash:,.2f}\n"
         f"Unrealized P&L: {pnl_sign}${unrealized_pnl:,.2f}\n"
-        f"SPY: {spy_sign}{spy_change_pct:.2f}% | Regime: {regime} | FTD: {ftd_detected}"
+        f"SPY: {spy_sign}{spy_change_pct:.2f}% | Regime: {regime} | FTD: {ftd_detected}\n"
+        f"Trades today: {trades_plain}"
+        f"{skipped_plain}"
     )
     emoji = "📈" if unrealized_pnl >= 0 else "📉"
     return send(f"{emoji} EOD Summary — {date}  ({pnl_sign}${unrealized_pnl:,.0f})", plain, html)

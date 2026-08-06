@@ -709,7 +709,7 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today, sector_count
             result = broker.buy(
                 sym, dollar_amount=amount,
                 stop_loss_pct=config.INSIDER_STOP_PCT,
-                take_profit_pct=None,
+                take_profit_pct=config.INSIDER_TARGET_PCT,
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -724,10 +724,11 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today, sector_count
                 continue
 
             log.info(f"  ✓ Insider {sym} {result['qty']} sh @ ${result['price']:.2f} "
-                     f"SL={result['stop']} (hold {config.INSIDER_HOLD_DAYS}d)")
+                     f"SL={result['stop']} TP={result['target']} (hold {config.INSIDER_HOLD_DAYS}d)")
             trade_logger.log_event("order_placed", "insider", sym,
                                    qty=result["qty"], price=result["price"],
-                                   stop=result["stop"], amount=round(amount, 2),
+                                   stop=result["stop"], target=result["target"],
+                                   amount=round(amount, 2),
                                    hold_days=config.INSIDER_HOLD_DAYS)
 
             pead_track(sym, result["price"],
@@ -737,7 +738,7 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today, sector_count
                        hold_days=config.INSIDER_HOLD_DAYS)
             send_trade_alert(
                 action="BUY", ticker=sym, shares=result["qty"],
-                price=result["price"], stop=result["stop"], target=None,
+                price=result["price"], stop=result["stop"], target=result["target"],
                 reason=(f"Insider score={c['insider_score']:.0f}"
                         f" {c['n_transactions']} purchases"),
             )
@@ -1070,7 +1071,7 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today, sector_count
             result = broker.buy(
                 sym, dollar_amount=amount,
                 stop_loss_pct=config.EARNMOM_STOP_PCT,
-                take_profit_pct=None,
+                take_profit_pct=config.EARNMOM_TARGET_PCT,
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1085,10 +1086,11 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today, sector_count
                 continue
 
             log.info(f"  ✓ EarnMom {sym} {result['qty']} sh @ ${result['price']:.2f} "
-                     f"SL={result['stop']} (hold {config.EARNMOM_HOLD_DAYS}d)")
+                     f"SL={result['stop']} TP={result['target']} (hold {config.EARNMOM_HOLD_DAYS}d)")
             trade_logger.log_event("order_placed", "earnmom", sym,
                                    qty=result["qty"], price=result["price"],
-                                   stop=result["stop"], surprise_pct=c["surprise_pct"],
+                                   stop=result["stop"], target=result["target"],
+                                   surprise_pct=c["surprise_pct"],
                                    amount=round(amount, 2), hold_days=config.EARNMOM_HOLD_DAYS)
 
             pead_track(sym, result["price"],
@@ -1098,7 +1100,7 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today, sector_count
                        hold_days=config.EARNMOM_HOLD_DAYS)
             send_trade_alert(
                 action="BUY", ticker=sym, shares=result["qty"],
-                price=result["price"], stop=result["stop"], target=None,
+                price=result["price"], stop=result["stop"], target=result["target"],
                 reason=(f"EarnMom surprise={c['surprise_pct']:+.1f}%"
                         f" drift={c['drift_pct']:+.1f}% age={c['age_days']}d"),
             )

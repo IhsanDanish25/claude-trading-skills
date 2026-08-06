@@ -57,3 +57,51 @@ class TestStatePersistence:
 
         next_day = now + datetime.timedelta(days=1)
         assert scheduler.get_catchup_routine(next_day) == "routines.midday_review"
+
+
+class TestSkippedRoutinePersistence:
+    """A stale catch-up (>2h past window) is now persisted to
+    state/skipped_routines.json so market_close's EOD summary can surface
+    it — previously this was only an INFO log line, invisible unless
+    someone was watching Railway logs."""
+
+    def _far_stale_time(self):
+        # Tuesday 2026-07-07 18:00 ET — market_open (window ends 09:44) is
+        # ~8.3h stale, well past the 2h catch-up cap.
+        return scheduler.ET.localize(datetime.datetime(2026, 7, 7, 18, 0))
+
+    def test_stale_catchup_is_recorded(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(scheduler, "STATE_DIR", str(tmp_path))
+        monkeypatch.setattr(scheduler, "CATCHUP_FILE",
+                            str(tmp_path / ".scheduler_ran_today.json"))
+        monkeypatch.setattr(scheduler, "SKIPPED_ROUTINES_FILE",
+                            str(tmp_path / "skipped_routines.json"))
+        now = self._far_stale_time()
+
+        assert scheduler.get_catchup_routine(now) is None  # too stale to catch up
+
+        import json
+        with open(scheduler.SKIPPED_ROUTINES_FILE) as f:
+            data = json.load(f)
+        assert data["date"] == now.strftime("%Y-%m-%d")
+        modules = [s["module"] for s in data["skipped"]]
+        assert "routines.market_open" in modules
+        assert "routines.midday_review" in modules
+
+    def test_repeated_ticks_dont_duplicate_entries(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(scheduler, "STATE_DIR", str(tmp_path))
+        monkeypatch.setattr(scheduler, "CATCHUP_FILE",
+                            str(tmp_path / ".scheduler_ran_today.json"))
+        monkeypatch.setattr(scheduler, "SKIPPED_ROUTINES_FILE",
+                            str(tmp_path / "skipped_routines.json"))
+        now = self._far_stale_time()
+
+        scheduler.get_catchup_routine(now)
+        scheduler.get_catchup_routine(now + datetime.timedelta(minutes=10))
+        scheduler.get_catchup_routine(now + datetime.timedelta(minutes=20))
+
+        import json
+        with open(scheduler.SKIPPED_ROUTINES_FILE) as f:
+            data = json.load(f)
+        modules = [s["module"] for s in data["skipped"]]
+        assert modules.count("routines.market_open") == 1

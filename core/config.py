@@ -139,12 +139,33 @@ WATCHLIST = [
 
 # ── Strategy mode (comma-separated, run in order listed) ─────────────────────
 # Supported: pead, meanrev, insider, squeeze, breakout, earnmom, gapfill, momentum, sector, vcp
-# Recommended: STRATEGY_MODE=pead,meanrev,insider,squeeze
-# breakout and earnmom are excluded from the recommended default — backtested
-# negative (Breakout Sharpe -0.38 p=0.585; EarnMom Sharpe -0.37, 31.4% win
-# rate). Sector/momentum/gapfill/vcp are opt-in until live-validated (none of
-# the four appear in docs/dev/strategy-validation-status.md).
-_STRATEGY_RAW = os.environ.get("STRATEGY_MODE", "pead,meanrev,insider,squeeze").lower()
+# Recommended: STRATEGY_MODE=breakout,meanrev,earnmom,insider
+#
+# 2026-08-06 reconciliation (backtest_5_strategies.py, fixed sizing per
+# BACKTEST_MAX_POSITION_PCT — see backtest_harness/earnings_engine.py for
+# why sizing must be pinned, not read from live config):
+#   Breakout: 200 trades, Sharpe 1.08, p=0.0097, TRUSTWORTHY
+#   Mean Reversion: 573 trades, Sharpe 0.96, p=0.0223, TRUSTWORTHY
+#   Earnings Momentum: 217 trades, Sharpe 0.96, p=0.0224, TRUSTWORTHY
+#   PEAD: DROPPED — fails significance under both tested methodologies
+#     (158 trades p=0.262; 871 trades p=0.659, also fails overfit gate).
+#     A previously-cited PEAD result (Sharpe 1.28/p=0.017/152 trades) could
+#     not be reproduced anywhere in this repo — treat as unverified.
+#   Insider: kept — runs correctly live via SEC EDGAR (zero egress/API-key
+#     issues), but its OWN backtest is blocked (FMP /stable/insider-trading
+#     is paid-tier, 402 on the free plan; no historical EDGAR puller exists
+#     yet). Unvalidated by backtest, not by live execution — see
+#     docs/dev/strategy-validation-status.md.
+#   Squeeze: dropped from the default per this reconciliation — not in the
+#     kept set. Its own backtest is blocked the same way Insider's is (FMP
+#     short-interest paid-tier), but unlike Insider its live path (core/
+#     short_interest.py) pulls from yfinance, not FMP — not independently
+#     verified as broken, just not part of what was kept here. Revisit
+#     separately if you want it back in. Sector/momentum/gapfill/vcp remain
+#     opt-in, unvalidated.
+# None of the four beat SPY buy-and-hold on this window — these are
+# risk-adjusted edges (low drawdown), not return-beaters. Size accordingly.
+_STRATEGY_RAW = os.environ.get("STRATEGY_MODE", "breakout,meanrev,earnmom,insider").lower()
 STRATEGY_MODES = [s.strip() for s in _STRATEGY_RAW.split(",") if s.strip()]
 
 # ── PEAD params ───────────────────────────────────────────────────────────────
@@ -184,6 +205,14 @@ MEANREV_LIMIT = int(os.environ.get("MEANREV_LIMIT", "5"))
 # ── Insider params (FMP P-Purchase, scored by seniority + cluster + $ value) ─
 INSIDER_HOLD_DAYS = int(os.environ.get("INSIDER_HOLD_DAYS", "30"))
 INSIDER_STOP_PCT = float(os.environ.get("INSIDER_STOP_PCT", "0.08"))
+# UNVALIDATED — insider has no backtest (blocked: FMP /stable/insider-trading
+# is a paid-tier endpoint, 402 on the free plan; no historical EDGAR puller
+# exists as an alternative — see docs/dev/strategy-validation-status.md).
+# Mirrors EARNMOM_TARGET_PCT below (same 8% stop) purely for consistency,
+# not because insider's own data supports this number — it doesn't have any.
+# Attached as the OCO take-profit leg alongside the stop so profit-taking
+# isn't left to the discretionary midday/EOD review.
+INSIDER_TARGET_PCT = float(os.environ.get("INSIDER_TARGET_PCT", "0.10"))
 INSIDER_SIZE_PCT = float(os.environ.get("INSIDER_SIZE_PCT", "0.04"))
 INSIDER_MIN_PRICE = float(os.environ.get("INSIDER_MIN_PRICE", "5.0"))
 INSIDER_MIN_DOLLAR = float(os.environ.get("INSIDER_MIN_DOLLAR", "100000"))
@@ -213,6 +242,16 @@ BREAKOUT_LIMIT = int(os.environ.get("BREAKOUT_LIMIT", "5"))
 # ── Earnings Momentum params (beat 8-45 days ago, still drifting up) ────────
 EARNMOM_HOLD_DAYS = int(os.environ.get("EARNMOM_HOLD_DAYS", "35"))
 EARNMOM_STOP_PCT = float(os.environ.get("EARNMOM_STOP_PCT", "0.08"))
+# Derived from EARNMOM's own validated backtest (backtest_5_strategies.py,
+# fixed sizing per BACKTEST_MAX_POSITION_PCT): 217 trades, Sharpe 0.96,
+# p=0.022, TRUSTWORTHY. That run had no target (pure time/trail exit) and
+# posted avg_win_pct=9.1%, avg_loss_pct=-6.38% — a 2:1-vs-stop target
+# (16%) would sit ~1.75x above the strategy's actual average winner and
+# essentially never fire. 10% sits close to the empirical average win —
+# ~1.25:1 vs the 8% stop — so it functions as real, tested-realistic
+# profit-taking instead of a target that's decorative. Attached as the
+# OCO take-profit leg alongside the stop.
+EARNMOM_TARGET_PCT = float(os.environ.get("EARNMOM_TARGET_PCT", "0.10"))
 EARNMOM_SIZE_PCT = float(os.environ.get("EARNMOM_SIZE_PCT", "0.04"))
 EARNMOM_MIN_PRICE = float(os.environ.get("EARNMOM_MIN_PRICE", "10.0"))
 EARNMOM_MIN_AVG_VOLUME = float(os.environ.get("EARNMOM_MIN_AVG_VOLUME", "500000"))

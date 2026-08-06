@@ -28,8 +28,39 @@ log = logger.setup("market_close")
 ET  = pytz.timezone("America/New_York")
 
 CLOSE_EXIT_THRESHOLD = -0.03   # Force exit if P&L < -3%
-MAX_CASH_CLOSES_PER_DAY = 3    # Cap how many positions a cash-regime call can liquidate
-DAILY_CLOSE_LOG = os.path.join(config.STATE_DIR, "daily_close_log.json")
+TRADE_LOG_PATH = os.path.join(config.STATE_DIR, "trade_log.jsonl")
+SKIPPED_ROUTINES_FILE = os.path.join(config.STATE_DIR, "skipped_routines.json")
+
+
+def _todays_trades(today: str) -> list[dict]:
+    """Read state/trade_log.jsonl entries stamped today, for the EOD summary."""
+    trades = []
+    try:
+        with open(TRADE_LOG_PATH) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if str(entry.get("ts", "")).startswith(today):
+                    trades.append(entry)
+    except FileNotFoundError:
+        pass
+    return trades
+
+
+def _todays_skipped_routines(today: str) -> list[dict]:
+    """Read scheduler.py's persisted stale-catchup skips for today, so a
+    routine that silently never ran (e.g. worker down past the 2h catch-up
+    cap) shows up in the EOD email instead of only in Railway logs."""
+    try:
+        with open(SKIPPED_ROUTINES_FILE) as f:
+            data = json.load(f)
+        if data.get("date") == today:
+            return data.get("skipped", [])
+    except (FileNotFoundError, ValueError, KeyError):
+        pass
+    return []
 
 # ── 14:45 ET Secondary Trail Eval ─────────────────────────────────────────
 # Second trailing-stop sweep of the day (first at 12:00 noon in midday_review).
@@ -92,28 +123,6 @@ def _late_trail(broker: BrokerClient) -> int:
                 tightened += 1
     log.info(f"  14:45 trail eval: {tightened} stops tightened")
     return tightened
-
-
-def _today_close_count() -> int:
-    today = datetime.date.today().isoformat()
-    try:
-        with open(DAILY_CLOSE_LOG) as f:
-            data = json.load(f)
-        if data.get("date") == today:
-            return int(data.get("count", 0))
-    except (FileNotFoundError, ValueError, KeyError):
-        pass
-    return 0
-
-
-def _bump_close_count(n: int = 1) -> None:
-    today = datetime.date.today().isoformat()
-    cur = _today_close_count()
-    try:
-        with open(DAILY_CLOSE_LOG, "w") as f:
-            json.dump({"date": today, "count": cur + n}, f)
-    except Exception as e:
-        log.warning(f"Could not persist close count: {e}")
 
 
 def run():
@@ -230,44 +239,16 @@ def run():
                 cur_price = broker.get_price(sym)
                 broker.close_position(sym)
                 log.info(f"  ✓ Force-closed {sym} {close_qty} shares")
-                _bump_close_count()
                 send_trade_alert("SELL", sym, close_qty, cur_price, 0, 0, reason="Force-closed: -3% threshold")
             except Exception as e:
                 log.error(f"  ✗ Close {sym} failed: {e}")
 
-        # Claude review on remaining
-        if pos_data and regime["trade_bias"] == "cash":
-            already_today = _today_close_count()
-            remaining_budget = max(0, MAX_CASH_CLOSES_PER_DAY - already_today)
-            if remaining_budget == 0:
-                log.warning(
-                    f"Cash regime — but daily close cap "
-                    f"({MAX_CASH_CLOSES_PER_DAY}) already reached. "
-                    f"Skipping remaining {len(pos_data)} closes to preserve capital."
-                )
-            else:
-                log.warning(
-                    f"Cash regime — closing up to {remaining_budget} positions "
-                    f"(daily cap {MAX_CASH_CLOSES_PER_DAY}, used {already_today})"
-                )
-                closed_this_run = 0
-                for pd in pos_data:
-                    if closed_this_run >= remaining_budget:
-                        log.warning(
-                            f"  Hit daily cap — leaving {len(pos_data) - closed_this_run} "
-                            f"positions for tomorrow's market_open to evaluate"
-                        )
-                        break
-                    sym = pd["symbol"]
-                    try:
-                        broker.close_position(sym)
-                        log.info(f"  ✓ Cash-regime close: {sym}")
-                        _bump_close_count()
-                        closed_this_run += 1
-                    except Exception as e:
-                        log.error(f"  ✗ {sym} close failed: {e}")
-
-        elif pos_data:
+        # Claude review on remaining positions. The discretionary cash-regime
+        # close-all (up to 3/day, unranked) was removed — EARNMOM/INSIDER now
+        # carry a real OCO take-profit, and de-risking during a cash/defensive
+        # regime is handled upstream by market_open.py's slot-gating (no new
+        # entries), not by liquidating existing protected positions here.
+        if pos_data:
             log.info(f"── Claude: EOD position review ({len(pos_data)} positions)")
             decisions = review_open_positions(pos_data, regime["regime"])
             for d in decisions:
@@ -341,6 +322,8 @@ def run():
         spy_change_pct=daily_log["spy_change_pct"],
         ftd_detected=ftd_result.get("ftd_detected", False),
         force_closed=force_close,
+        trades_today=_todays_trades(today),
+        skipped_routines=_todays_skipped_routines(today),
     )
 
     # ── SPY base EOD status ────────────────────────────────────────────────

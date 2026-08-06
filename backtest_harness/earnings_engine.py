@@ -14,7 +14,20 @@ A separate sim loop from engine.py — engine.py drives the VCP composite strate
           on SPY (bars <= as_of) returns GO/NEUTRAL; STAND_DOWN holds existing
           positions but blocks new entries.
 
-Sizing/caps reuse the live config (MAX_POSITION_SIZE_PCT, MAX_OPEN_POSITIONS).
+Sizing/caps default to BACKTEST_MAX_POSITION_PCT / BACKTEST_MAX_OPEN_POSITIONS
+(module-level constants below), NOT core.config.MAX_POSITION_SIZE_PCT /
+MAX_OPEN_POSITIONS. Those live-config values are tuned for whatever the real
+account's size currently is (e.g. a $268 account uses 20%/4 positions via a
+local, gitignored .env) and drift over time as the live bot gets retuned —
+reading them here silently changed a $100k backtest's position-sizing out
+from under it. Confirmed on 2026-08-06: identical `validate_pead.py` CLI
+invocation, same day, went from 158 trades (2026-07-05 run) to 71 trades
+after a local .env set MAX_POSITION_SIZE_PCT=0.20 for live small-account
+trading — a pure sizing-parameter change, not a market/data difference.
+Backtests must be reproducible independent of whatever the live bot's
+config happens to be today; pass max_position_pct/max_open_positions
+explicitly if a caller genuinely wants to test different sizing.
+
 Lot/Portfolio/_atr14 are reused from engine.py so trade records stay
 schema-compatible with metrics.py and validation_gates.
 """
@@ -30,6 +43,12 @@ from backtest_harness.engine import Lot, Portfolio, _atr14
 from core import config
 
 log = logging.getLogger("backtest.earnings_engine")
+
+# Fixed, backtest-only sizing defaults — deliberately NOT read from
+# core.config so results stay reproducible regardless of the live bot's
+# current account-size tuning. See module docstring above.
+BACKTEST_MAX_POSITION_PCT = 0.05
+BACKTEST_MAX_OPEN_POSITIONS = 10
 
 
 def _bars_asof(store: "data.BarStore", symbol: str, as_of: datetime.date) -> list[dict]:
@@ -75,6 +94,8 @@ def run_earnings_simulation(
     trailing_stop: bool = True,
     fixed_stop_pct: float | None = None,
     spy_overlay: bool = False,
+    max_position_pct: float = BACKTEST_MAX_POSITION_PCT,
+    max_open_positions: int = BACKTEST_MAX_OPEN_POSITIONS,
 ) -> Portfolio:
     cal = store.trading_calendar("SPY")
     if len(cal) <= warmup + 1:
@@ -103,7 +124,7 @@ def run_earnings_simulation(
     spy_shares: float = 0.0  # idle cash invested in SPY (E4 portable-alpha overlay)
     buy_fill = lambda px: px * (1 + slip)    # noqa: E731
     sell_fill = lambda px: px * (1 - slip)   # noqa: E731
-    MAXP, MAX_OPEN = config.MAX_POSITION_SIZE_PCT, config.MAX_OPEN_POSITIONS
+    MAXP, MAX_OPEN = max_position_pct, max_open_positions
 
     start_i = max(warmup, bisect.bisect_left(cal, ws))
     for i in range(start_i, len(cal)):

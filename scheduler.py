@@ -48,6 +48,36 @@ from core.config import STATE_DIR
 
 CATCHUP_FILE = os.path.join(STATE_DIR, ".scheduler_ran_today.json")
 CATCHUP_MAX_AGE_HOURS = 2.0
+SKIPPED_ROUTINES_FILE = os.path.join(STATE_DIR, "skipped_routines.json")
+
+
+def _record_skipped_routine(now: datetime.datetime, module: str, reason: str) -> None:
+    """Persist a stale-catchup skip so the EOD summary can surface it — a
+    routine silently skipped (e.g. worker down past the 2h catch-up cap)
+    would otherwise be visible only in Railway logs, the same blind spot
+    that let the 2026-08-05 flatten alerts go unnoticed."""
+    try:
+        import json
+        os.makedirs(STATE_DIR, exist_ok=True)
+        today = now.strftime("%Y-%m-%d")
+        data = {"date": today, "skipped": []}
+        if os.path.exists(SKIPPED_ROUTINES_FILE):
+            with open(SKIPPED_ROUTINES_FILE) as f:
+                existing = json.load(f)
+            if existing.get("date") == today:
+                data = existing
+        # Overwrite rather than append per-module — the stale-catchup check
+        # re-fires every 10-min tick for the rest of the day, and duplicate
+        # rows for the same routine add noise rather than information.
+        data["skipped"] = [s for s in data["skipped"] if s["module"] != module]
+        data["skipped"].append({
+            "module": module, "reason": reason,
+            "at": now.strftime("%H:%M:%S"),
+        })
+        with open(SKIPPED_ROUTINES_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
 
 # ── Fix 8: Alpaca-backed dedup (resilient to Railway ephemeral filesystem) ───
 def _market_open_ran_today() -> bool:
@@ -123,8 +153,9 @@ def get_catchup_routine(now: datetime.datetime):
         if past_window and age_hours <= CATCHUP_MAX_AGE_HOURS:
             return module
         if past_window and age_hours > CATCHUP_MAX_AGE_HOURS:
-            log.info(f"Skipping stale catch-up for {module} "
-                     f"({age_hours:.1f}h late, cap={CATCHUP_MAX_AGE_HOURS}h)")
+            reason = f"{age_hours:.1f}h late, cap={CATCHUP_MAX_AGE_HOURS}h"
+            log.info(f"Skipping stale catch-up for {module} ({reason})")
+            _record_skipped_routine(now, module, reason)
 
     return None
 
