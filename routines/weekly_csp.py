@@ -125,14 +125,15 @@ def run():
                         try:
                             from core.notifier import send_trade_alert
                             send_trade_alert(
-                                symbol=best["symbol"],
-                                side="sell_to_open",
-                                qty=1,
+                                action="SELL_TO_OPEN",
+                                ticker=best["symbol"],
+                                shares=1,
                                 price=best["strike"],
-                                strategy="weekly_csp",
-                                note=(f"CSP: ${best['strike']} put exp {best['expiration']} | "
-                                      f"premium=${premium_collected:.2f} | "
-                                      f"RSI={best.get('rsi', '?')}"),
+                                stop=0,
+                                target=0,
+                                reason=(f"CSP: ${best['strike']} put exp {best['expiration']} | "
+                                        f"premium=${premium_collected:.2f} | "
+                                        f"RSI={best.get('rsi', '?')}"),
                             )
                         except Exception as ne:
                             log.warning("Notify failed: %s", ne)
