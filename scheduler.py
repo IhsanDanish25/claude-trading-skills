@@ -51,11 +51,15 @@ CATCHUP_MAX_AGE_HOURS = 2.0
 SKIPPED_ROUTINES_FILE = os.path.join(STATE_DIR, "skipped_routines.json")
 
 
-def _record_skipped_routine(now: datetime.datetime, module: str, reason: str) -> None:
+def _record_skipped_routine(now: datetime.datetime, module: str, reason: str) -> bool:
     """Persist a stale-catchup skip so the EOD summary can surface it — a
     routine silently skipped (e.g. worker down past the 2h catch-up cap)
     would otherwise be visible only in Railway logs, the same blind spot
-    that let the 2026-08-05 flatten alerts go unnoticed."""
+    that let the 2026-08-05 flatten alerts go unnoticed.
+
+    Returns True the first time `module` is recorded as skipped today, so
+    the caller can send a same-day alert exactly once instead of waiting
+    for the EOD summary hours later (or spamming one per 10-min tick)."""
     try:
         import json
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -66,6 +70,7 @@ def _record_skipped_routine(now: datetime.datetime, module: str, reason: str) ->
                 existing = json.load(f)
             if existing.get("date") == today:
                 data = existing
+        is_first_today = not any(s["module"] == module for s in data["skipped"])
         # Overwrite rather than append per-module — the stale-catchup check
         # re-fires every 10-min tick for the rest of the day, and duplicate
         # rows for the same routine add noise rather than information.
@@ -76,8 +81,9 @@ def _record_skipped_routine(now: datetime.datetime, module: str, reason: str) ->
         })
         with open(SKIPPED_ROUTINES_FILE, "w") as f:
             json.dump(data, f)
+        return is_first_today
     except Exception:
-        pass
+        return False
 
 # ── Fix 8: Alpaca-backed dedup (resilient to Railway ephemeral filesystem) ───
 def _market_open_ran_today() -> bool:
@@ -155,7 +161,19 @@ def get_catchup_routine(now: datetime.datetime):
         if past_window and age_hours > CATCHUP_MAX_AGE_HOURS:
             reason = f"{age_hours:.1f}h late, cap={CATCHUP_MAX_AGE_HOURS}h"
             log.info(f"Skipping stale catch-up for {module} ({reason})")
-            _record_skipped_routine(now, module, reason)
+            if _record_skipped_routine(now, module, reason):
+                # First time today this module was given up on — alert now
+                # instead of only surfacing in the EOD summary hours later.
+                try:
+                    from core.notifier import send_error_alert
+                    send_error_alert(
+                        module,
+                        f"Gave up on catch-up after repeated timeouts/misses "
+                        f"({reason}). No further attempts will be made for "
+                        f"this routine today.",
+                    )
+                except Exception:
+                    pass
 
     return None
 
