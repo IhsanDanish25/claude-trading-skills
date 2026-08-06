@@ -3,20 +3,25 @@ WEEKLY CSP ROUTINE — 9:45 AM ET, Monday
 Generates weekly Cash-Secured Put picks and saves to weekly_csp_order.json.
 Execute on Monday when deposit clears.
 """
+
 from __future__ import annotations
-import sys, os
+
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import json
 import datetime
+import json
+
 import pytz
 
-from core import logger, config
+from core import config, logger
 from core.broker import BrokerClient
-from core.csp_screener import screen_csp_candidates, pick_best
+from core.csp_screener import pick_best, screen_csp_candidates
 
 log = logger.setup("weekly_csp")
-ET  = pytz.timezone("America/New_York")
+ET = pytz.timezone("America/New_York")
 
 STATE_FILE = os.path.join(config.STATE_DIR, "weekly_csp_order.json")
 
@@ -26,24 +31,26 @@ def run():
     logger.banner(log, "WEEKLY CSP — Monday 9:45 AM ET")
 
     broker = BrokerClient()
-    acct   = broker.get_account()
-    pv     = float(acct.portfolio_value)
-    cash   = float(acct.cash)
+    acct = broker.get_account()
+    pv = float(acct.portfolio_value)
+    cash = float(acct.cash)
 
     log.info(f"Portfolio: ${pv:,.2f} | Cash: ${cash:,.2f}")
 
     # ── Market regime check ─────────────────────────────────────────────────
     try:
         from core.fmp import get_market_breadth
+
         breadth = get_market_breadth()
         spy_chg = breadth.get("spy_change_pct", 0)
-        regimes = {
-            spy_chg >= 0.3: "BULLISH",
-            spy_chg >= 0:   "NEUTRAL",
-            spy_chg >= -0.5: "DEFENSIVE",
-            True:           "AVOID_CSP",
-        }
-        regime = next(v for k, v in regimes.items() if k)
+        if spy_chg >= 0.3:
+            regime = "BULLISH"
+        elif spy_chg >= 0:
+            regime = "NEUTRAL"
+        elif spy_chg >= -0.5:
+            regime = "DEFENSIVE"
+        else:
+            regime = "AVOID_CSP"
         log.info(f"  Regime: {regime} | SPY: {spy_chg:+.2f}%")
     except Exception as e:
         log.warning(f"Breadth check failed: {e} — assuming NEUTRAL")
@@ -78,15 +85,18 @@ def run():
 
     # ── Execution logic ─────────────────────────────────────────────────────
     if regime in ("BULLISH", "NEUTRAL"):
-
         log.info(f"  ★ TOP PICK: {best['symbol']} ${best.get('strike', 'N/A')} CSP")
         log.info(f"  RSI: {best.get('rsi', '?')} | MeanRev score: {best.get('meanrev_score', '?')}")
-        log.info(f"  Premium: ~${best.get('premium', 0):.2f} ({best.get('premium_pct', 0):.2f}%/week)")
+        log.info(
+            f"  Premium: ~${best.get('premium', 0):.2f} ({best.get('premium_pct', 0):.2f}%/week)"
+        )
         log.info(f"  Collateral: ${best.get('collateral', 0):.2f} | DTE: {best.get('dte', 7)}")
 
         collateral_ratio = best.get("collateral", 0) / pv
         if collateral_ratio > 0.85:
-            log.warning(f"  ⚠️  Collateral {collateral_ratio:.0%} exceeds 85% of portfolio — skipping")
+            log.warning(
+                f"  ⚠️  Collateral {collateral_ratio:.0%} exceeds 85% of portfolio — skipping"
+            )
             order["status"] = "REVIEW_NEEDED"
         else:
             order["status"] = "READY_TO_EXECUTE"
@@ -97,8 +107,11 @@ def run():
                 log.error("  OPTIONS NOT APPROVED — skipping execution")
                 order["status"] = "OPTIONS_NOT_APPROVED"
             elif cash < best.get("collateral", 0):
-                log.warning("  Insufficient cash ($%.2f) for collateral ($%.2f)",
-                            cash, best.get("collateral", 0))
+                log.warning(
+                    "  Insufficient cash ($%.2f) for collateral ($%.2f)",
+                    cash,
+                    best.get("collateral", 0),
+                )
                 order["status"] = "INSUFFICIENT_CASH"
             else:
                 try:
@@ -115,15 +128,18 @@ def run():
                         order["block_reason"] = result.get("reason")
                     else:
                         order["status"] = "EXECUTED"
-                        order["execution"] = {
-                            k: v for k, v in result.items() if k != "order"
-                        }
+                        order["execution"] = {k: v for k, v in result.items() if k != "order"}
                         premium_collected = result.get("premium_collected", 0)
-                        log.info("  ✅ CSP EXECUTED: %s $%.2f put exp %s | premium=$%.2f",
-                                 best["symbol"], best["strike"],
-                                 best["expiration"], premium_collected)
+                        log.info(
+                            "  ✅ CSP EXECUTED: %s $%.2f put exp %s | premium=$%.2f",
+                            best["symbol"],
+                            best["strike"],
+                            best["expiration"],
+                            premium_collected,
+                        )
                         try:
                             from core.notifier import send_trade_alert
+
                             send_trade_alert(
                                 action="SELL_TO_OPEN",
                                 ticker=best["symbol"],
@@ -131,9 +147,11 @@ def run():
                                 price=best["strike"],
                                 stop=0,
                                 target=0,
-                                reason=(f"CSP: ${best['strike']} put exp {best['expiration']} | "
-                                        f"premium=${premium_collected:.2f} | "
-                                        f"RSI={best.get('rsi', '?')}"),
+                                reason=(
+                                    f"CSP: ${best['strike']} put exp {best['expiration']} | "
+                                    f"premium=${premium_collected:.2f} | "
+                                    f"RSI={best.get('rsi', '?')}"
+                                ),
                             )
                         except Exception as ne:
                             log.warning("Notify failed: %s", ne)
