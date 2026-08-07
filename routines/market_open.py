@@ -1,36 +1,41 @@
 from __future__ import annotations
+
 """
 MARKET-OPEN ROUTINE — 9:30 AM ET, Mon-Fri
 FULL SKILLS, ALPACA-ONLY (no FMP = no rate limits).
 """
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import json
 import datetime
+import json
+
 import pytz
 
-from core import logger, config
+from circuit_breaker import CircuitBreaker, EmergencyLiquidation, TradingHalted
+from core import config, logger, trade_logger
 from core.broker import BrokerClient
-from core.screener import screen
-from core.notifier import send_trade_alert
-from core import composite
-from core.universe import build_universe
-from circuit_breaker import CircuitBreaker, TradingHalted, EmergencyLiquidation
-from regime_gate import classify
 from core.earnings_screener import screen_earnings
+from core.notifier import send_trade_alert
 from core.pead_tracker import add_position as pead_track
-from core.spy_base import rebalance_to_spy, free_cash_for_pead, log_status as spy_log, is_base_symbol
-from core import trade_logger
+from core.protection import reattach_missing_protection
+from core.screener import screen
+from core.spy_base import free_cash_for_pead, is_base_symbol, rebalance_to_spy
+from core.spy_base import log_status as spy_log
+from regime_gate import classify
 
 log = logger.setup("market_open")
 
-import requests as _req  # noqa: F401
 from functools import lru_cache
+
+import requests as _req  # noqa: F401
 
 # ── SECTOR CONCENTRATION GUARD helpers ──────────────────────────────────────
 # MAX_PER_SECTOR enforced across all strategies within a single run
 _SECTOR_CACHE: dict = {}
+
 
 @lru_cache(maxsize=500)
 def _fetch_symbol_sector(symbol: str, api_key: str) -> str | None:
@@ -53,19 +58,18 @@ def _fetch_symbol_sector(symbol: str, api_key: str) -> str | None:
 def _build_sector_counts(broker, fmp_key: str) -> dict:
     """Count open positions per GICS sector for the current held portfolio."""
     from collections import Counter
+
     counts: Counter = Counter()
     for p in broker.get_positions():
         if is_base_symbol(p.symbol):
             continue
-        sector = (getattr(p, "sector", None) or
-                  _fetch_symbol_sector(p.symbol, fmp_key))
+        sector = getattr(p, "sector", None) or _fetch_symbol_sector(p.symbol, fmp_key)
         if sector:
             counts[sector] += 1
     return dict(counts)
 
 
-def _sector_gate(symbol: str, sector_counts: dict, fmp_key: str,
-                 strategy: str, log) -> bool:
+def _sector_gate(symbol: str, sector_counts: dict, fmp_key: str, strategy: str, log) -> bool:
     """
     Gate: returns True (allowed) if sector not at MAX_PER_SECTOR capacity.
     Marks sector consumed on pass; logs + returns False on block.
@@ -78,9 +82,14 @@ def _sector_gate(symbol: str, sector_counts: dict, fmp_key: str,
     if current >= max_per:
         log.info(f"  SKIP {symbol} — sector {sector!r} at {current}/{max_per}")
         trade_logger.log_event(
-            "gate_failed", strategy, symbol, gate="sector_concentration",
+            "gate_failed",
+            strategy,
+            symbol,
+            gate="sector_concentration",
             reason=f"sector {sector} at {current}/{max_per}",
-            sector=sector, current=current, cap=max_per,
+            sector=sector,
+            current=current,
+            cap=max_per,
         )
         return False
     sector_counts[sector] = current + 1
@@ -104,15 +113,20 @@ def _affordable_candidates(broker, candidates: list, strategy: str, log) -> list
         if price <= 0 or price > budget:
             log.info(f"  ✗ {sym} SKIP — price ${price:.2f} exceeds affordable budget ${budget:.2f}")
             trade_logger.log_event(
-                "order_skipped", strategy, sym, gate="affordability",
+                "order_skipped",
+                strategy,
+                sym,
+                gate="affordability",
                 reason=f"price ${price:.2f} > budget ${budget:.2f}",
-                price=price, budget=round(budget, 2),
+                price=price,
+                budget=round(budget, 2),
             )
             continue
         affordable.append(c)
     return affordable
 
-ET  = pytz.timezone("America/New_York")
+
+ET = pytz.timezone("America/New_York")
 
 # Populated from state/market_brief_<date>.json at run() start.
 # Read by strategy runners without changing their signatures.
@@ -175,10 +189,11 @@ def _build_breaker(broker: BrokerClient, day_start_equity: float) -> CircuitBrea
         day_start_equity=day_start_equity,
     )
 
+
 DAY_START_PATH = os.path.join(config.STATE_DIR, "day_start_value.json")
 TODAY_BOUGHT_PATH = os.path.join(config.STATE_DIR, "today_bought.json")
 TRADE_LOG_PATH = os.path.join(config.STATE_DIR, "trade_log.jsonl")
-MAX_BUYS       = 3
+MAX_BUYS = 3
 
 
 def _append_trade_log(entry: dict) -> None:
@@ -221,8 +236,8 @@ def _reconcile_closed_trades(broker) -> int:
     if not pending:
         return 0
 
+    from alpaca.trading.enums import OrderSide, QueryOrderStatus
     from alpaca.trading.requests import GetOrdersRequest
-    from alpaca.trading.enums import QueryOrderStatus, OrderSide
 
     symbols = sorted({r["symbol"] for r in pending})
     try:
@@ -263,8 +278,8 @@ def _reconcile_closed_trades(broker) -> int:
             continue
         pnl_pct = (exit_info["exit_price"] / float(entry_price) - 1.0) * 100.0
         rec["exit_price"] = exit_info["exit_price"]
-        rec["exit_date"]  = exit_info["exit_date"]
-        rec["pnl_pct"]    = round(pnl_pct, 4)
+        rec["exit_date"] = exit_info["exit_date"]
+        rec["pnl_pct"] = round(pnl_pct, 4)
         reconciled += 1
 
     if reconciled > 0:
@@ -301,13 +316,15 @@ def _mark_bought(symbol: str, result: dict) -> None:
         bought = _load_today_bought()
         bought.add(symbol)
         with open(TODAY_BOUGHT_PATH, "w") as f:
-            json.dump({
-                "date": today,
-                "symbols": sorted(bought),
-                "orders": [
-                    {"symbol": s, "order_id": None} for s in sorted(bought)
-                ],
-            }, f, indent=2)
+            json.dump(
+                {
+                    "date": today,
+                    "symbols": sorted(bought),
+                    "orders": [{"symbol": s, "order_id": None} for s in sorted(bought)],
+                },
+                f,
+                indent=2,
+            )
     except Exception as e:
         log.warning(f"Failed to persist today_bought state: {e}")
 
@@ -329,9 +346,9 @@ def load_day_start_value(current_pv: float) -> float:
 
 def is_entry_window():
     now = datetime.datetime.now(ET)
-    open_t   = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
     earliest = open_t + datetime.timedelta(minutes=config.ENTRY_DELAY_MIN)
-    close_t  = now.replace(hour=15, minute=45, second=0, microsecond=0)
+    close_t = now.replace(hour=15, minute=45, second=0, microsecond=0)
     if now < earliest:
         return False, f"too early — wait until {earliest.strftime('%H:%M')} ET"
     if now > close_t:
@@ -357,13 +374,19 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
         return
 
     for c in candidates:
-        log.info(f"  • {c['symbol']} surprise={c['surprise_pct']:+.1f}% "
-                 f"EPS={c.get('actual_eps')}/{c.get('estimated_eps')} "
-                 f"reported={c['report_date']} price=${c.get('price', 0):.2f}")
+        log.info(
+            f"  • {c['symbol']} surprise={c['surprise_pct']:+.1f}% "
+            f"EPS={c.get('actual_eps')}/{c.get('estimated_eps')} "
+            f"reported={c['report_date']} price=${c.get('price', 0):.2f}"
+        )
         trade_logger.log_event(
-            "signal_detected", "pead", c["symbol"],
-            surprise_pct=c["surprise_pct"], report_date=c["report_date"],
-            price=c.get("price", 0), actual_eps=c.get("actual_eps"),
+            "signal_detected",
+            "pead",
+            c["symbol"],
+            surprise_pct=c["surprise_pct"],
+            report_date=c["report_date"],
+            price=c.get("price", 0),
+            actual_eps=c.get("actual_eps"),
             estimated_eps=c.get("estimated_eps"),
         )
 
@@ -373,22 +396,22 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
         return
 
     buys_taken = 0
-    for c in candidates[:slots[0]]:
+    for c in candidates[: slots[0]]:
         sym = c["symbol"]
         surprise = c["surprise_pct"]
-        price = c.get("price", 0)
 
         if sym in held:
             log.info(f"  ✗ {sym} SKIP — already holding")
-            trade_logger.log_event("order_skipped", "pead", sym,
-                                   gate="already_held", reason="already holding")
+            trade_logger.log_event(
+                "order_skipped", "pead", sym, gate="already_held", reason="already holding"
+            )
             continue
         if sym in already_bought_today:
             log.info(f"  ✗ {sym} SKIP — already bought today")
-            trade_logger.log_event("order_skipped", "pead", sym,
-                                   gate="idempotency", reason="already bought today")
+            trade_logger.log_event(
+                "order_skipped", "pead", sym, gate="idempotency", reason="already bought today"
+            )
             continue
-
 
         # Sector concentration guard
         _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
@@ -398,33 +421,44 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
         size_pct = config.PEAD_SIZE_PCT
         amount = pv * size_pct
 
-        log.info(f"PEAD BUY {sym} | surprise={surprise:+.1f}% | "
-                 f"size={size_pct*100:.0f}% | ${amount:,.0f}")
+        log.info(
+            f"PEAD BUY {sym} | surprise={surprise:+.1f}% | "
+            f"size={size_pct * 100:.0f}% | ${amount:,.0f}"
+        )
         try:
             # Free SPY cash if needed for this PEAD entry
             if not free_cash_for_pead(broker, amount):
                 log.warning(f"✗ {sym} SKIP — cannot free ${amount:,.0f} from SPY base")
-                trade_logger.log_event("gate_failed", "pead", sym,
-                                       gate="free_cash", amount=round(amount, 2),
-                                       reason="cannot free cash from SPY base")
+                trade_logger.log_event(
+                    "gate_failed",
+                    "pead",
+                    sym,
+                    gate="free_cash",
+                    amount=round(amount, 2),
+                    reason="cannot free cash from SPY base",
+                )
                 continue
-            trade_logger.log_event("gate_passed", "pead", sym,
-                                   gate="free_cash", amount=round(amount, 2))
+            trade_logger.log_event(
+                "gate_passed", "pead", sym, gate="free_cash", amount=round(amount, 2)
+            )
 
             try:
                 cb.check_before_order(intended_notional=amount, symbol=sym)
-                trade_logger.log_event("gate_passed", "pead", sym,
-                                       gate="circuit_breaker", amount=round(amount, 2))
+                trade_logger.log_event(
+                    "gate_passed", "pead", sym, gate="circuit_breaker", amount=round(amount, 2)
+                )
             except EmergencyLiquidation as emerg:
                 log.error(f"✗ EMERGENCY LIQUIDATION — circuit breaker: {emerg}")
-                trade_logger.log_event("gate_failed", "pead", sym,
-                                       gate="emergency_liquidation", reason=str(emerg))
+                trade_logger.log_event(
+                    "gate_failed", "pead", sym, gate="emergency_liquidation", reason=str(emerg)
+                )
                 # Propagate so market_open can close all positions before returning
                 raise
             except TradingHalted as halt:
                 log.warning(f"✗ {sym} blocked by circuit breaker: {halt}")
-                trade_logger.log_event("gate_failed", "pead", sym,
-                                       gate="circuit_breaker", reason=str(halt))
+                trade_logger.log_event(
+                    "gate_failed", "pead", sym, gate="circuit_breaker", reason=str(halt)
+                )
                 continue
 
             # PEAD uses wide stop (-15%), NO take-profit (time exit at 60d)
@@ -437,29 +471,48 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
             )
             if result.get("blocked"):
                 log.warning(f"✗ {sym} buy blocked: {result.get('reason')}")
-                trade_logger.log_event("order_skipped", "pead", sym,
-                                       gate="broker_buy", reason=result.get("reason"))
+                trade_logger.log_event(
+                    "order_skipped", "pead", sym, gate="broker_buy", reason=result.get("reason")
+                )
                 continue
             if not result.get("stop_attached"):
                 log.error(f"✗ {sym} bought but stop NOT attached — flattening")
                 broker.sell(sym, qty=result["qty"])
                 send_trade_alert(
-                    action="FLATTEN", ticker=sym, shares=result["qty"],
+                    action="FLATTEN",
+                    ticker=sym,
+                    shares=result["qty"],
                     price=result["price"],
-                    stop=result.get("stop", 0), target=result.get("target", 0),
+                    stop=result.get("stop", 0),
+                    target=result.get("target", 0),
                     reason="PEAD stop-loss attach failed — position rejected",
                 )
-                trade_logger.log_event("order_skipped", "pead", sym,
-                                       gate="stop_attach", reason="stop-loss attach failed — flattened",
-                                       qty=result["qty"], price=result["price"])
+                trade_logger.log_event(
+                    "order_skipped",
+                    "pead",
+                    sym,
+                    gate="stop_attach",
+                    reason="stop-loss attach failed — flattened",
+                    qty=result["qty"],
+                    price=result["price"],
+                )
                 continue
 
-            log.info(f"✓ PEAD {sym} {result['qty']} sh @ ${result['price']:.2f} "
-                     f"SL={result['stop']} (hold {config.PEAD_HOLD_DAYS}d)")
-            trade_logger.log_event("order_placed", "pead", sym,
-                                   qty=result["qty"], price=result["price"],
-                                   stop=result["stop"], surprise_pct=surprise,
-                                   amount=round(amount, 2), hold_days=config.PEAD_HOLD_DAYS)
+            log.info(
+                f"✓ PEAD {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                f"SL={result['stop']} (hold {config.PEAD_HOLD_DAYS}d)"
+            )
+            trade_logger.log_event(
+                "order_placed",
+                "pead",
+                sym,
+                qty=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                surprise_pct=surprise,
+                amount=round(amount, 2),
+                hold_days=config.PEAD_HOLD_DAYS,
+            )
 
             # Track for time-based exit
             pead_track(sym, result["price"], surprise, c["report_date"])
@@ -474,20 +527,22 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
                 reason=f"PEAD surprise={surprise:+.1f}% hold={config.PEAD_HOLD_DAYS}d",
             )
             _mark_bought(sym, result)
-            _append_trade_log({
-                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
-                "symbol": sym,
-                "side": "buy",
-                "qty": result.get("qty"),
-                "price": result.get("price"),
-                "stop": result.get("stop"),
-                "target": None,
-                "strategy": "pead",
-                "surprise_pct": surprise,
-                "exit_date": None,
-                "exit_price": None,
-                "pnl_pct": None,
-            })
+            _append_trade_log(
+                {
+                    "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                    "symbol": sym,
+                    "side": "buy",
+                    "qty": result.get("qty"),
+                    "price": result.get("price"),
+                    "stop": result.get("stop"),
+                    "target": None,
+                    "strategy": "pead",
+                    "surprise_pct": surprise,
+                    "exit_date": None,
+                    "exit_price": None,
+                    "pnl_pct": None,
+                }
+            )
             buys_taken += 1
             slots[0] -= 1
             if slots[0] <= 0:
@@ -512,6 +567,7 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
 # Each calls config.{STRATEGY}_SIZE_PCT, .{STRATEGY}_STOP_PCT, .{STRATEGY}_HOLD_DAYS
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _run_meanrev(broker, cb, pv, slots, held, already_bought_today, sector_counts):
     """Mean Reversion: RSI<30 + Bollinger oversold + above SMA200. Hold ~14d."""
     if screen_meanrev is None:
@@ -535,28 +591,35 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today, sector_count
         amount = pv * size_pct
 
         trade_logger.log_event(
-            "signal_detected", "meanrev", sym,
-            rsi=c["rsi"], bb_position=c["bb_position"],
-            momentum_pct=c.get("momentum_pct", 0), price=price,
+            "signal_detected",
+            "meanrev",
+            sym,
+            rsi=c["rsi"],
+            bb_position=c["bb_position"],
+            momentum_pct=c.get("momentum_pct", 0),
+            price=price,
         )
 
         if sym in held:
             log.info(f"  ✗ {sym} SKIP — already holding")
-            trade_logger.log_event("order_skipped", "meanrev", sym,
-                                   gate="already_held", reason="already holding")
+            trade_logger.log_event(
+                "order_skipped", "meanrev", sym, gate="already_held", reason="already holding"
+            )
             continue
         if sym in already_bought_today:
             log.info(f"  ✗ {sym} SKIP — already bought today")
-            trade_logger.log_event("order_skipped", "meanrev", sym,
-                                   gate="idempotency", reason="already bought today")
+            trade_logger.log_event(
+                "order_skipped", "meanrev", sym, gate="idempotency", reason="already bought today"
+            )
             continue
 
         # News filter — skip if pre_market research flagged bad sentiment
         _news = _today_brief.get("stock_news", {}).get(sym, {})
         if _news.get("skip"):
             log.info(f"  ✗ {sym} SKIP — news risk: {_news.get('reason', 'flagged by research')}")
-            trade_logger.log_event("order_skipped", "meanrev", sym,
-                                   gate="news_filter", reason=_news.get("reason", ""))
+            trade_logger.log_event(
+                "order_skipped", "meanrev", sym, gate="news_filter", reason=_news.get("reason", "")
+            )
             continue
 
         # Sector concentration guard
@@ -564,71 +627,115 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today, sector_count
         if not _sector_gate(sym, sector_counts, _fkp, "meanrev", log):
             continue
 
-        log.info(f"MeanRev BUY {sym} | RSI={c['rsi']} BBpos={c['bb_position']:.0f}% "
-                 f"momentum={c.get('momentum_pct', 0):+.1f}% | ${amount:,.0f}")
+        log.info(
+            f"MeanRev BUY {sym} | RSI={c['rsi']} BBpos={c['bb_position']:.0f}% "
+            f"momentum={c.get('momentum_pct', 0):+.1f}% | ${amount:,.0f}"
+        )
         try:
             if not free_cash_for_pead(broker, amount):
                 log.warning(f"  ✗ {sym} SKIP — cannot free cash from SPY base")
-                trade_logger.log_event("gate_failed", "meanrev", sym,
-                                       gate="free_cash", amount=round(amount, 2),
-                                       reason="cannot free cash from SPY base")
+                trade_logger.log_event(
+                    "gate_failed",
+                    "meanrev",
+                    sym,
+                    gate="free_cash",
+                    amount=round(amount, 2),
+                    reason="cannot free cash from SPY base",
+                )
                 continue
-            trade_logger.log_event("gate_passed", "meanrev", sym,
-                                   gate="free_cash", amount=round(amount, 2))
+            trade_logger.log_event(
+                "gate_passed", "meanrev", sym, gate="free_cash", amount=round(amount, 2)
+            )
             try:
                 cb.check_before_order(intended_notional=amount, symbol=sym)
-                trade_logger.log_event("gate_passed", "meanrev", sym,
-                                       gate="circuit_breaker", amount=round(amount, 2))
+                trade_logger.log_event(
+                    "gate_passed", "meanrev", sym, gate="circuit_breaker", amount=round(amount, 2)
+                )
             except TradingHalted as halt:
                 log.warning(f"  ✗ {sym} blocked by circuit breaker: {halt}")
-                trade_logger.log_event("gate_failed", "meanrev", sym,
-                                       gate="circuit_breaker", reason=str(halt))
+                trade_logger.log_event(
+                    "gate_failed", "meanrev", sym, gate="circuit_breaker", reason=str(halt)
+                )
                 continue
             result = broker.buy(
-                sym, dollar_amount=amount,
+                sym,
+                dollar_amount=amount,
                 stop_loss_pct=config.MEANREV_STOP_PCT,
                 take_profit_pct=None,  # no hard target (time-managed exit)
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
-                trade_logger.log_event("order_skipped", "meanrev", sym,
-                                       gate="broker_buy", reason=result.get("reason"))
+                trade_logger.log_event(
+                    "order_skipped", "meanrev", sym, gate="broker_buy", reason=result.get("reason")
+                )
                 continue
             if not result.get("stop_attached"):
                 log.error(f"  ✗ {sym} stop NOT attached — flattening")
                 broker.sell(sym, qty=result["qty"])
-                trade_logger.log_event("order_skipped", "meanrev", sym,
-                                       gate="stop_attach", reason="stop-loss attach failed — flattened",
-                                       qty=result["qty"], price=result["price"])
+                trade_logger.log_event(
+                    "order_skipped",
+                    "meanrev",
+                    sym,
+                    gate="stop_attach",
+                    reason="stop-loss attach failed — flattened",
+                    qty=result["qty"],
+                    price=result["price"],
+                )
                 continue
 
-            log.info(f"  ✓ MeanRev {sym} {result['qty']} sh @ ${result['price']:.2f} "
-                     f"SL={result['stop']} (hold {config.MEANREV_HOLD_DAYS}d)")
-            trade_logger.log_event("order_placed", "meanrev", sym,
-                                   qty=result["qty"], price=result["price"],
-                                   stop=result["stop"], amount=round(amount, 2),
-                                   hold_days=config.MEANREV_HOLD_DAYS)
+            log.info(
+                f"  ✓ MeanRev {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                f"SL={result['stop']} (hold {config.MEANREV_HOLD_DAYS}d)"
+            )
+            trade_logger.log_event(
+                "order_placed",
+                "meanrev",
+                sym,
+                qty=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                amount=round(amount, 2),
+                hold_days=config.MEANREV_HOLD_DAYS,
+            )
 
-            pead_track(sym, result["price"],
-                       surprise_pct=c.get("rsi", 0),
-                       report_date=datetime.date.today().isoformat(),
-                       strategy="meanrev",
-                       hold_days=config.MEANREV_HOLD_DAYS)
+            pead_track(
+                sym,
+                result["price"],
+                surprise_pct=c.get("rsi", 0),
+                report_date=datetime.date.today().isoformat(),
+                strategy="meanrev",
+                hold_days=config.MEANREV_HOLD_DAYS,
+            )
             send_trade_alert(
-                action="BUY", ticker=sym, shares=result["qty"],
-                price=result["price"], stop=result["stop"], target=None,
-                reason=(f"MeanRev RSI={c['rsi']} BB={c['bb_position']:.0f}%"
-                        f" momentum={c.get('momentum_pct', 0):+.1f}%"),
+                action="BUY",
+                ticker=sym,
+                shares=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                target=None,
+                reason=(
+                    f"MeanRev RSI={c['rsi']} BB={c['bb_position']:.0f}%"
+                    f" momentum={c.get('momentum_pct', 0):+.1f}%"
+                ),
             )
             _mark_bought(sym, result)
-            _append_trade_log({
-                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
-                "symbol": sym, "side": "buy", "qty": result.get("qty"),
-                "price": result.get("price"), "stop": result.get("stop"),
-                "target": None, "strategy": "meanrev",
-                "rsi": c["rsi"], "bb_position": c["bb_position"],
-                "exit_date": None, "exit_price": None, "pnl_pct": None,
-            })
+            _append_trade_log(
+                {
+                    "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                    "symbol": sym,
+                    "side": "buy",
+                    "qty": result.get("qty"),
+                    "price": result.get("price"),
+                    "stop": result.get("stop"),
+                    "target": None,
+                    "strategy": "meanrev",
+                    "rsi": c["rsi"],
+                    "bb_position": c["bb_position"],
+                    "exit_date": None,
+                    "exit_price": None,
+                    "pnl_pct": None,
+                }
+            )
             slots[0] -= 1
             if slots[0] <= 0:
                 log.info("Slots exhausted — MeanRev stopping")
@@ -659,99 +766,144 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today, sector_count
         amount = pv * size_pct
 
         trade_logger.log_event(
-            "signal_detected", "insider", sym,
-            insider_score=c["insider_score"], n_transactions=c["n_transactions"],
+            "signal_detected",
+            "insider",
+            sym,
+            insider_score=c["insider_score"],
+            n_transactions=c["n_transactions"],
             total_dollar=c["total_dollar"],
         )
 
         if sym in held:
             log.info(f"  ✗ {sym} SKIP — already holding")
-            trade_logger.log_event("order_skipped", "insider", sym,
-                                   gate="already_held", reason="already holding")
+            trade_logger.log_event(
+                "order_skipped", "insider", sym, gate="already_held", reason="already holding"
+            )
             continue
         if sym in already_bought_today:
             log.info(f"  ✗ {sym} SKIP — already bought today")
-            trade_logger.log_event("order_skipped", "insider", sym,
-                                   gate="idempotency", reason="already bought today")
+            trade_logger.log_event(
+                "order_skipped", "insider", sym, gate="idempotency", reason="already bought today"
+            )
             continue
-
 
         # Sector concentration guard
         _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
         if not _sector_gate(sym, sector_counts, _fkp, "insider", log):
             continue
 
-        log.info(f"Insider BUY {sym} | score={c['insider_score']:.0f} "
-                 f"txns={c['n_transactions']} total=${c['total_dollar']:,.0f} | ${amount:,.0f}")
+        log.info(
+            f"Insider BUY {sym} | score={c['insider_score']:.0f} "
+            f"txns={c['n_transactions']} total=${c['total_dollar']:,.0f} | ${amount:,.0f}"
+        )
         try:
             if not free_cash_for_pead(broker, amount):
                 log.warning(f"  ✗ {sym} SKIP — cannot free cash")
-                trade_logger.log_event("gate_failed", "insider", sym,
-                                       gate="free_cash", amount=round(amount, 2),
-                                       reason="cannot free cash from SPY base")
+                trade_logger.log_event(
+                    "gate_failed",
+                    "insider",
+                    sym,
+                    gate="free_cash",
+                    amount=round(amount, 2),
+                    reason="cannot free cash from SPY base",
+                )
                 continue
-            trade_logger.log_event("gate_passed", "insider", sym,
-                                   gate="free_cash", amount=round(amount, 2))
+            trade_logger.log_event(
+                "gate_passed", "insider", sym, gate="free_cash", amount=round(amount, 2)
+            )
             try:
                 cb.check_before_order(intended_notional=amount, symbol=sym)
-                trade_logger.log_event("gate_passed", "insider", sym,
-                                       gate="circuit_breaker", amount=round(amount, 2))
+                trade_logger.log_event(
+                    "gate_passed", "insider", sym, gate="circuit_breaker", amount=round(amount, 2)
+                )
             except EmergencyLiquidation as emerg:
                 log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
-                trade_logger.log_event("gate_failed", "insider", sym,
-                                       gate="emergency_liquidation", reason=str(emerg))
+                trade_logger.log_event(
+                    "gate_failed", "insider", sym, gate="emergency_liquidation", reason=str(emerg)
+                )
                 raise
             except TradingHalted as halt:
                 log.warning(f"  ✗ {sym} circuit breaker: {halt}")
-                trade_logger.log_event("gate_failed", "insider", sym,
-                                       gate="circuit_breaker", reason=str(halt))
+                trade_logger.log_event(
+                    "gate_failed", "insider", sym, gate="circuit_breaker", reason=str(halt)
+                )
                 continue
             result = broker.buy(
-                sym, dollar_amount=amount,
+                sym,
+                dollar_amount=amount,
                 stop_loss_pct=config.INSIDER_STOP_PCT,
                 take_profit_pct=config.INSIDER_TARGET_PCT,
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
-                trade_logger.log_event("order_skipped", "insider", sym,
-                                       gate="broker_buy", reason=result.get("reason"))
+                trade_logger.log_event(
+                    "order_skipped", "insider", sym, gate="broker_buy", reason=result.get("reason")
+                )
                 continue
             if not result.get("stop_attached"):
                 broker.sell(sym, qty=result["qty"])
-                trade_logger.log_event("order_skipped", "insider", sym,
-                                       gate="stop_attach", reason="stop-loss attach failed — flattened",
-                                       qty=result["qty"], price=result["price"])
+                trade_logger.log_event(
+                    "order_skipped",
+                    "insider",
+                    sym,
+                    gate="stop_attach",
+                    reason="stop-loss attach failed — flattened",
+                    qty=result["qty"],
+                    price=result["price"],
+                )
                 continue
 
-            log.info(f"  ✓ Insider {sym} {result['qty']} sh @ ${result['price']:.2f} "
-                     f"SL={result['stop']} TP={result['target']} (hold {config.INSIDER_HOLD_DAYS}d)")
-            trade_logger.log_event("order_placed", "insider", sym,
-                                   qty=result["qty"], price=result["price"],
-                                   stop=result["stop"], target=result["target"],
-                                   amount=round(amount, 2),
-                                   hold_days=config.INSIDER_HOLD_DAYS)
+            log.info(
+                f"  ✓ Insider {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                f"SL={result['stop']} TP={result['target']} (hold {config.INSIDER_HOLD_DAYS}d)"
+            )
+            trade_logger.log_event(
+                "order_placed",
+                "insider",
+                sym,
+                qty=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                target=result["target"],
+                amount=round(amount, 2),
+                hold_days=config.INSIDER_HOLD_DAYS,
+            )
 
-            pead_track(sym, result["price"],
-                       surprise_pct=c.get("insider_score", 0),
-                       report_date=datetime.date.today().isoformat(),
-                       strategy="insider",
-                       hold_days=config.INSIDER_HOLD_DAYS)
+            pead_track(
+                sym,
+                result["price"],
+                surprise_pct=c.get("insider_score", 0),
+                report_date=datetime.date.today().isoformat(),
+                strategy="insider",
+                hold_days=config.INSIDER_HOLD_DAYS,
+            )
             send_trade_alert(
-                action="BUY", ticker=sym, shares=result["qty"],
-                price=result["price"], stop=result["stop"], target=result["target"],
-                reason=(f"Insider score={c['insider_score']:.0f}"
-                        f" {c['n_transactions']} purchases"),
+                action="BUY",
+                ticker=sym,
+                shares=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                target=result["target"],
+                reason=(f"Insider score={c['insider_score']:.0f} {c['n_transactions']} purchases"),
             )
             _mark_bought(sym, result)
-            _append_trade_log({
-                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
-                "symbol": sym, "side": "buy", "qty": result.get("qty"),
-                "price": result.get("price"), "stop": result.get("stop"),
-                "target": None, "strategy": "insider",
-                "insider_score": c["insider_score"],
-                "total_dollar": c["total_dollar"],
-                "exit_date": None, "exit_price": None, "pnl_pct": None,
-            })
+            _append_trade_log(
+                {
+                    "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                    "symbol": sym,
+                    "side": "buy",
+                    "qty": result.get("qty"),
+                    "price": result.get("price"),
+                    "stop": result.get("stop"),
+                    "target": None,
+                    "strategy": "insider",
+                    "insider_score": c["insider_score"],
+                    "total_dollar": c["total_dollar"],
+                    "exit_date": None,
+                    "exit_price": None,
+                    "pnl_pct": None,
+                }
+            )
             slots[0] -= 1
             if slots[0] <= 0:
                 log.info("Slots exhausted — Insider stopping")
@@ -782,100 +934,149 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today, sector_count
         amount = pv * size_pct
 
         trade_logger.log_event(
-            "signal_detected", "squeeze", sym,
-            short_interest_pct=c["short_interest_pct"], days_to_cover=c["days_to_cover"],
-            momentum_pct=c["momentum_pct"], score=c["score"],
+            "signal_detected",
+            "squeeze",
+            sym,
+            short_interest_pct=c["short_interest_pct"],
+            days_to_cover=c["days_to_cover"],
+            momentum_pct=c["momentum_pct"],
+            score=c["score"],
         )
 
         if sym in held:
             log.info(f"  ✗ {sym} SKIP — already holding")
-            trade_logger.log_event("order_skipped", "squeeze", sym,
-                                   gate="already_held", reason="already holding")
+            trade_logger.log_event(
+                "order_skipped", "squeeze", sym, gate="already_held", reason="already holding"
+            )
             continue
         if sym in already_bought_today:
             log.info(f"  ✗ {sym} SKIP — already bought today")
-            trade_logger.log_event("order_skipped", "squeeze", sym,
-                                   gate="idempotency", reason="already bought today")
+            trade_logger.log_event(
+                "order_skipped", "squeeze", sym, gate="idempotency", reason="already bought today"
+            )
             continue
-
 
         # Sector concentration guard
         _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
         if not _sector_gate(sym, sector_counts, _fkp, "squeeze", log):
             continue
 
-        log.info(f"Squeeze BUY {sym} | SI={c['short_interest_pct']:.1f}%"
-                 f" DTC={c['days_to_cover']:.1f}d mom={c['momentum_pct']:+.1f}% "
-                 f"score={c['score']:.0f} | ${amount:,.0f}")
+        log.info(
+            f"Squeeze BUY {sym} | SI={c['short_interest_pct']:.1f}%"
+            f" DTC={c['days_to_cover']:.1f}d mom={c['momentum_pct']:+.1f}% "
+            f"score={c['score']:.0f} | ${amount:,.0f}"
+        )
         try:
             if not free_cash_for_pead(broker, amount):
                 log.warning(f"  ✗ {sym} SKIP — cannot free cash")
-                trade_logger.log_event("gate_failed", "squeeze", sym,
-                                       gate="free_cash", amount=round(amount, 2),
-                                       reason="cannot free cash from SPY base")
+                trade_logger.log_event(
+                    "gate_failed",
+                    "squeeze",
+                    sym,
+                    gate="free_cash",
+                    amount=round(amount, 2),
+                    reason="cannot free cash from SPY base",
+                )
                 continue
-            trade_logger.log_event("gate_passed", "squeeze", sym,
-                                   gate="free_cash", amount=round(amount, 2))
+            trade_logger.log_event(
+                "gate_passed", "squeeze", sym, gate="free_cash", amount=round(amount, 2)
+            )
             try:
                 cb.check_before_order(intended_notional=amount, symbol=sym)
-                trade_logger.log_event("gate_passed", "squeeze", sym,
-                                       gate="circuit_breaker", amount=round(amount, 2))
+                trade_logger.log_event(
+                    "gate_passed", "squeeze", sym, gate="circuit_breaker", amount=round(amount, 2)
+                )
             except EmergencyLiquidation as emerg:
                 log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
-                trade_logger.log_event("gate_failed", "squeeze", sym,
-                                       gate="emergency_liquidation", reason=str(emerg))
+                trade_logger.log_event(
+                    "gate_failed", "squeeze", sym, gate="emergency_liquidation", reason=str(emerg)
+                )
                 raise
             except TradingHalted as halt:
                 log.warning(f"  ✗ {sym} circuit breaker: {halt}")
-                trade_logger.log_event("gate_failed", "squeeze", sym,
-                                       gate="circuit_breaker", reason=str(halt))
+                trade_logger.log_event(
+                    "gate_failed", "squeeze", sym, gate="circuit_breaker", reason=str(halt)
+                )
                 continue
             result = broker.buy(
-                sym, dollar_amount=amount,
+                sym,
+                dollar_amount=amount,
                 stop_loss_pct=config.SQUEEZE_STOP_PCT,
                 take_profit_pct=None,
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
-                trade_logger.log_event("order_skipped", "squeeze", sym,
-                                       gate="broker_buy", reason=result.get("reason"))
+                trade_logger.log_event(
+                    "order_skipped", "squeeze", sym, gate="broker_buy", reason=result.get("reason")
+                )
                 continue
             if not result.get("stop_attached"):
                 broker.sell(sym, qty=result["qty"])
-                trade_logger.log_event("order_skipped", "squeeze", sym,
-                                       gate="stop_attach", reason="stop-loss attach failed — flattened",
-                                       qty=result["qty"], price=result["price"])
+                trade_logger.log_event(
+                    "order_skipped",
+                    "squeeze",
+                    sym,
+                    gate="stop_attach",
+                    reason="stop-loss attach failed — flattened",
+                    qty=result["qty"],
+                    price=result["price"],
+                )
                 continue
 
-            log.info(f"  ✓ Squeeze {sym} {result['qty']} sh @ ${result['price']:.2f} "
-                     f"SL={result['stop']} (hold {config.SQUEEZE_HOLD_DAYS}d)")
-            trade_logger.log_event("order_placed", "squeeze", sym,
-                                   qty=result["qty"], price=result["price"],
-                                   stop=result["stop"], amount=round(amount, 2),
-                                   hold_days=config.SQUEEZE_HOLD_DAYS)
+            log.info(
+                f"  ✓ Squeeze {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                f"SL={result['stop']} (hold {config.SQUEEZE_HOLD_DAYS}d)"
+            )
+            trade_logger.log_event(
+                "order_placed",
+                "squeeze",
+                sym,
+                qty=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                amount=round(amount, 2),
+                hold_days=config.SQUEEZE_HOLD_DAYS,
+            )
 
-            pead_track(sym, result["price"],
-                       surprise_pct=c.get("score", 0),
-                       report_date=datetime.date.today().isoformat(),
-                       strategy="squeeze",
-                       hold_days=config.SQUEEZE_HOLD_DAYS)
+            pead_track(
+                sym,
+                result["price"],
+                surprise_pct=c.get("score", 0),
+                report_date=datetime.date.today().isoformat(),
+                strategy="squeeze",
+                hold_days=config.SQUEEZE_HOLD_DAYS,
+            )
             send_trade_alert(
-                action="BUY", ticker=sym, shares=result["qty"],
-                price=result["price"], stop=result["stop"], target=None,
-                reason=(f"Squeeze SI={c['short_interest_pct']:.1f}%"
-                        f" DTC={c['days_to_cover']:.1f}d mom={c['momentum_pct']:+.1f}%"),
+                action="BUY",
+                ticker=sym,
+                shares=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                target=None,
+                reason=(
+                    f"Squeeze SI={c['short_interest_pct']:.1f}%"
+                    f" DTC={c['days_to_cover']:.1f}d mom={c['momentum_pct']:+.1f}%"
+                ),
             )
             _mark_bought(sym, result)
-            _append_trade_log({
-                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
-                "symbol": sym, "side": "buy", "qty": result.get("qty"),
-                "price": result.get("price"), "stop": result.get("stop"),
-                "target": None, "strategy": "squeeze",
-                "si_pct": c["short_interest_pct"],
-                "days_to_cover": c["days_to_cover"],
-                "momentum_pct": c["momentum_pct"],
-                "exit_date": None, "exit_price": None, "pnl_pct": None,
-            })
+            _append_trade_log(
+                {
+                    "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                    "symbol": sym,
+                    "side": "buy",
+                    "qty": result.get("qty"),
+                    "price": result.get("price"),
+                    "stop": result.get("stop"),
+                    "target": None,
+                    "strategy": "squeeze",
+                    "si_pct": c["short_interest_pct"],
+                    "days_to_cover": c["days_to_cover"],
+                    "momentum_pct": c["momentum_pct"],
+                    "exit_date": None,
+                    "exit_price": None,
+                    "pnl_pct": None,
+                }
+            )
             slots[0] -= 1
             if slots[0] <= 0:
                 log.info("Slots exhausted — Squeeze stopping")
@@ -901,100 +1102,150 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today, sector_coun
         amount = pv * size_pct
 
         trade_logger.log_event(
-            "signal_detected", "breakout", sym,
-            price=c["price"], clearance_pct=c["clearance_pct"],
-            volume_ratio=c["volume_ratio"], atr_pct=c["atr_pct"], score=c["score"],
+            "signal_detected",
+            "breakout",
+            sym,
+            price=c["price"],
+            clearance_pct=c["clearance_pct"],
+            volume_ratio=c["volume_ratio"],
+            atr_pct=c["atr_pct"],
+            score=c["score"],
         )
 
         if sym in held:
             log.info(f"  ✗ {sym} SKIP — already holding")
-            trade_logger.log_event("order_skipped", "breakout", sym,
-                                   gate="already_held", reason="already holding")
+            trade_logger.log_event(
+                "order_skipped", "breakout", sym, gate="already_held", reason="already holding"
+            )
             continue
         if sym in already_bought_today:
             log.info(f"  ✗ {sym} SKIP — already bought today")
-            trade_logger.log_event("order_skipped", "breakout", sym,
-                                   gate="idempotency", reason="already bought today")
+            trade_logger.log_event(
+                "order_skipped", "breakout", sym, gate="idempotency", reason="already bought today"
+            )
             continue
-
 
         # Sector concentration guard
         _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
         if not _sector_gate(sym, sector_counts, _fkp, "breakout", log):
             continue
 
-        log.info(f"Breakout BUY {sym} | price=${c['price']:.2f} "
-                 f"clearance={c['clearance_pct']:+.2f}% vol={c['volume_ratio']}x "
-                 f"ATR={c['atr_pct']:.1f}% score={c['score']:.0f} | ${amount:,.0f}")
+        log.info(
+            f"Breakout BUY {sym} | price=${c['price']:.2f} "
+            f"clearance={c['clearance_pct']:+.2f}% vol={c['volume_ratio']}x "
+            f"ATR={c['atr_pct']:.1f}% score={c['score']:.0f} | ${amount:,.0f}"
+        )
         try:
             if not free_cash_for_pead(broker, amount):
                 log.warning(f"  ✗ {sym} SKIP — cannot free cash")
-                trade_logger.log_event("gate_failed", "breakout", sym,
-                                       gate="free_cash", amount=round(amount, 2),
-                                       reason="cannot free cash from SPY base")
+                trade_logger.log_event(
+                    "gate_failed",
+                    "breakout",
+                    sym,
+                    gate="free_cash",
+                    amount=round(amount, 2),
+                    reason="cannot free cash from SPY base",
+                )
                 continue
-            trade_logger.log_event("gate_passed", "breakout", sym,
-                                   gate="free_cash", amount=round(amount, 2))
+            trade_logger.log_event(
+                "gate_passed", "breakout", sym, gate="free_cash", amount=round(amount, 2)
+            )
             try:
                 cb.check_before_order(intended_notional=amount, symbol=sym)
-                trade_logger.log_event("gate_passed", "breakout", sym,
-                                       gate="circuit_breaker", amount=round(amount, 2))
+                trade_logger.log_event(
+                    "gate_passed", "breakout", sym, gate="circuit_breaker", amount=round(amount, 2)
+                )
             except EmergencyLiquidation as emerg:
                 log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
-                trade_logger.log_event("gate_failed", "breakout", sym,
-                                       gate="emergency_liquidation", reason=str(emerg))
+                trade_logger.log_event(
+                    "gate_failed", "breakout", sym, gate="emergency_liquidation", reason=str(emerg)
+                )
                 raise
             except TradingHalted as halt:
                 log.warning(f"  ✗ {sym} circuit breaker: {halt}")
-                trade_logger.log_event("gate_failed", "breakout", sym,
-                                       gate="circuit_breaker", reason=str(halt))
+                trade_logger.log_event(
+                    "gate_failed", "breakout", sym, gate="circuit_breaker", reason=str(halt)
+                )
                 continue
             result = broker.buy(
-                sym, dollar_amount=amount,
+                sym,
+                dollar_amount=amount,
                 stop_loss_pct=config.BREAKOUT_STOP_PCT,
                 take_profit_pct=None,
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
-                trade_logger.log_event("order_skipped", "breakout", sym,
-                                       gate="broker_buy", reason=result.get("reason"))
+                trade_logger.log_event(
+                    "order_skipped", "breakout", sym, gate="broker_buy", reason=result.get("reason")
+                )
                 continue
             if not result.get("stop_attached"):
                 broker.sell(sym, qty=result["qty"])
-                trade_logger.log_event("order_skipped", "breakout", sym,
-                                       gate="stop_attach", reason="stop-loss attach failed — flattened",
-                                       qty=result["qty"], price=result["price"])
+                trade_logger.log_event(
+                    "order_skipped",
+                    "breakout",
+                    sym,
+                    gate="stop_attach",
+                    reason="stop-loss attach failed — flattened",
+                    qty=result["qty"],
+                    price=result["price"],
+                )
                 continue
 
-            log.info(f"  ✓ Breakout {sym} {result['qty']} sh @ ${result['price']:.2f} "
-                     f"SL={result['stop']} (hold {config.BREAKOUT_HOLD_DAYS}d)")
-            trade_logger.log_event("order_placed", "breakout", sym,
-                                   qty=result["qty"], price=result["price"],
-                                   stop=result["stop"], amount=round(amount, 2),
-                                   hold_days=config.BREAKOUT_HOLD_DAYS)
+            log.info(
+                f"  ✓ Breakout {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                f"SL={result['stop']} (hold {config.BREAKOUT_HOLD_DAYS}d)"
+            )
+            trade_logger.log_event(
+                "order_placed",
+                "breakout",
+                sym,
+                qty=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                amount=round(amount, 2),
+                hold_days=config.BREAKOUT_HOLD_DAYS,
+            )
 
-            pead_track(sym, result["price"],
-                       surprise_pct=c.get("score", 0),
-                       report_date=datetime.date.today().isoformat(),
-                       strategy="breakout",
-                       hold_days=config.BREAKOUT_HOLD_DAYS)
+            pead_track(
+                sym,
+                result["price"],
+                surprise_pct=c.get("score", 0),
+                report_date=datetime.date.today().isoformat(),
+                strategy="breakout",
+                hold_days=config.BREAKOUT_HOLD_DAYS,
+            )
             send_trade_alert(
-                action="BUY", ticker=sym, shares=result["qty"],
-                price=result["price"], stop=result["stop"], target=None,
-                reason=(f"Breakout clearance={c['clearance_pct']:+.2f}%"
-                        f" vol={c['volume_ratio']}x ATR={c['atr_pct']:.1f}%"),
+                action="BUY",
+                ticker=sym,
+                shares=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                target=None,
+                reason=(
+                    f"Breakout clearance={c['clearance_pct']:+.2f}%"
+                    f" vol={c['volume_ratio']}x ATR={c['atr_pct']:.1f}%"
+                ),
             )
             _mark_bought(sym, result)
-            _append_trade_log({
-                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
-                "symbol": sym, "side": "buy", "qty": result.get("qty"),
-                "price": result.get("price"), "stop": result.get("stop"),
-                "target": None, "strategy": "breakout",
-                "clearance_pct": c["clearance_pct"],
-                "volume_ratio": c["volume_ratio"],
-                "atr_pct": c["atr_pct"],
-                "exit_date": None, "exit_price": None, "pnl_pct": None,
-            })
+            _append_trade_log(
+                {
+                    "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                    "symbol": sym,
+                    "side": "buy",
+                    "qty": result.get("qty"),
+                    "price": result.get("price"),
+                    "stop": result.get("stop"),
+                    "target": None,
+                    "strategy": "breakout",
+                    "clearance_pct": c["clearance_pct"],
+                    "volume_ratio": c["volume_ratio"],
+                    "atr_pct": c["atr_pct"],
+                    "exit_date": None,
+                    "exit_price": None,
+                    "pnl_pct": None,
+                }
+            )
             slots[0] -= 1
             if slots[0] <= 0:
                 log.info("Slots exhausted — Breakout stopping")
@@ -1020,101 +1271,151 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today, sector_count
         amount = pv * size_pct
 
         trade_logger.log_event(
-            "signal_detected", "earnmom", sym,
-            surprise_pct=c["surprise_pct"], age_days=c["age_days"],
-            drift_pct=c["drift_pct"], score=c["score"],
+            "signal_detected",
+            "earnmom",
+            sym,
+            surprise_pct=c["surprise_pct"],
+            age_days=c["age_days"],
+            drift_pct=c["drift_pct"],
+            score=c["score"],
             report_date=c.get("report_date"),
         )
 
         if sym in held:
             log.info(f"  ✗ {sym} SKIP — already holding")
-            trade_logger.log_event("order_skipped", "earnmom", sym,
-                                   gate="already_held", reason="already holding")
+            trade_logger.log_event(
+                "order_skipped", "earnmom", sym, gate="already_held", reason="already holding"
+            )
             continue
         if sym in already_bought_today:
             log.info(f"  ✗ {sym} SKIP — already bought today")
-            trade_logger.log_event("order_skipped", "earnmom", sym,
-                                   gate="idempotency", reason="already bought today")
+            trade_logger.log_event(
+                "order_skipped", "earnmom", sym, gate="idempotency", reason="already bought today"
+            )
             continue
-
 
         # Sector concentration guard
         _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
         if not _sector_gate(sym, sector_counts, _fkp, "earnmom", log):
             continue
 
-        log.info(f"EarnMom BUY {sym} | surprise={c['surprise_pct']:+.1f}% "
-                 f"age={c['age_days']}d drift={c['drift_pct']:+.1f}% score={c['score']:.0f} | ${amount:,.0f}")
+        log.info(
+            f"EarnMom BUY {sym} | surprise={c['surprise_pct']:+.1f}% "
+            f"age={c['age_days']}d drift={c['drift_pct']:+.1f}% score={c['score']:.0f} | ${amount:,.0f}"
+        )
         try:
             if not free_cash_for_pead(broker, amount):
                 log.warning(f"  ✗ {sym} SKIP — cannot free cash")
-                trade_logger.log_event("gate_failed", "earnmom", sym,
-                                       gate="free_cash", amount=round(amount, 2),
-                                       reason="cannot free cash from SPY base")
+                trade_logger.log_event(
+                    "gate_failed",
+                    "earnmom",
+                    sym,
+                    gate="free_cash",
+                    amount=round(amount, 2),
+                    reason="cannot free cash from SPY base",
+                )
                 continue
-            trade_logger.log_event("gate_passed", "earnmom", sym,
-                                   gate="free_cash", amount=round(amount, 2))
+            trade_logger.log_event(
+                "gate_passed", "earnmom", sym, gate="free_cash", amount=round(amount, 2)
+            )
             try:
                 cb.check_before_order(intended_notional=amount, symbol=sym)
-                trade_logger.log_event("gate_passed", "earnmom", sym,
-                                       gate="circuit_breaker", amount=round(amount, 2))
+                trade_logger.log_event(
+                    "gate_passed", "earnmom", sym, gate="circuit_breaker", amount=round(amount, 2)
+                )
             except EmergencyLiquidation as emerg:
                 log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
-                trade_logger.log_event("gate_failed", "earnmom", sym,
-                                       gate="emergency_liquidation", reason=str(emerg))
+                trade_logger.log_event(
+                    "gate_failed", "earnmom", sym, gate="emergency_liquidation", reason=str(emerg)
+                )
                 raise
             except TradingHalted as halt:
                 log.warning(f"  ✗ {sym} circuit breaker: {halt}")
-                trade_logger.log_event("gate_failed", "earnmom", sym,
-                                       gate="circuit_breaker", reason=str(halt))
+                trade_logger.log_event(
+                    "gate_failed", "earnmom", sym, gate="circuit_breaker", reason=str(halt)
+                )
                 continue
             result = broker.buy(
-                sym, dollar_amount=amount,
+                sym,
+                dollar_amount=amount,
                 stop_loss_pct=config.EARNMOM_STOP_PCT,
                 take_profit_pct=config.EARNMOM_TARGET_PCT,
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
-                trade_logger.log_event("order_skipped", "earnmom", sym,
-                                       gate="broker_buy", reason=result.get("reason"))
+                trade_logger.log_event(
+                    "order_skipped", "earnmom", sym, gate="broker_buy", reason=result.get("reason")
+                )
                 continue
             if not result.get("stop_attached"):
                 broker.sell(sym, qty=result["qty"])
-                trade_logger.log_event("order_skipped", "earnmom", sym,
-                                       gate="stop_attach", reason="stop-loss attach failed — flattened",
-                                       qty=result["qty"], price=result["price"])
+                trade_logger.log_event(
+                    "order_skipped",
+                    "earnmom",
+                    sym,
+                    gate="stop_attach",
+                    reason="stop-loss attach failed — flattened",
+                    qty=result["qty"],
+                    price=result["price"],
+                )
                 continue
 
-            log.info(f"  ✓ EarnMom {sym} {result['qty']} sh @ ${result['price']:.2f} "
-                     f"SL={result['stop']} TP={result['target']} (hold {config.EARNMOM_HOLD_DAYS}d)")
-            trade_logger.log_event("order_placed", "earnmom", sym,
-                                   qty=result["qty"], price=result["price"],
-                                   stop=result["stop"], target=result["target"],
-                                   surprise_pct=c["surprise_pct"],
-                                   amount=round(amount, 2), hold_days=config.EARNMOM_HOLD_DAYS)
+            log.info(
+                f"  ✓ EarnMom {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                f"SL={result['stop']} TP={result['target']} (hold {config.EARNMOM_HOLD_DAYS}d)"
+            )
+            trade_logger.log_event(
+                "order_placed",
+                "earnmom",
+                sym,
+                qty=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                target=result["target"],
+                surprise_pct=c["surprise_pct"],
+                amount=round(amount, 2),
+                hold_days=config.EARNMOM_HOLD_DAYS,
+            )
 
-            pead_track(sym, result["price"],
-                       surprise_pct=c.get("surprise_pct", 0),
-                       report_date=c.get("report_date", datetime.date.today().isoformat()),
-                       strategy="earnmom",
-                       hold_days=config.EARNMOM_HOLD_DAYS)
+            pead_track(
+                sym,
+                result["price"],
+                surprise_pct=c.get("surprise_pct", 0),
+                report_date=c.get("report_date", datetime.date.today().isoformat()),
+                strategy="earnmom",
+                hold_days=config.EARNMOM_HOLD_DAYS,
+            )
             send_trade_alert(
-                action="BUY", ticker=sym, shares=result["qty"],
-                price=result["price"], stop=result["stop"], target=result["target"],
-                reason=(f"EarnMom surprise={c['surprise_pct']:+.1f}%"
-                        f" drift={c['drift_pct']:+.1f}% age={c['age_days']}d"),
+                action="BUY",
+                ticker=sym,
+                shares=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                target=result["target"],
+                reason=(
+                    f"EarnMom surprise={c['surprise_pct']:+.1f}%"
+                    f" drift={c['drift_pct']:+.1f}% age={c['age_days']}d"
+                ),
             )
             _mark_bought(sym, result)
-            _append_trade_log({
-                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
-                "symbol": sym, "side": "buy", "qty": result.get("qty"),
-                "price": result.get("price"), "stop": result.get("stop"),
-                "target": None, "strategy": "earnmom",
-                "surprise_pct": c["surprise_pct"],
-                "drift_pct": c["drift_pct"],
-                "age_days": c["age_days"],
-                "exit_date": None, "exit_price": None, "pnl_pct": None,
-            })
+            _append_trade_log(
+                {
+                    "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                    "symbol": sym,
+                    "side": "buy",
+                    "qty": result.get("qty"),
+                    "price": result.get("price"),
+                    "stop": result.get("stop"),
+                    "target": None,
+                    "strategy": "earnmom",
+                    "surprise_pct": c["surprise_pct"],
+                    "drift_pct": c["drift_pct"],
+                    "age_days": c["age_days"],
+                    "exit_date": None,
+                    "exit_price": None,
+                    "pnl_pct": None,
+                }
+            )
             slots[0] -= 1
             if slots[0] <= 0:
                 log.info("Slots exhausted — EarnMom stopping")
@@ -1153,11 +1454,19 @@ def _run_gapfill(broker, cb, pv, slots, held, already_bought_today, sector_count
             continue
 
         amount = pv * 0.03  # gap fills are short-hold, size accordingly
-        log.info(f"GapFill BUY {sym} | gap={c['gap_pct']:+.2f}% "
-                 f"price=${c['price']:.2f} prior_close=${c['prior_close']:.2f}")
-        trade_logger.log_event("signal_detected", "gapfill", sym,
-                               price=c["price"], gap_pct=c["gap_pct"],
-                               prior_close=c["prior_close"], target=c["target"])
+        log.info(
+            f"GapFill BUY {sym} | gap={c['gap_pct']:+.2f}% "
+            f"price=${c['price']:.2f} prior_close=${c['prior_close']:.2f}"
+        )
+        trade_logger.log_event(
+            "signal_detected",
+            "gapfill",
+            sym,
+            price=c["price"],
+            gap_pct=c["gap_pct"],
+            prior_close=c["prior_close"],
+            target=c["target"],
+        )
         try:
             if not free_cash_for_pead(broker, amount):
                 log.warning(f"  ✗ {sym} SKIP — cannot free cash")
@@ -1174,7 +1483,8 @@ def _run_gapfill(broker, cb, pv, slots, held, already_bought_today, sector_count
             continue
 
         result = broker.buy(
-            sym, dollar_amount=amount,
+            sym,
+            dollar_amount=amount,
             stop_loss_pct=config.GAPFILL_STOP_PCT,
             take_profit_pct=None,
         )
@@ -1186,16 +1496,30 @@ def _run_gapfill(broker, cb, pv, slots, held, already_bought_today, sector_count
             log.info(f"  ✗ {sym} stop-attach failed — flattened {result['qty']} sh")
             continue
 
-        log.info(f"  ✓ GapFill {sym} {result['qty']} sh @ ${result['price']:.2f} "
-                 f"SL=${result['stop']} target=${c['target']:.2f}")
-        trade_logger.log_event("order_placed", "gapfill", sym,
-                               qty=result["qty"], price=result["price"],
-                               stop=result["stop"], target=c["target"],
-                               amount=round(amount, 2), gap_pct=c["gap_pct"])
+        log.info(
+            f"  ✓ GapFill {sym} {result['qty']} sh @ ${result['price']:.2f} "
+            f"SL=${result['stop']} target=${c['target']:.2f}"
+        )
+        trade_logger.log_event(
+            "order_placed",
+            "gapfill",
+            sym,
+            qty=result["qty"],
+            price=result["price"],
+            stop=result["stop"],
+            target=c["target"],
+            amount=round(amount, 2),
+            gap_pct=c["gap_pct"],
+        )
         _mark_bought(sym, result)
-        pead_track(sym, result["price"], surprise_pct=c["gap_pct"],
-                   report_date=datetime.date.today().isoformat(),
-                   strategy="gapfill", hold_days=1)
+        pead_track(
+            sym,
+            result["price"],
+            surprise_pct=c["gap_pct"],
+            report_date=datetime.date.today().isoformat(),
+            strategy="gapfill",
+            hold_days=1,
+        )
         slots[0] -= 1
 
 
@@ -1226,8 +1550,13 @@ def _run_momentum(broker, cb, pv, slots, held, already_bought_today, sector_coun
         _mnews = _today_brief.get("stock_news", {}).get(sym, {})
         if _mnews.get("skip"):
             log.info(f"  ✗ {sym} SKIP — news risk: {_mnews.get('reason', 'flagged by research')}")
-            trade_logger.log_event("order_skipped", "momentum", sym,
-                                   gate="news_filter", reason=_mnews.get("reason", ""))
+            trade_logger.log_event(
+                "order_skipped",
+                "momentum",
+                sym,
+                gate="news_filter",
+                reason=_mnews.get("reason", ""),
+            )
             continue
 
         fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
@@ -1235,12 +1564,20 @@ def _run_momentum(broker, cb, pv, slots, held, already_bought_today, sector_coun
             continue
 
         amount = pv * 0.03
-        log.info(f"Momentum BUY {sym} | {c['streak_days']}d streak "
-                 f"+{c['momentum_pct']}% RV={c['rel_volume']}x score={c['score']}")
-        trade_logger.log_event("signal_detected", "momentum", sym,
-                               price=c["price"], streak_days=c["streak_days"],
-                               momentum_pct=c["momentum_pct"], rel_volume=c["rel_volume"],
-                               score=c["score"])
+        log.info(
+            f"Momentum BUY {sym} | {c['streak_days']}d streak "
+            f"+{c['momentum_pct']}% RV={c['rel_volume']}x score={c['score']}"
+        )
+        trade_logger.log_event(
+            "signal_detected",
+            "momentum",
+            sym,
+            price=c["price"],
+            streak_days=c["streak_days"],
+            momentum_pct=c["momentum_pct"],
+            rel_volume=c["rel_volume"],
+            score=c["score"],
+        )
         try:
             if not free_cash_for_pead(broker, amount):
                 log.warning(f"  ✗ {sym} SKIP — cannot free cash")
@@ -1257,7 +1594,8 @@ def _run_momentum(broker, cb, pv, slots, held, already_bought_today, sector_coun
             continue
 
         result = broker.buy(
-            sym, dollar_amount=amount,
+            sym,
+            dollar_amount=amount,
             stop_loss_pct=config.MOMENTUM_STOP_PCT,
             take_profit_pct=config.MOMENTUM_TAKE_PROFIT_PCT,
         )
@@ -1269,16 +1607,29 @@ def _run_momentum(broker, cb, pv, slots, held, already_bought_today, sector_coun
             log.info(f"  ✗ {sym} stop-attach failed — flattened {result['qty']} sh")
             continue
 
-        log.info(f"  ✓ Momentum {sym} {result['qty']} sh @ ${result['price']:.2f} "
-                 f"SL=${result['stop']} TP=${result['target']}")
-        trade_logger.log_event("order_placed", "momentum", sym,
-                               qty=result["qty"], price=result["price"],
-                               stop=result["stop"], target=result["target"],
-                               amount=round(amount, 2))
+        log.info(
+            f"  ✓ Momentum {sym} {result['qty']} sh @ ${result['price']:.2f} "
+            f"SL=${result['stop']} TP=${result['target']}"
+        )
+        trade_logger.log_event(
+            "order_placed",
+            "momentum",
+            sym,
+            qty=result["qty"],
+            price=result["price"],
+            stop=result["stop"],
+            target=result["target"],
+            amount=round(amount, 2),
+        )
         _mark_bought(sym, result)
-        pead_track(sym, result["price"], surprise_pct=c["score"],
-                   report_date=datetime.date.today().isoformat(),
-                   strategy="momentum", hold_days=c["hold_days"])
+        pead_track(
+            sym,
+            result["price"],
+            surprise_pct=c["score"],
+            report_date=datetime.date.today().isoformat(),
+            strategy="momentum",
+            hold_days=c["hold_days"],
+        )
         slots[0] -= 1
 
 
@@ -1307,13 +1658,22 @@ def _run_sector(broker, cb, pv, slots, held, already_bought_today, sector_counts
 
         # Sector rotation is inherently sector-aware — don't double-check
         amount = pv * config.MAX_POSITION_SIZE_PCT
-        log.info(f"Sector BUY {sym} [{c['sector']}] | "
-                 f"stock+{c['stock_ret']}% sector+{c['sector_ret']}% "
-                 f"RS={c['rs']} score={c['score']}")
-        trade_logger.log_event("signal_detected", "sector", sym,
-                               price=c["price"], sector=c["sector"],
-                               sector_ret=c["sector_ret"], stock_ret=c["stock_ret"],
-                               rs=c["rs"], score=c["score"])
+        log.info(
+            f"Sector BUY {sym} [{c['sector']}] | "
+            f"stock+{c['stock_ret']}% sector+{c['sector_ret']}% "
+            f"RS={c['rs']} score={c['score']}"
+        )
+        trade_logger.log_event(
+            "signal_detected",
+            "sector",
+            sym,
+            price=c["price"],
+            sector=c["sector"],
+            sector_ret=c["sector_ret"],
+            stock_ret=c["stock_ret"],
+            rs=c["rs"],
+            score=c["score"],
+        )
         try:
             if not free_cash_for_pead(broker, amount):
                 log.warning(f"  ✗ {sym} SKIP — cannot free cash")
@@ -1330,7 +1690,8 @@ def _run_sector(broker, cb, pv, slots, held, already_bought_today, sector_counts
             continue
 
         result = broker.buy(
-            sym, dollar_amount=amount,
+            sym,
+            dollar_amount=amount,
             stop_loss_pct=config.SECTOR_STOP_PCT,
             take_profit_pct=config.SECTOR_TAKE_PROFIT_PCT,
         )
@@ -1342,16 +1703,30 @@ def _run_sector(broker, cb, pv, slots, held, already_bought_today, sector_counts
             log.info(f"  ✗ {sym} stop-attach failed — flattened {result['qty']} sh")
             continue
 
-        log.info(f"  ✓ Sector {sym} {result['qty']} sh @ ${result['price']:.2f} "
-                 f"SL=${result['stop']} TP=${result['target']} [{c['sector']}]")
-        trade_logger.log_event("order_placed", "sector", sym,
-                               qty=result["qty"], price=result["price"],
-                               stop=result["stop"], target=result["target"],
-                               amount=round(amount, 2), sector=c["sector"])
+        log.info(
+            f"  ✓ Sector {sym} {result['qty']} sh @ ${result['price']:.2f} "
+            f"SL=${result['stop']} TP=${result['target']} [{c['sector']}]"
+        )
+        trade_logger.log_event(
+            "order_placed",
+            "sector",
+            sym,
+            qty=result["qty"],
+            price=result["price"],
+            stop=result["stop"],
+            target=result["target"],
+            amount=round(amount, 2),
+            sector=c["sector"],
+        )
         _mark_bought(sym, result)
-        pead_track(sym, result["price"], surprise_pct=c["score"],
-                   report_date=datetime.date.today().isoformat(),
-                   strategy="sector", hold_days=c["hold_days"])
+        pead_track(
+            sym,
+            result["price"],
+            surprise_pct=c["score"],
+            report_date=datetime.date.today().isoformat(),
+            strategy="sector",
+            hold_days=c["hold_days"],
+        )
         slots[0] -= 1
         # Mark sector as counted so we don't over-allocate
         sector_counts[c["sector"]] = sector_counts.get(c["sector"], 0) + 1
@@ -1372,7 +1747,9 @@ def _run_vcp(broker, cb, pv, slots, held, already_bought_today, sector_counts):
         if wl.get("generated", "")[:10] == today:
             watchlist = wl
         else:
-            log.info(f"VCP: watchlist stale ({wl.get('generated','?')[:10]}) — running inline screen")
+            log.info(
+                f"VCP: watchlist stale ({wl.get('generated', '?')[:10]}) — running inline screen"
+            )
     except FileNotFoundError:
         log.info("VCP: no pre_market_watchlist.json — running inline screen")
     except Exception as e:
@@ -1382,11 +1759,15 @@ def _run_vcp(broker, cb, pv, slots, held, already_bought_today, sector_counts):
         try:
             raw = screen()[:15]
             buy_list = [
-                {**s,
-                 "score": s.get("raw_score", s.get("score", 0)),
-                 "action": "BUY",
-                 "reason": f"inline screen raw={s.get('raw_score', s.get('score', 0))}"}
-                for s in sorted(raw, key=lambda x: x.get("raw_score", x.get("score", 0)), reverse=True)
+                {
+                    **s,
+                    "score": s.get("raw_score", s.get("score", 0)),
+                    "action": "BUY",
+                    "reason": f"inline screen raw={s.get('raw_score', s.get('score', 0))}",
+                }
+                for s in sorted(
+                    raw, key=lambda x: x.get("raw_score", x.get("score", 0)), reverse=True
+                )
                 if s.get("raw_score", s.get("score", 0)) >= 50
             ]
             watchlist = {"buy_list": buy_list, "generated": datetime.datetime.now(ET).isoformat()}
@@ -1411,100 +1792,148 @@ def _run_vcp(broker, cb, pv, slots, held, already_bought_today, sector_counts):
         amount = pv * size_pct
 
         trade_logger.log_event(
-            "signal_detected", "vcp", sym,
-            score=c.get("score"), reason=c.get("reason", ""),
+            "signal_detected",
+            "vcp",
+            sym,
+            score=c.get("score"),
+            reason=c.get("reason", ""),
         )
 
         if sym in held:
             log.info(f"  ✗ {sym} SKIP — already holding")
-            trade_logger.log_event("order_skipped", "vcp", sym,
-                                   gate="already_held", reason="already holding")
+            trade_logger.log_event(
+                "order_skipped", "vcp", sym, gate="already_held", reason="already holding"
+            )
             continue
         if sym in already_bought_today:
             log.info(f"  ✗ {sym} SKIP — already bought today")
-            trade_logger.log_event("order_skipped", "vcp", sym,
-                                   gate="idempotency", reason="already bought today")
+            trade_logger.log_event(
+                "order_skipped", "vcp", sym, gate="idempotency", reason="already bought today"
+            )
             continue
 
         _news = _today_brief.get("stock_news", {}).get(sym, {})
         if _news.get("skip"):
             log.info(f"  ✗ {sym} SKIP — news risk: {_news.get('reason', 'flagged by research')}")
-            trade_logger.log_event("order_skipped", "vcp", sym,
-                                   gate="news_filter", reason=_news.get("reason", ""))
+            trade_logger.log_event(
+                "order_skipped", "vcp", sym, gate="news_filter", reason=_news.get("reason", "")
+            )
             continue
 
         _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
         if not _sector_gate(sym, sector_counts, _fkp, "vcp", log):
             continue
 
-        log.info(f"VCP BUY {sym} | score={c.get('score')} | {str(c.get('reason', ''))[:60]} | ${amount:,.0f}")
+        log.info(
+            f"VCP BUY {sym} | score={c.get('score')} | {str(c.get('reason', ''))[:60]} | ${amount:,.0f}"
+        )
         try:
             if not free_cash_for_pead(broker, amount):
                 log.warning(f"  ✗ {sym} SKIP — cannot free cash from SPY base")
-                trade_logger.log_event("gate_failed", "vcp", sym,
-                                       gate="free_cash", amount=round(amount, 2),
-                                       reason="cannot free cash from SPY base")
+                trade_logger.log_event(
+                    "gate_failed",
+                    "vcp",
+                    sym,
+                    gate="free_cash",
+                    amount=round(amount, 2),
+                    reason="cannot free cash from SPY base",
+                )
                 continue
-            trade_logger.log_event("gate_passed", "vcp", sym,
-                                   gate="free_cash", amount=round(amount, 2))
+            trade_logger.log_event(
+                "gate_passed", "vcp", sym, gate="free_cash", amount=round(amount, 2)
+            )
             try:
                 cb.check_before_order(intended_notional=amount, symbol=sym)
-                trade_logger.log_event("gate_passed", "vcp", sym,
-                                       gate="circuit_breaker", amount=round(amount, 2))
+                trade_logger.log_event(
+                    "gate_passed", "vcp", sym, gate="circuit_breaker", amount=round(amount, 2)
+                )
             except EmergencyLiquidation as emerg:
                 log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
-                trade_logger.log_event("gate_failed", "vcp", sym,
-                                       gate="emergency_liquidation", reason=str(emerg))
+                trade_logger.log_event(
+                    "gate_failed", "vcp", sym, gate="emergency_liquidation", reason=str(emerg)
+                )
                 raise
             except TradingHalted as halt:
                 log.warning(f"  ✗ {sym} blocked by circuit breaker: {halt}")
-                trade_logger.log_event("gate_failed", "vcp", sym,
-                                       gate="circuit_breaker", reason=str(halt))
+                trade_logger.log_event(
+                    "gate_failed", "vcp", sym, gate="circuit_breaker", reason=str(halt)
+                )
                 continue
             result = broker.buy(
-                sym, dollar_amount=amount,
+                sym,
+                dollar_amount=amount,
                 stop_loss_pct=config.VCP_STOP_PCT,
                 take_profit_pct=None,
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
-                trade_logger.log_event("order_skipped", "vcp", sym,
-                                       gate="broker_buy", reason=result.get("reason"))
+                trade_logger.log_event(
+                    "order_skipped", "vcp", sym, gate="broker_buy", reason=result.get("reason")
+                )
                 continue
             if not result.get("stop_attached"):
                 log.error(f"  ✗ {sym} stop NOT attached — flattening")
                 broker.sell(sym, qty=result["qty"])
-                trade_logger.log_event("order_skipped", "vcp", sym,
-                                       gate="stop_attach", reason="stop-loss attach failed — flattened",
-                                       qty=result["qty"], price=result["price"])
+                trade_logger.log_event(
+                    "order_skipped",
+                    "vcp",
+                    sym,
+                    gate="stop_attach",
+                    reason="stop-loss attach failed — flattened",
+                    qty=result["qty"],
+                    price=result["price"],
+                )
                 continue
 
-            log.info(f"  ✓ VCP {sym} {result['qty']} sh @ ${result['price']:.2f} "
-                     f"SL={result['stop']} (hold {config.VCP_HOLD_DAYS}d)")
-            trade_logger.log_event("order_placed", "vcp", sym,
-                                   qty=result["qty"], price=result["price"],
-                                   stop=result["stop"], amount=round(amount, 2),
-                                   hold_days=config.VCP_HOLD_DAYS)
+            log.info(
+                f"  ✓ VCP {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                f"SL={result['stop']} (hold {config.VCP_HOLD_DAYS}d)"
+            )
+            trade_logger.log_event(
+                "order_placed",
+                "vcp",
+                sym,
+                qty=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                amount=round(amount, 2),
+                hold_days=config.VCP_HOLD_DAYS,
+            )
 
-            pead_track(sym, result["price"],
-                       surprise_pct=c.get("score", 0),
-                       report_date=datetime.date.today().isoformat(),
-                       strategy="vcp",
-                       hold_days=config.VCP_HOLD_DAYS)
+            pead_track(
+                sym,
+                result["price"],
+                surprise_pct=c.get("score", 0),
+                report_date=datetime.date.today().isoformat(),
+                strategy="vcp",
+                hold_days=config.VCP_HOLD_DAYS,
+            )
             send_trade_alert(
-                action="BUY", ticker=sym, shares=result["qty"],
-                price=result["price"], stop=result["stop"], target=None,
+                action="BUY",
+                ticker=sym,
+                shares=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                target=None,
                 reason=f"VCP score={c.get('score')} {str(c.get('reason', ''))[:80]}",
             )
             _mark_bought(sym, result)
-            _append_trade_log({
-                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
-                "symbol": sym, "side": "buy", "qty": result.get("qty"),
-                "price": result.get("price"), "stop": result.get("stop"),
-                "target": None, "strategy": "vcp",
-                "score": c.get("score"),
-                "exit_date": None, "exit_price": None, "pnl_pct": None,
-            })
+            _append_trade_log(
+                {
+                    "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                    "symbol": sym,
+                    "side": "buy",
+                    "qty": result.get("qty"),
+                    "price": result.get("price"),
+                    "stop": result.get("stop"),
+                    "target": None,
+                    "strategy": "vcp",
+                    "score": c.get("score"),
+                    "exit_date": None,
+                    "exit_price": None,
+                    "pnl_pct": None,
+                }
+            )
             slots[0] -= 1
             if slots[0] <= 0:
                 log.info("Slots exhausted — VCP stopping")
@@ -1515,10 +1944,12 @@ def _run_vcp(broker, cb, pv, slots, held, already_bought_today, sector_counts):
 
 def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts):
     """Crypto momentum: buy BTC/USD, ETH/USD, SOL/USD on 24h breakout."""
-    from core.crypto_screener import screen as crypto_screen
+    import time as _time
+
     from alpaca.trading.enums import OrderSide, TimeInForce
     from alpaca.trading.requests import MarketOrderRequest
-    import time as _time
+
+    from core.crypto_screener import screen as crypto_screen
 
     log.info("Crypto: screening BTC/ETH/SOL for 24h momentum...")
     candidates = crypto_screen()
@@ -1536,7 +1967,9 @@ def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts
             log.info(f"  ✗ {sym} SKIP — already holding/bought today")
             continue
 
-        log.info(f"Crypto BUY {sym} | momentum={c['momentum_pct']:+.1f}% | vol×{c['vol_ratio']:.1f} | ${amount:,.0f}")
+        log.info(
+            f"Crypto BUY {sym} | momentum={c['momentum_pct']:+.1f}% | vol×{c['vol_ratio']:.1f} | ${amount:,.0f}"
+        )
         try:
             if not free_cash_for_pead(broker, amount):
                 log.warning(f"  ✗ {sym} SKIP — cannot free cash from SPY base")
@@ -1555,12 +1988,14 @@ def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts
                 log.warning(f"  ✗ {sym} SKIP — notional ${notional:.2f} below $1 minimum")
                 continue
 
-            order = broker.trade.submit_order(MarketOrderRequest(
-                symbol=sym,
-                notional=notional,
-                side=OrderSide.BUY,
-                time_in_force=TimeInForce.GTC,
-            ))
+            order = broker.trade.submit_order(
+                MarketOrderRequest(
+                    symbol=sym,
+                    notional=notional,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.GTC,
+                )
+            )
             log.info(f"Crypto BUY {sym} ${notional:.2f} notional submitted [{str(order.id)[:8]}]")
 
             fill_price = None
@@ -1570,7 +2005,9 @@ def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts
                     o = broker.trade.get_order_by_id(order.id)
                     if o.filled_avg_price:
                         fill_price = float(o.filled_avg_price)
-                        filled_qty = float(o.filled_qty) if o.filled_qty else round(notional / fill_price, 9)
+                        filled_qty = (
+                            float(o.filled_qty) if o.filled_qty else round(notional / fill_price, 9)
+                        )
                         break
                 except Exception:
                     pass
@@ -1583,7 +2020,9 @@ def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts
             stop = round(basis * (1 - config.VCP_STOP_PCT), 2)
             stop_attached, _ = broker.attach_stop_target(sym, filled_qty, stop, None)
 
-            log.info(f"  ✓ Crypto {sym} {filled_qty:.6f} @ ${basis:,.2f} SL=${stop:,.2f} stop_attached={stop_attached}")
+            log.info(
+                f"  ✓ Crypto {sym} {filled_qty:.6f} @ ${basis:,.2f} SL=${stop:,.2f} stop_attached={stop_attached}"
+            )
             send_trade_alert(
                 action="BUY",
                 ticker=sym.replace("/USD", ""),
@@ -1594,12 +2033,22 @@ def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts
                 reason=f"Crypto momentum {c['momentum_pct']:+.1f}% vol×{c['vol_ratio']:.1f}",
             )
             _mark_bought(sym, {"qty": filled_qty, "price": basis})
-            _append_trade_log({
-                "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
-                "symbol": sym, "side": "buy", "qty": filled_qty,
-                "price": basis, "stop": stop, "target": None, "strategy": "crypto",
-                "score": c.get("score"), "exit_date": None, "exit_price": None, "pnl_pct": None,
-            })
+            _append_trade_log(
+                {
+                    "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                    "symbol": sym,
+                    "side": "buy",
+                    "qty": filled_qty,
+                    "price": basis,
+                    "stop": stop,
+                    "target": None,
+                    "strategy": "crypto",
+                    "score": c.get("score"),
+                    "exit_date": None,
+                    "exit_price": None,
+                    "pnl_pct": None,
+                }
+            )
             slots[0] -= 1
             if slots[0] <= 0:
                 log.info("Slots exhausted — crypto stopping")
@@ -1612,17 +2061,17 @@ def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts
 # (core/config.py). Module-level so it's inspectable/testable without calling
 # run(); run() iterates config.STRATEGY_MODES against this map in order.
 STRATEGY_HANDLERS = {
-    "pead":     _run_pead,
-    "meanrev":  _run_meanrev,
-    "insider":  _run_insider,
-    "squeeze":  _run_squeeze,
+    "pead": _run_pead,
+    "meanrev": _run_meanrev,
+    "insider": _run_insider,
+    "squeeze": _run_squeeze,
     "breakout": _run_breakout,
-    "earnmom":  _run_earnmom,
-    "gapfill":  _run_gapfill,
+    "earnmom": _run_earnmom,
+    "gapfill": _run_gapfill,
     "momentum": _run_momentum,
-    "sector":   _run_sector,
-    "vcp":      _run_vcp,
-    "crypto":   _run_crypto,
+    "sector": _run_sector,
+    "vcp": _run_vcp,
+    "crypto": _run_crypto,
 }
 
 
@@ -1638,7 +2087,9 @@ def run():
 
     reconciled = _reconcile_closed_trades(broker)
     if reconciled:
-        log.info(f"Reconciled {reconciled} closed trades from Alpaca order history into trade_log.jsonl")
+        log.info(
+            f"Reconciled {reconciled} closed trades from Alpaca order history into trade_log.jsonl"
+        )
 
     if not broker.is_market_open():
         log.error("Market is CLOSED — aborting without polling")
@@ -1652,7 +2103,9 @@ def run():
     log.info(f"Entry timing: {why}")
 
     pos_count = broker.position_count()
-    slots = [min(MAX_BUYS, config.MAX_OPEN_POSITIONS - pos_count)]  # mutable: handlers decrement in-place
+    slots = [
+        min(MAX_BUYS, config.MAX_OPEN_POSITIONS - pos_count)
+    ]  # mutable: handlers decrement in-place
 
     log.info(f"Portfolio: ${pv:,.2f} | Positions: {pos_count} | Slots: {slots[0]}")
 
@@ -1674,6 +2127,18 @@ def run():
     except Exception as e:
         log.warning(f"Could not fetch holdings (non-blocking): {e}")
 
+    # ── Re-attach protection missing a live stop ─────────────────────────────
+    # A fractional (DAY-tif) protective exit expires at the prior session's
+    # close and can't survive overnight, so any fractional position held
+    # across a night needs a fresh stop before we consider opening new ones.
+    # Whole-share GTC stops are unaffected (already live, skipped as-is).
+    try:
+        flattened = reattach_missing_protection(broker, config, log)
+        if flattened:
+            held -= flattened
+    except Exception as e:
+        log.warning(f"Protection re-attach pass failed (non-blocking): {e}")
+
     already_bought_today = _load_today_bought()
     if already_bought_today:
         log.info(f"Already bought today (idempotency): {sorted(already_bought_today)}")
@@ -1682,15 +2147,19 @@ def run():
     global _today_brief
     try:
         from core.researcher import load_today_brief
+
         _today_brief = load_today_brief()
         if _today_brief:
-            log.info("Research brief: risk=%s | %s",
-                     _today_brief.get("macro_risk", "?"),
-                     _today_brief.get("summary", "")[:80])
+            log.info(
+                "Research brief: risk=%s | %s",
+                _today_brief.get("macro_risk", "?"),
+                _today_brief.get("summary", "")[:80],
+            )
             if _today_brief.get("trade_bias_override") == "cash":
                 _evt = (_today_brief.get("event_blocks") or [{}])[0]
-                log.warning("RESEARCH OVERRIDE: CASH — %s",
-                            _evt.get("event", "high-impact event today"))
+                log.warning(
+                    "RESEARCH OVERRIDE: CASH — %s", _evt.get("event", "high-impact event today")
+                )
                 return
         else:
             log.info("No research brief found — proceeding without news filter")
@@ -1700,16 +2169,19 @@ def run():
     # ── Regime gate (shared by both strategies) ─────────────────────────────
     try:
         from core.screener import fetch_bars
+
         spy_bars = (fetch_bars(["SPY"], days=400) or {}).get("SPY") or []
     except Exception as e:
         log.warning(f"Regime gate SPY bars fetch failed (non-blocking): {e}")
         spy_bars = []
     if spy_bars:
-        highs  = [b["high"]   for b in spy_bars]
-        lows   = [b["low"]    for b in spy_bars]
-        closes = [b["close"]  for b in spy_bars]
+        highs = [b["high"] for b in spy_bars]
+        lows = [b["low"] for b in spy_bars]
+        closes = [b["close"] for b in spy_bars]
         reg = classify(highs, lows, closes)
-        log.info(f"Regime gate: state={reg.state} trend={reg.trend} adx={reg.adx:.1f} sma50={reg.sma50:.2f} sma200={reg.sma200:.2f} reason={reg.reason}")
+        log.info(
+            f"Regime gate: state={reg.state} trend={reg.trend} adx={reg.adx:.1f} sma50={reg.sma50:.2f} sma200={reg.sma200:.2f} reason={reg.reason}"
+        )
         if not reg.can_trade:
             log.warning(f"REGIME GATE: STAND_DOWN — {reg.reason} — holding cash, no screening")
             return
@@ -1720,12 +2192,15 @@ def run():
 
     # Emergency liquidation check before strategy loop
     if cb.liquidation_required():
-        log.error(f"EMERGENCY LIQUIDATION: equity ${equity_now:,.2f} vs day-start ${day_start:,.2f} ({day_pnl:+.2f}%)")
+        log.error(
+            f"EMERGENCY LIQUIDATION: equity ${equity_now:,.2f} vs day-start ${day_start:,.2f} ({day_pnl:+.2f}%)"
+        )
         try:
             broker.cancel_all_orders()
             positions = broker.get_positions()
             for p in positions:
-                if is_base_symbol(p.symbol): continue
+                if is_base_symbol(p.symbol):
+                    continue
                 try:
                     broker.close_position(p.symbol)
                     log.info(f"  Emergency closed {p.symbol}")
@@ -1733,9 +2208,15 @@ def run():
                     log.warning(f"  Emergency close {p.symbol} failed: {e}")
         except Exception as e:
             log.error(f"Emergency liquidation attempt failed: {e}")
-        send_trade_alert(action="EMERGENCY", ticker="ALL", shares=0, price=0,
-                         stop=0, target=0,
-                         reason="Emergency liquidation: emergency threshold breached")
+        send_trade_alert(
+            action="EMERGENCY",
+            ticker="ALL",
+            shares=0,
+            price=0,
+            stop=0,
+            target=0,
+            reason="Emergency liquidation: emergency threshold breached",
+        )
         trade_logger.log_event("emergency_liquidation", "all", None)
         logger.banner(log, "EMERGENCY LIQUIDATION — NO STRATEGIES RUN")
         return
@@ -1755,7 +2236,7 @@ def run():
 
     for strategy in config.STRATEGY_MODES:
         if slots[0] <= 0:
-            log.info(f"No slots remaining — stopping strategy loop")
+            log.info("No slots remaining — stopping strategy loop")
             break
 
         handler = STRATEGY_HANDLERS.get(strategy)

@@ -30,8 +30,12 @@ class _FakeTradeClient:
         return SimpleNamespace(id="order-1")
 
     def get_order_by_id(self, order_id):
-        qty = self.submitted[-1].qty
-        return SimpleNamespace(filled_avg_price=self._fill_price, filled_qty=qty)
+        req = self.submitted[-1]
+        if getattr(req, "notional", None):
+            filled_qty = round(req.notional / self._fill_price, 9)
+        else:
+            filled_qty = req.qty
+        return SimpleNamespace(filled_avg_price=self._fill_price, filled_qty=filled_qty)
 
 
 def _make_broker(
@@ -139,15 +143,46 @@ def test_buy_without_dollar_amount_unaffected():
     assert broker.trade.submitted[-1].qty == result["qty"]
 
 
-def test_buy_blocks_instead_of_fractional_when_whole_share_unaffordable():
-    # Whole-share policy: a dollar_amount request whose share price exceeds the
-    # affordable whole-share budget must BLOCK — never submit a fractional
-    # (notional) order — because a fractional position can't carry a GTC stop
-    # and would be immediately flattened, leaving it effectively unprotected.
-    # Mirrors the live 2026-07-28 AAPL/TXN churn (share $339/$275, ~$26 budget).
+def test_buy_falls_back_to_fractional_when_whole_share_unaffordable():
+    # A dollar_amount request whose share price exceeds the affordable
+    # whole-share budget submits a fractional (notional) order instead of
+    # blocking. This depends on attach_stop_target using a DAY time-in-force
+    # for fractional qty (Alpaca rejects GTC on fractional orders, error
+    # 42210000) — see test_broker_attach_stop_target_tif.py. Mirrors the live
+    # 2026-07-28 AAPL/TXN case (share $339, ~$26 budget) that previously
+    # caused immediate-flatten churn under the old GTC-only attach.
     broker = _make_broker(ref_price=339.0, equity=264.0, buying_power=205.0)
 
     result = broker.buy("AAPL", dollar_amount=26.0, stop_loss_pct=0.05, take_profit_pct=0.10)
 
+    assert result.get("blocked") is None
+    submitted = broker.trade.submitted[-1]
+    # notional clamps to the 8% position cap (0.08 * $264 = $21.12), the
+    # tightest of dollar_amount/remaining_cap/available_cash here.
+    assert submitted.notional == 21.12
+    assert result["qty"] == round(21.12 / 339.0, 9)
+
+
+def test_buy_blocks_fractional_below_min_notional():
+    # A dollar_amount so small the fractional order wouldn't clear
+    # MIN_FRACTIONAL_NOTIONAL still blocks rather than submitting a
+    # near-zero order that just bleeds spread/fees.
+    broker = _make_broker(ref_price=339.0, equity=264.0, buying_power=205.0)
+
+    result = broker.buy("AAPL", dollar_amount=2.0, stop_loss_pct=0.05, take_profit_pct=0.10)
+
     assert result == {"blocked": True, "reason": "insufficient_cash"}
-    assert broker.trade.submitted == []  # no fractional order placed
+    assert broker.trade.submitted == []
+
+
+def test_buy_blocks_when_no_dollar_amount_and_whole_share_unaffordable():
+    # Fractional fallback only applies to dollar_amount requests (the caller
+    # has an explicit notional budget in mind). A bare shares= request that
+    # can't afford 1 whole share still blocks — there's no notional figure to
+    # size a fractional order against.
+    broker = _make_broker(ref_price=50.0, equity=100_000.0, buying_power=10.0)
+
+    result = broker.buy("AAPL", shares=20, stop_loss_pct=0.05, take_profit_pct=0.10)
+
+    assert result == {"blocked": True, "reason": "insufficient_cash"}
+    assert broker.trade.submitted == []

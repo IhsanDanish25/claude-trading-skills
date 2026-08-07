@@ -76,6 +76,10 @@ MAX_PRICE = float(os.environ.get("MAX_PRICE", "100.0"))
 MIN_COMPOSITE_SCORE = int(os.environ.get("MIN_COMPOSITE_SCORE", "20"))
 RISK_PCT = float(os.environ.get("RISK_PCT", "0.0125"))
 MAX_SPREAD_PCT = float(os.environ.get("MAX_SPREAD_PCT", "0.02"))  # wide-spread guard in get_price
+# Smallest notional a fractional buy will submit when a whole share is
+# unaffordable. Below this, Alpaca's fractional order and the DAY-only
+# protective exit aren't worth the round-trip cost.
+MIN_FRACTIONAL_NOTIONAL = float(os.environ.get("MIN_FRACTIONAL_NOTIONAL", "5.0"))
 
 # ── Edge upgrades ─────────────────────────────────────────────────────────────
 ENTRY_DELAY_MIN = int(os.environ.get("ENTRY_DELAY_MIN", "20"))

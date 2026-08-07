@@ -42,6 +42,7 @@ from core.config import (
     MAX_OPEN_POSITIONS,
     MAX_POSITION_SIZE_PCT,
     MAX_SPREAD_PCT,
+    MIN_FRACTIONAL_NOTIONAL,
     RISK_PCT,
     STOP_LOSS_PCT,
     TAKE_PROFIT_PCT,
@@ -177,12 +178,16 @@ class BrokerClient:
         except Exception as e:
             log.warning("get_crypto_price failed for %s: %s — trying bars", symbol, e)
         try:
-            import datetime, pytz
+            import datetime
+
+            import pytz
+
             end = datetime.datetime.now(pytz.UTC)
             start = end - datetime.timedelta(hours=2)
             bars = self.crypto_data.get_crypto_bars(
-                CryptoBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute,
-                                  start=start, end=end)
+                CryptoBarsRequest(
+                    symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, start=start, end=end
+                )
             )
             df = bars[symbol].df
             return float(df["close"].iloc[-1])
@@ -205,11 +210,19 @@ class BrokerClient:
 
         Submission is wrapped in safe_attach_oco, which retries once a stale
         sell order for this symbol is cancelled if Alpaca rejects the order
-        with error 40310000 ("insufficient qty available for order")."""
+        with error 40310000 ("insufficient qty available for order").
+
+        Alpaca rejects any GTC order on a fractional-qty position (error
+        42210000, "fractional orders must be DAY orders") — a fractional
+        buy's OCO/stop must use TimeInForce.DAY instead. That means the
+        exit expires at the day's close; callers that run a position-repair
+        pass (midday_review, market_open) are responsible for re-attaching
+        it on days it's found missing."""
         # STOP_LIMIT_BUFFER_PCT: stop-limit fills cap slippage at 1.5% below
         # the stop price on gap-down opens. Trade-off: stop-limit orders do
         # not participate in the open/close auction (Alpaca docs). Accepted.
         stop_limit = max(round(stop * 0.985, 2), stop - 0.05)
+        tif = TimeInForce.DAY if qty != int(qty) else TimeInForce.GTC
 
         def _submit():
             if target is not None:
@@ -218,14 +231,14 @@ class BrokerClient:
                         symbol=symbol,
                         qty=qty,
                         side=OrderSide.SELL,
-                        time_in_force=TimeInForce.GTC,
+                        time_in_force=tif,
                         order_class=OrderClass.OCO,
                         take_profit=TakeProfitRequest(limit_price=target),
                         stop_loss=StopLossRequest(stop_price=stop, limit_price=stop_limit),
                     )
                 )
                 log.info(
-                    f"  ↳ OCO attached: stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]"
+                    f"  ↳ OCO attached ({tif.value}): stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]"
                 )
             else:
                 self.trade.submit_order(
@@ -233,13 +246,15 @@ class BrokerClient:
                         symbol=symbol,
                         qty=qty,
                         side=OrderSide.SELL,
-                        time_in_force=TimeInForce.GTC,
+                        time_in_force=tif,
                         order_class=OrderClass.SIMPLE,
                         stop_price=stop,
                         limit_price=stop_limit,
                     )
                 )
-                log.info(f"  ↳ SIMPLE STOP attached (no cap): stop @ ${stop:.2f} x{qty} [{symbol}]")
+                log.info(
+                    f"  ↳ SIMPLE STOP attached ({tif.value}, no cap): stop @ ${stop:.2f} x{qty} [{symbol}]"
+                )
 
         try:
             safe_attach_oco(self, symbol, qty, stop, target, _submit)
@@ -263,9 +278,7 @@ class BrokerClient:
 
         return True, target is not None
 
-    def _verify_stop_live(
-        self, symbol: str, max_attempts: int = 6, delay: float = 0.5
-    ) -> bool:
+    def _verify_stop_live(self, symbol: str, max_attempts: int = 6, delay: float = 0.5) -> bool:
         """Poll Alpaca's open orders for a resting sell stop/stop-limit/OCO
         order on symbol. Used right after submission to confirm the order
         Alpaca accepted synchronously is still alive, rather than trusting
@@ -276,7 +289,10 @@ class BrokerClient:
             except Exception as e:
                 log.warning(
                     "  ↳ verify stop [%s]: could not list open orders (attempt %d/%d): %s",
-                    symbol, attempt + 1, max_attempts, e,
+                    symbol,
+                    attempt + 1,
+                    max_attempts,
+                    e,
                 )
                 open_orders = None
             if open_orders:
@@ -301,7 +317,9 @@ class BrokerClient:
         equity = self.portfolio_value()
         max_position_dollars = equity * MAX_POSITION_SIZE_PCT
         existing_pos = self.get_position(symbol)
-        existing_value = abs(float(existing_pos.market_value or 0)) if existing_pos is not None else 0.0
+        existing_value = (
+            abs(float(existing_pos.market_value or 0)) if existing_pos is not None else 0.0
+        )
         remaining_cap = max(0.0, max_position_dollars - existing_value)
         return min(remaining_cap, self.buying_power())
 
@@ -428,16 +446,29 @@ class BrokerClient:
             qty = cash_qty
 
         if qty < 1:
-            # Whole-share policy: never fall back to a fractional (notional) buy.
-            # Alpaca rejects a GTC protective stop on a fractional position
-            # (error 42210000 "fractional orders must be DAY orders"), so a
-            # fractional buy cannot carry a resting stop — the caller then
-            # immediately flattens it, bleeding spread + fees while capturing
-            # none of the move. If we can't afford at least 1 whole share within
-            # the caps, skip the trade so every position we open is stop-protected.
+            # Fractional fallback: a whole share doesn't fit the caps, but the
+            # caller gave us an explicit dollar budget — use a notional order
+            # instead of blocking. attach_stop_target uses a DAY time-in-force
+            # for fractional qty (Alpaca rejects GTC on fractional orders,
+            # error 42210000), so the protective exit still attaches and the
+            # caller's "flatten if stop_attached is False" guard still holds.
+            if dollar_amount is not None:
+                notional = round(min(dollar_amount, remaining_cap, available_cash), 2)
+                if notional < MIN_FRACTIONAL_NOTIONAL:
+                    log.warning(
+                        "BUY %s BLOCKED — fractional notional $%.2f below $%.2f minimum",
+                        symbol,
+                        notional,
+                        MIN_FRACTIONAL_NOTIONAL,
+                    )
+                    return {"blocked": True, "reason": "insufficient_cash"}
+                return self._buy_fractional(
+                    symbol, notional, ref_price, stop_loss_pct, take_profit_pct
+                )
+
             log.warning(
                 "BUY %s BLOCKED — cannot afford 1 whole share @ $%.2f "
-                "(remaining cap $%.2f, buying power $%.2f); fractional buys disabled",
+                "(remaining cap $%.2f, buying power $%.2f); no dollar_amount to size a fractional order",
                 symbol,
                 ref_price,
                 remaining_cap,
@@ -503,14 +534,85 @@ class BrokerClient:
             "target_attached": target_attached,
         }
 
-    def sell(self, symbol: str, qty: int = None) -> dict:
+    def _buy_fractional(
+        self,
+        symbol: str,
+        notional: float,
+        ref_price: float,
+        stop_loss_pct: float,
+        take_profit_pct: float,
+    ) -> dict:
+        """Notional (fractional-share) market BUY, then attach a DAY-tif
+        protective exit. Mirrors buy()'s whole-share flow above; kept
+        separate because the order request and fill-qty math differ
+        (notional in/qty out, vs. qty in/qty out)."""
+        order = self.trade.submit_order(
+            MarketOrderRequest(
+                symbol=symbol,
+                notional=notional,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+            )
+        )
+        log.info(
+            f"BUY {symbol} ${notional:.2f} notional (fractional) submitted [{str(order.id)[:8]}]"
+        )
+
+        market_open = self.is_market_open()
+        fill_price = None
+        filled_qty = round(notional / ref_price, 9)
+        for i in range(10):
+            if not market_open and i > 0:
+                log.warning("Market closed — aborting fill poll for %s", symbol)
+                break
+            try:
+                o = self.trade.get_order_by_id(order.id)
+            except Exception as e:
+                log.warning("poll order %s failed: %s", symbol, e)
+                break
+            if o.filled_avg_price:
+                fill_price = float(o.filled_avg_price)
+                if o.filled_qty:
+                    filled_qty = float(o.filled_qty)
+                break
+            time.sleep(0.5)
+
+        basis = fill_price if fill_price else ref_price
+        if fill_price is None:
+            log.warning(
+                f"{symbol} not filled within 5s — using reference ${ref_price:.2f} for stop/target"
+            )
+        stop = round(basis * (1 - stop_loss_pct), 2)
+        target = round(basis * (1 + take_profit_pct), 2) if take_profit_pct is not None else None
+
+        stop_attached, target_attached = self.attach_stop_target(symbol, filled_qty, stop, target)
+        log.info(
+            f"BUY {symbol} {filled_qty:.6f} @ ${basis:.2f} (fractional) | SL={stop} "
+            f"TP={'None (no cap)' if target is None else target} "
+            f"| stop_attached={stop_attached} target_attached={target_attached}"
+        )
+
+        return {
+            "order": order,
+            "qty": filled_qty,
+            "price": basis,
+            "stop": stop,
+            "target": target,
+            "stop_attached": stop_attached,
+            "target_attached": target_attached,
+        }
+
+    def sell(self, symbol: str, qty: float = None) -> dict:
         """Market sell. qty=None → close entire position."""
         if qty is None:
             pos = self.get_position(symbol)
             if not pos:
                 log.warning(f"No position in {symbol}")
                 return {}
-            qty = int(float(pos.qty))
+            # Keep fractional precision — int() truncation here would submit
+            # qty=0 for any position under 1 share and silently no-op the
+            # close (Alpaca DAY orders already support fractional qty).
+            qty = float(pos.qty)
 
         req = MarketOrderRequest(
             symbol=symbol,
@@ -648,13 +750,18 @@ class BrokerClient:
         NOTE: Account must have options_level >= 1 and sufficient buying power.
         """
         try:
-            from alpaca.trading.requests import (
-                OptionTradeRequest, LimitOrderRequest as OptLimitOrderRequest,
-                MarketOrderRequest as OptMarketOrderRequest,
-                GetOptionContractsRequest,
+            from alpaca.trading.enums import (
+                OrderSide as OptSide,
             )
             from alpaca.trading.enums import (
-                OptionType, OrderSide as OptSide, TimeInForce as OptTIF, OrderType as OptType,
+                OrderType as OptType,
+            )
+            from alpaca.trading.enums import (
+                TimeInForce as OptTIF,
+            )
+            from alpaca.trading.requests import (
+                GetOptionContractsRequest,
+                OptionTradeRequest,
             )
         except ImportError:
             log.error("Alpaca options not supported — upgrade alpaca-py: pip install alpaca-py")
@@ -666,7 +773,6 @@ class BrokerClient:
         strike_dec = int((strike - strike_int) * 1000)
         if strike < 1:
             strike_dec = int((strike - strike_int) * 10000)
-            occ_type = "P"
             occ_symbol = f"{symbol.upper()}{expiration.replace('-', '')}{strike_dec:08d}P"
         elif strike < 1000:
             occ_symbol = f"{symbol.upper()}{expiration.replace('-', '')}P{int(strike * 1000):08d}"
@@ -676,7 +782,6 @@ class BrokerClient:
         log.info(f"CSP: searching contract {occ_symbol} for {symbol} strike=${strike}")
 
         # Look up the contract
-        import datetime as _dt
         try:
             req = GetOptionContractsRequest(
                 underlying_symbols=[symbol.upper()],
@@ -708,7 +813,9 @@ class BrokerClient:
         acct = self.get_account()
         options_bp = float(acct.options_buying_power or 0)
         if options_bp < strike * 100:
-            log.warning(f"  Insufficient options BP: ${options_bp:.2f} < ${strike * 100:.2f} required")
+            log.warning(
+                f"  Insufficient options BP: ${options_bp:.2f} < ${strike * 100:.2f} required"
+            )
             return {"blocked": True, "reason": "insufficient_buying_power"}
 
         # Submit the order
@@ -749,9 +856,12 @@ class BrokerClient:
                     pass
                 time.sleep(1)
 
-            premium_actual = filled_price if filled_price else premium if premium else 0
             collateral = target * 100 * qty
-            log.info(f"  CSP filled: ${filled_price} | premium=${filled_price * 100:.2f}" if filled_price else f"  CSP pending: {order.id}")
+            log.info(
+                f"  CSP filled: ${filled_price} | premium=${filled_price * 100:.2f}"
+                if filled_price
+                else f"  CSP pending: {order.id}"
+            )
 
             return {
                 "order": order,
@@ -772,11 +882,11 @@ class BrokerClient:
             log.error(f"CSP order failed: {e}")
             return {"blocked": True, "reason": str(e)}
 
-    def get_put_contracts(self, symbol: str, expiration: str,
-                          max_strike: float = None) -> list:
+    def get_put_contracts(self, symbol: str, expiration: str, max_strike: float = None) -> list:
         """Fetch available put option contracts for a symbol on a given expiry date."""
         try:
             from alpaca.trading.requests import GetOptionContractsRequest
+
             kwargs = dict(
                 underlying_symbols=[symbol.upper()],
                 expiration_date_gte=expiration,
@@ -796,7 +906,8 @@ class BrokerClient:
     def close_option(self, contract_symbol: str, qty: int = 1) -> dict:
         """Buy to close an existing short option position."""
         try:
-            from alpaca.trading.enums import OptionType, OrderSide, TimeInForce, OrderType
+            from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
+
             order = self.trade.submit_option_order(
                 symbol=contract_symbol,
                 qty=str(qty),

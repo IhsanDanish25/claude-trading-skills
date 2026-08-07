@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 MIDDAY REVIEW ROUTINE — 12:00 PM ET, Mon-Fri
 ─────────────────────────────────────────────
@@ -8,30 +9,35 @@ MIDDAY REVIEW ROUTINE — 12:00 PM ET, Mon-Fri
 4. Check for new high-quality setups (post-open volume data)
 5. Cancel stale open orders
 """
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import json
 import datetime
+import json
 import time
+
 import pytz
-from core import logger, config
-from core.broker   import BrokerClient
-from core.fmp      import get_quotes, get_market_breadth
-from core.analyst  import review_open_positions, analyze_market_regime, score_vcp_candidates
-from core.screener import screen
-from core.edge     import should_pyramid, compute_trail_stop
-from core.spy_base import rebalance_to_spy, log_status as spy_log, is_base_symbol
-from core.order_utils import order_field as _order_field
+
+from core import config, logger
+from core.analyst import analyze_market_regime, review_open_positions, score_vcp_candidates
+from core.broker import BrokerClient
+from core.edge import compute_trail_stop, should_pyramid
+from core.fmp import get_market_breadth, get_quotes
 from core.notifier import send_trade_alert
+from core.order_utils import order_field as _order_field
 from core.pead_tracker import remove_position as pead_untrack
 from core.safe_oco_attach import cancel_open_sell_orders
+from core.screener import screen
+from core.spy_base import is_base_symbol, rebalance_to_spy
+from core.spy_base import log_status as spy_log
 
 log = logger.setup("midday")
-ET  = pytz.timezone("America/New_York")
+ET = pytz.timezone("America/New_York")
 
 PYRAMID_STATE_PATH = os.path.join(config.STATE_DIR, "pyramided.json")
-TODAY_BOUGHT_PATH  = os.path.join(config.STATE_DIR, "today_bought.json")
+TODAY_BOUGHT_PATH = os.path.join(config.STATE_DIR, "today_bought.json")
 
 
 def _load_today_bought() -> set:
@@ -87,13 +93,15 @@ def _save_pyramided(symbols: set) -> None:
         json.dump(sorted(symbols), f)
 
 
-def profit_exit_action(pnl_pct: float, qty: int, threshold_pct: float) -> str | None:
+def profit_exit_action(pnl_pct: float, qty: float, threshold_pct: float) -> str | None:
     """Decide review-time profit-taking for a position.
 
     Returns:
       "trim" — sell PARTIAL_PROFIT_SIZE (e.g. 50%) and trail the rest (qty >= 2)
       "full" — sell the whole position (qty == 1, can't be trimmed)
-      None   — below threshold, or qty < 1 (nothing to do)
+      None   — below threshold, or qty < 1, e.g. a fractional position
+               (nothing to do — no profit-taking rule defined for fractional
+               qty yet, so it's left to the trailing stop / Claude review)
 
     `pnl_pct` is a percentage (e.g. 6.0 for +6%); `threshold_pct` is a fraction
     (e.g. 0.06). Single-share positions get a full exit because a 50% trim is
@@ -124,7 +132,7 @@ def run():
         log.info("Market is CLOSED — skipping midday review (no after-hours trading)")
         return
 
-    pv        = broker.portfolio_value()
+    pv = broker.portfolio_value()
     pos_count = broker.position_count()
     log.info(f"Portfolio: ${pv:,.2f} | Positions: {pos_count}")
 
@@ -132,6 +140,7 @@ def run():
     day_start = pv
     try:
         import json as _json
+
         with open(day_start_path) as _f:
             _data = _json.load(_f)
         if _data.get("date") == datetime.datetime.now(ET).date().isoformat() and _data.get("value"):
@@ -151,7 +160,7 @@ def run():
     log.info(f"Day P&L OK ({day_pnl:+.2f}%) — circuit breaker clear")
 
     breadth = get_market_breadth()
-    regime  = analyze_market_regime(breadth)
+    regime = analyze_market_regime(breadth)
     log.info(f"Midday regime: {regime['regime'].upper()} | Bias: {regime['trade_bias']}")
 
     positions = broker.get_positions()
@@ -206,8 +215,10 @@ def run():
             # base rebalance sells stop bouncing off held_for_orders.
             if is_base_symbol(p.symbol):
                 n = _clear_base_protection(broker, open_orders, p.symbol)
-                log.info(f"  {p.symbol}: SPY base holding — no protection OCO"
-                         + (f" ({n} legacy sell orders cancelled)" if n else ""))
+                log.info(
+                    f"  {p.symbol}: SPY base holding — no protection OCO"
+                    + (f" ({n} legacy sell orders cancelled)" if n else "")
+                )
                 continue
 
             # Stale-stop guard: skip re-attach if position already holds a stop
@@ -217,8 +228,8 @@ def run():
                 continue
 
             entry = float(p.avg_entry_price)
-            qty = int(float(p.qty))
-            if qty < 1:
+            qty = float(p.qty)
+            if qty <= 0:
                 continue
             anchor = entry
             try:
@@ -229,27 +240,37 @@ def run():
                 log.warning(f"  {p.symbol}: price check failed ({e}) — anchoring on entry")
             stop = round(anchor * (1 - config.STOP_LOSS_PCT), 2)
             target = round(entry * (1 + config.TAKE_PROFIT_PCT), 2)
-            log.info(f"  Attaching protection: {p.symbol} "
-                     f"(entry=${entry:.2f} stop=${stop} target=${target})")
+            log.info(
+                f"  Attaching protection: {p.symbol} "
+                f"(entry=${entry:.2f} stop=${stop} target=${target})"
+            )
             stop_attached, _ = broker.attach_stop_target(p.symbol, qty, stop, target)
             if not stop_attached:
                 # attach_stop_target already double-checked with Alpaca and
                 # confirmed no live stop exists — don't leave the position
                 # naked, flatten it like market_open does on the same failure.
-                log.error(f"  ✗ {p.symbol}: stop-loss attach FAILED (verified against "
-                          f"Alpaca) — flattening to avoid an unprotected position")
+                log.error(
+                    f"  ✗ {p.symbol}: stop-loss attach FAILED (verified against "
+                    f"Alpaca) — flattening to avoid an unprotected position"
+                )
                 try:
                     cancel_open_sell_orders(broker, p.symbol)
                     broker.sell(p.symbol, qty=qty)
                     send_trade_alert(
-                        action="FLATTEN", ticker=p.symbol, shares=qty, price=cur if cur > 0 else entry,
-                        stop=stop, target=target,
+                        action="FLATTEN",
+                        ticker=p.symbol,
+                        shares=qty,
+                        price=cur if cur > 0 else entry,
+                        stop=stop,
+                        target=target,
                         reason="Midday stop-loss re-attach failed — position closed to avoid naked exposure",
                     )
                     flattened_symbols.add(p.symbol)
                 except Exception as e:
-                    log.error(f"  ✗ {p.symbol}: flatten-on-attach-failure ALSO failed: {e} "
-                              f"— position remains unprotected, needs manual review")
+                    log.error(
+                        f"  ✗ {p.symbol}: flatten-on-attach-failure ALSO failed: {e} "
+                        f"— position remains unprotected, needs manual review"
+                    )
 
         # Brief pause to let Alpaca propagate the new OCO orders before
         # we try to update them in the review loop below.
@@ -258,15 +279,15 @@ def run():
     if not positions:
         log.info("No positions — skip position review")
     else:
-        symbols    = [p.symbol for p in positions]
-        quotes     = get_quotes(symbols)
-        pos_data   = []
-        pyramided  = _load_pyramided()
-        pv         = broker.portfolio_value()
+        symbols = [p.symbol for p in positions]
+        quotes = get_quotes(symbols)
+        pos_data = []
+        pyramided = _load_pyramided()
+        pv = broker.portfolio_value()
         trade_bias = regime.get("trade_bias", "moderate")
 
         for p in positions:
-            sym          = p.symbol
+            sym = p.symbol
             # Already closed above because its stop-loss attach failed even
             # after Alpaca verification — nothing left to review.
             if sym in flattened_symbols:
@@ -277,18 +298,20 @@ def run():
             if is_base_symbol(sym):
                 log.info(f"  {sym:6} | SPY base holding — excluded from review")
                 continue
-            entry        = float(p.avg_entry_price)
-            current      = float(quotes.get(sym, {}).get("price", entry))
-            qty          = int(float(p.qty))
-            pnl_pct      = round((current - entry) / entry * 100, 2)
-            unrealized   = float(p.unrealized_pl or 0)
-            days_held    = 0
+            entry = float(p.avg_entry_price)
+            current = float(quotes.get(sym, {}).get("price", entry))
+            qty = float(p.qty)
+            pnl_pct = round((current - entry) / entry * 100, 2)
+            unrealized = float(p.unrealized_pl or 0)
+            days_held = 0
 
-            stop   = round(entry * (1 - config.STOP_LOSS_PCT), 2)
+            stop = round(entry * (1 - config.STOP_LOSS_PCT), 2)
             target = round(entry * (1 + config.TAKE_PROFIT_PCT), 2)
 
-            log.info(f"  {sym:6} | entry=${entry:.2f} | now=${current:.2f} | "
-                     f"P&L={pnl_pct:+.2f}% (${unrealized:+,.0f})")
+            log.info(
+                f"  {sym:6} | entry=${entry:.2f} | now=${current:.2f} | "
+                f"P&L={pnl_pct:+.2f}% (${unrealized:+,.0f})"
+            )
 
             # ── Profit-taking (#6): trim 50% (multi-share) or full-exit (1 share)
             _profit_action = profit_exit_action(pnl_pct, qty, config.PARTIAL_PROFIT_PCT)
@@ -306,10 +329,14 @@ def run():
                         target=0,
                         reason=f"Partial profit at +{pnl_pct:.1f}% — trimmed {trim_qty} of {qty} shares",
                     )
-                    log.info(f"  💰 {sym}: partial profit — sold {trim_qty}/{qty} at +{pnl_pct:.1f}%")
+                    log.info(
+                        f"  💰 {sym}: partial profit — sold {trim_qty}/{qty} at +{pnl_pct:.1f}%"
+                    )
                     new_trail_stop = round(current * (1 - config.TRAIL_STOP_PCT), 2)
                     broker.tighten_stop(sym, new_trail_stop)
-                    log.info(f"  🔒 {sym}: trailing stop → ${new_trail_stop} on remaining {qty - trim_qty}")
+                    log.info(
+                        f"  🔒 {sym}: trailing stop → ${new_trail_stop} on remaining {qty - trim_qty}"
+                    )
                     qty -= trim_qty
                 except Exception as e:
                     log.error(f"  ✗ Partial profit {sym} failed: {e}")
@@ -351,8 +378,9 @@ def run():
                         stop = new_stop
 
             # ── Pyramiding (#10): add to winners once past trigger ───────────
-            if (trade_bias not in ("cash", "defensive")
-                    and should_pyramid({"pnl_pct": pnl_pct, "pyramided": sym in pyramided})):
+            if trade_bias not in ("cash", "defensive") and should_pyramid(
+                {"pnl_pct": pnl_pct, "pyramided": sym in pyramided}
+            ):
                 add_amount = pv * config.MAX_POSITION_SIZE_PCT * 0.5
                 try:
                     result = broker.buy(sym, dollar_amount=add_amount)
@@ -370,22 +398,26 @@ def run():
                             target=0,
                             reason=f"PYRAMID — adding {result['qty']} shares at +{pnl_pct:.1f}% P&L",
                         )
-                        log.info(f"  ➕ {sym}: pyramided +{result['qty']} shares "
-                                 f"@ ~${result['price']:.2f} (P&L +{pnl_pct:.1f}%)")
+                        log.info(
+                            f"  ➕ {sym}: pyramided +{result['qty']} shares "
+                            f"@ ~${result['price']:.2f} (P&L +{pnl_pct:.1f}%)"
+                        )
                 except Exception as e:
                     log.error(f"  ✗ Pyramid {sym} failed: {e}")
 
-            pos_data.append({
-                "symbol":       sym,
-                "entry_price":  entry,
-                "current_price": current,
-                "qty":          qty,
-                "pnl_pct":      pnl_pct,
-                "unrealized_usd": unrealized,
-                "days_held":    days_held,
-                "stop":         stop,
-                "target":       target,
-            })
+            pos_data.append(
+                {
+                    "symbol": sym,
+                    "entry_price": entry,
+                    "current_price": current,
+                    "qty": qty,
+                    "pnl_pct": pnl_pct,
+                    "unrealized_usd": unrealized,
+                    "days_held": days_held,
+                    "stop": stop,
+                    "target": target,
+                }
+            )
 
         _save_pyramided(pyramided)
 
@@ -393,7 +425,7 @@ def run():
         decisions = review_open_positions(pos_data, regime["regime"])
 
         for d in decisions:
-            sym    = d.get("symbol", "")
+            sym = d.get("symbol", "")
             action = d.get("action", "HOLD")
             reason = d.get("reason", "")
             new_stop = d.get("new_stop")
@@ -403,7 +435,7 @@ def run():
             if action == "SELL":
                 try:
                     pos = broker.get_position(sym)
-                    qty = int(float(pos.qty)) if pos else 0
+                    qty = float(pos.qty) if pos else 0
                     cur_price = quotes.get(sym, {}).get("price", 0)
                     broker.sell(sym)
                     send_trade_alert(
@@ -428,13 +460,13 @@ def run():
 
     if slots > 0 and regime["trade_bias"] not in ["cash", "defensive"]:
         log.info(f"── Midday scan ({slots} slots available)")
-        raw    = screen()
-        top    = raw[:10]
+        raw = screen()
+        top = raw[:10]
 
         if top:
             price_by_symbol = {c["symbol"]: c.get("price", 0) for c in top}
             scored = score_vcp_candidates(top)
-            buys   = [s for s in scored if s.get("action") == "BUY" and s.get("score", 0) >= 75]
+            buys = [s for s in scored if s.get("action") == "BUY" and s.get("score", 0) >= 75]
             already_bought_today = _load_today_bought()
             if already_bought_today:
                 buys = [s for s in buys if s["symbol"] not in already_bought_today]
@@ -447,8 +479,10 @@ def run():
                 price = price_by_symbol.get(s["symbol"], 0)
                 budget = broker.affordable_budget(s["symbol"])
                 if price <= 0 or price > budget:
-                    log.info(f"  ✗ {s['symbol']:6} SKIP — price ${price:.2f} exceeds "
-                             f"affordable budget ${budget:.2f}")
+                    log.info(
+                        f"  ✗ {s['symbol']:6} SKIP — price ${price:.2f} exceeds "
+                        f"affordable budget ${budget:.2f}"
+                    )
                     continue
                 affordable_buys.append(s)
             buys = affordable_buys
@@ -460,7 +494,7 @@ def run():
                     continue
                 log.info(f"  ⚡ {s['symbol']:6} score={s['score']} | {s['reason']}")
                 try:
-                    pv     = broker.portfolio_value()
+                    pv = broker.portfolio_value()
                     amount = pv * config.MAX_POSITION_SIZE_PCT * 0.5
                     result = broker.buy(s["symbol"], dollar_amount=amount)
                     if result.get("blocked"):
@@ -470,9 +504,12 @@ def run():
                         log.error(f"  ✗ {s['symbol']} bought but stop NOT attached — flattening")
                         broker.sell(s["symbol"], qty=result["qty"])
                         send_trade_alert(
-                            action="FLATTEN", ticker=s["symbol"], shares=result["qty"],
+                            action="FLATTEN",
+                            ticker=s["symbol"],
+                            shares=result["qty"],
                             price=result["price"],
-                            stop=result.get("stop", 0), target=result.get("target", 0),
+                            stop=result.get("stop", 0),
+                            target=result.get("target", 0),
                             reason="Midday scan buy stop-loss attach failed — position closed to avoid naked exposure",
                         )
                         continue
@@ -485,7 +522,9 @@ def run():
                         target=result.get("target", 0),
                         reason=f"Midday VCP setup — score={s.get('score', '?')}",
                     )
-                    log.info(f"  ✓ Midday buy {s['symbol']}: {result['qty']} @ ~${result['price']:.2f}")
+                    log.info(
+                        f"  ✓ Midday buy {s['symbol']}: {result['qty']} @ ~${result['price']:.2f}"
+                    )
                     _mark_bought(s["symbol"])
                 except Exception as e:
                     log.error(f"  ✗ Midday buy {s['symbol']} failed: {e}")
@@ -494,7 +533,7 @@ def run():
 
     positions_after = broker.get_positions()
     total_unrealized = sum(float(p.unrealized_pl or 0) for p in positions_after)
-    log.info(f"── Midday summary")
+    log.info("── Midday summary")
     log.info(f"  Positions: {len(positions_after)}")
     log.info(f"  Total unrealized P&L: ${total_unrealized:+,.2f}")
 
