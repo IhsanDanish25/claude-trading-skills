@@ -23,6 +23,7 @@ FMP /stable/ earning_calendar endpoint:
 
 Also fetches current FMP quote for price and volume drift confirmation.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -30,15 +31,19 @@ import json
 import logging
 import os
 
-from core.config import (
-    EARNMOM_HOLD_DAYS, EARNMOM_STOP_PCT, EARNMOM_SIZE_PCT,
-    EARNMOM_MIN_PRICE, EARNMOM_MIN_AVG_VOLUME, EARNMOM_MIN_SURPRISE_PCT,
-    EARNMOM_LOOKBACK_DAYS, EARNMOM_MAX_DAYS_AGO, EARNMOM_MIN_DRIFT_PCT,
-    EARNMOM_LIMIT, SP80_UNIVERSE,
-)
 from core import clock
-from core.fmp import _get, _STABLE as _stable, fmp_remaining_calls
-
+from core.config import (
+    EARNMOM_LIMIT,
+    EARNMOM_LOOKBACK_DAYS,
+    EARNMOM_MAX_DAYS_AGO,
+    EARNMOM_MIN_AVG_VOLUME,
+    EARNMOM_MIN_DRIFT_PCT,
+    EARNMOM_MIN_PRICE,
+    EARNMOM_MIN_SURPRISE_PCT,
+    SP80_UNIVERSE,
+)
+from core.fmp import _STABLE as _stable
+from core.fmp import _get, fmp_remaining_calls
 from core.yf_utils import yf_download
 
 log = logging.getLogger(__name__)
@@ -46,7 +51,8 @@ log = logging.getLogger(__name__)
 # Live daily cache for /stable/earnings (earnings only change quarterly, so one
 # fetch per symbol per day is plenty and keeps us well under the FMP quota).
 _EARN_CACHE_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cache", "earnings_live")
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cache", "earnings_live"
+)
 
 
 def _load_symbol_earnings(sym: str) -> list[dict]:
@@ -84,7 +90,8 @@ def _load_symbol_earnings(sym: str) -> list[dict]:
         log.debug("earnmom cache write %s failed: %s", sym, e)
     return rows
 
-_N_BARS = 60     # need ~45 for drift + 20 for avg volume
+
+_N_BARS = 60  # need ~45 for drift + 20 for avg volume
 
 
 def _fetch_bars_batch(symbols: list[str]) -> dict[str, list[dict]]:
@@ -117,16 +124,21 @@ def _fetch_bars_batch(symbols: list[str]) -> dict[str, list[dict]]:
             if len(cs) < 5:
                 continue
 
-            n = min(len(cs), len(data[sym]["High"]), len(data[sym]["Low"]), len(data[sym]["Volume"]))
+            n = min(
+                len(cs), len(data[sym]["High"]), len(data[sym]["Low"]), len(data[sym]["Volume"])
+            )
             bars = []
             for i in range(n):
                 bar_date = cs.index[i].strftime("%Y-%m-%d")
-                bars.append({
-                    "date":   bar_date,
-                    "close":  float(cs.iloc[i]),
-                    "volume": float(data[sym]["Volume"].iloc[i])
-                               if i < len(data[sym]["Volume"]) else 0.0,
-                })
+                bars.append(
+                    {
+                        "date": bar_date,
+                        "close": float(cs.iloc[i]),
+                        "volume": float(data[sym]["Volume"].iloc[i])
+                        if i < len(data[sym]["Volume"])
+                        else 0.0,
+                    }
+                )
             out[sym] = bars  # oldest→newest
         except Exception:
             continue
@@ -136,13 +148,14 @@ def _fetch_bars_batch(symbols: list[str]) -> dict[str, list[dict]]:
 def _get_price_yf(symbol: str) -> float:
     """Price from yfinance Ticker.fast_info (one call, no loop)."""
     try:
+        import yfinance as yf
+
         return float(yf.Ticker(symbol).fast_info.last_price)
     except Exception:
         return 0.0
 
 
-def _fetch_drift(sym: str, beat_date: str,
-                 bars_map: dict[str, list[dict]]) -> tuple[float, float]:
+def _fetch_drift(sym: str, beat_date: str, bars_map: dict[str, list[dict]]) -> tuple[float, float]:
     """
     Get drift % and 20d avg volume from pre-fetched yfinance bars.
     Returns (drift_pct, avg_volume_20d). No FMP calls.
@@ -201,8 +214,10 @@ def screen() -> list[dict]:
     # Per-symbol /stable/earnings (the /earning_calendar batch endpoint is 404 on
     # our FMP tier). For each symbol keep the most recent REPORTED quarter within
     # the lookback window and derive the surprise % from actual vs. estimate.
-    log.info(f"EarnMom screen: fetching per-symbol earnings via FMP /stable/earnings "
-            f"(from={cutoff_s}, universe={len(SP80_UNIVERSE)})")
+    log.info(
+        f"EarnMom screen: fetching per-symbol earnings via FMP /stable/earnings "
+        f"(from={cutoff_s}, universe={len(SP80_UNIVERSE)})"
+    )
 
     # ── Prefetch ALL bars via yfinance (one batch call, 0 FMP calls) ────────────
     bars_map: dict[str, list[dict]] = {}
@@ -212,21 +227,25 @@ def screen() -> list[dict]:
 
     # ── FMP budget guard — now only 1 call per symbol for /earnings ────────────
     remaining = fmp_remaining_calls()
-    needed = len(SP80_UNIVERSE)   # worst case: 1 earnings call per symbol
+    needed = len(SP80_UNIVERSE)  # worst case: 1 earnings call per symbol
     if remaining < needed:
         log.warning(
             "EarnMom SKIPPED: FMP budget %d remaining, need ~%d calls. "
             "EarnMom will run after other strategies exhaust fewer calls, "
-            "or increase FMP tier.", remaining, needed
+            "or increase FMP tier.",
+            remaining,
+            needed,
         )
         return []
     log.info("EarnMom: FMP budget %d remaining, need ~%d — proceeding", remaining, needed)
 
     earnings_by_sym: dict[str, dict] = {}
+    earnings_fetch_failed = 0
     for sym in SP80_UNIVERSE:
         try:
             rows = _load_symbol_earnings(sym)
         except Exception as e:  # noqa: BLE001
+            earnings_fetch_failed += 1
             log.debug("EarnMom earnings %s: %s", sym, e)
             continue
 
@@ -261,10 +280,24 @@ def screen() -> list[dict]:
             existing = earnings_by_sym.get(sym)
             if existing is None or date_str > existing["report_date"]:
                 earnings_by_sym[sym] = {
-                    "report_date":  date_str,
-                    "actual_eps":    actual_eps,
-                    "surprise_pct":  round(surprise_pct, 4),
+                    "report_date": date_str,
+                    "actual_eps": actual_eps,
+                    "surprise_pct": round(surprise_pct, 4),
                 }
+
+    # Per-symbol fetch failures (402/403 tier restrictions, network errors,
+    # etc.) are logged at debug level above and silently `continue`d — from
+    # the outside, "half the universe failed to fetch" and "no one beat
+    # earnings today" both just look like "EarnMom: 0 candidates". Surface
+    # a summary at warning level so a real API problem doesn't hide behind
+    # what reads as a quiet market day.
+    if earnings_fetch_failed:
+        log.warning(
+            "EarnMom: %d/%d symbol earnings fetches failed (see debug log for "
+            "per-symbol errors) — results may be incomplete",
+            earnings_fetch_failed,
+            len(SP80_UNIVERSE),
+        )
 
     log.info(f"  Filtered to {len(earnings_by_sym)} symbols with reported beats in window")
 
@@ -302,17 +335,19 @@ def screen() -> list[dict]:
 
             score = _drift_score(drift_pct, surprise_pct)
 
-            candidates.append({
-                "symbol":        sym,
-                "price":         round(price, 2),
-                "report_date":   report_date,
-                "surprise_pct":  round(surprise_pct, 2),
-                "actual_eps":    info["actual_eps"],
-                "age_days":      age_days,
-                "drift_pct":     drift_pct,
-                "avg_volume":    avg_vol,
-                "score":         round(score, 1),
-            })
+            candidates.append(
+                {
+                    "symbol": sym,
+                    "price": round(price, 2),
+                    "report_date": report_date,
+                    "surprise_pct": round(surprise_pct, 2),
+                    "actual_eps": info["actual_eps"],
+                    "age_days": age_days,
+                    "drift_pct": drift_pct,
+                    "avg_volume": avg_vol,
+                    "score": round(score, 1),
+                }
+            )
             fetched += 1
         except Exception as e:
             log.debug("EarnMom %s: %s", sym, e)
@@ -320,10 +355,14 @@ def screen() -> list[dict]:
 
     candidates.sort(key=lambda x: -x["score"])
     top = candidates[:EARNMOM_LIMIT]
-    log.info(f"EarnMom: {len(top)}/{len(candidates)} candidates "
-             f"(beat 8-45d ago, drifted >{EARNMOM_MIN_DRIFT_PCT}%)")
+    log.info(
+        f"EarnMom: {len(top)}/{len(candidates)} candidates "
+        f"(beat 8-45d ago, drifted >{EARNMOM_MIN_DRIFT_PCT}%)"
+    )
     for c in top:
-        log.info(f"  {c['symbol']} surprise={c['surprise_pct']:+.1f}% "
-                 f"age={c['age_days']}d drift={c['drift_pct']:+.1f}% "
-                 f"score={c['score']:.0f}")
+        log.info(
+            f"  {c['symbol']} surprise={c['surprise_pct']:+.1f}% "
+            f"age={c['age_days']}d drift={c['drift_pct']:+.1f}% "
+            f"score={c['score']:.0f}"
+        )
     return top
