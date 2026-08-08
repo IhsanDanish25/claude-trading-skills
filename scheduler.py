@@ -157,6 +157,43 @@ def _midday_review_ran_today() -> bool:
         return False  # Fail-safe: if we can't check, let catchup fire
 
 
+# ── Axiom-backed dedup (Railway's STATE_DIR volume doesn't survive restarts
+# for this project — confirmed 2026-08-07/08 via repeated redeploy testing
+# across two separate volumes, both freshly created. Axiom is external and
+# already proven reliable every single boot via core.trade_logger, so it's
+# the actual durability layer for "did this routine already run today",
+# not the local file.) ────────────────────────────────────────────────────
+def _axiom_mark_ran(module: str, now: datetime.datetime) -> None:
+    try:
+        from core.trade_logger import append_record
+        append_record({
+            "ts": now.isoformat(timespec="seconds"),
+            "event": "routine_completed",
+            "routine": module,
+            "date": now.strftime("%Y-%m-%d"),
+        })
+    except Exception:
+        pass
+
+
+def _axiom_ran_today(module: str, now: datetime.datetime) -> bool:
+    try:
+        from core.trade_logger import AXIOM_API_TOKEN, AXIOM_DATASET, AXIOM_ORG_ID
+        if not AXIOM_API_TOKEN:
+            return False
+        from axiom_py import Client
+        client = Client(token=AXIOM_API_TOKEN, org_id=AXIOM_ORG_ID or None)
+        today = now.strftime("%Y-%m-%d")
+        apl = (
+            f"['{AXIOM_DATASET}'] | where event == \"routine_completed\" "
+            f"and routine == \"{module}\" and date == \"{today}\" | limit 1"
+        )
+        result = client.query(apl)
+        return bool(result.matches)
+    except Exception:
+        return False  # Fail-safe: if we can't check, let catchup fire
+
+
 def get_routine(now: datetime.datetime):
     h, m, wd = now.hour, now.minute, now.weekday()
 
@@ -183,6 +220,11 @@ def get_catchup_routine(now: datetime.datetime):
 
     for (sched_h, m_min, m_max, module) in catchup_targets:
         if module in ran_today:
+            continue
+        # Axiom is the real durability layer (see comment above) — checked
+        # before the Alpaca fallback since it also covers no-trade days.
+        if _axiom_ran_today(module, now):
+            log.info(f"{module}: ran today (Axiom record confirms)")
             continue
         # Fix 8: double-check against Alpaca so a lost state-file doesn't
         # cause a false-positive "already ran" claim after a Railway redeploy.
@@ -233,6 +275,7 @@ def _load_ran_today(now: datetime.datetime) -> set:
 
 
 def _mark_ran(now: datetime.datetime, module: str):
+    _axiom_mark_ran(module, now)
     try:
         import json
         os.makedirs(STATE_DIR, exist_ok=True)
