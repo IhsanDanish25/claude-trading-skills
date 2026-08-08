@@ -71,3 +71,25 @@ def test_get_catchup_routine_alerts_exactly_once_when_giving_up(tmp_path, monkey
     routine, error = alerts[0]
     assert routine == "routines.market_open"
     assert "Gave up" in error
+
+
+def test_midday_review_alpaca_fallback_suppresses_stale_alert(tmp_path, monkeypatch):
+    """Regression for the 2026-08-07 false-positive: a lost state file (e.g.
+    from a Railway redeploy) should not trigger a stale-catchup alert for
+    midday_review if Alpaca order history proves it already bought today —
+    mirrors the existing market_open fallback."""
+    monkeypatch.setattr(scheduler, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(scheduler, "SKIPPED_ROUTINES_FILE", str(tmp_path / "skipped_routines.json"))
+    monkeypatch.setattr(scheduler, "CATCHUP_FILE", str(tmp_path / ".scheduler_ran_today.json"))
+    monkeypatch.setattr(scheduler, "_market_open_ran_today", lambda: True)
+    monkeypatch.setattr(scheduler, "_midday_review_ran_today", lambda: True)
+
+    alerts = []
+    monkeypatch.setattr(
+        "core.notifier.send_error_alert",
+        lambda routine, error: alerts.append((routine, error)) or True,
+    )
+
+    now = scheduler.ET.localize(datetime.datetime(2026, 8, 7, 19, 30, 0))
+    assert scheduler.get_catchup_routine(now) is None
+    assert alerts == []

@@ -121,6 +121,42 @@ def _market_open_ran_today() -> bool:
         return False  # Fail-safe: if we can't check, let catchup fire
 
 
+def _midday_review_ran_today() -> bool:
+    """
+    Same double-check as _market_open_ran_today, scoped to midday_review's
+    own window: even if the state-file was lost due to a redeploy, a BUY
+    filled at/after 12:00 ET today is proof midday_review already ran.
+
+    Most days midday_review finds no candidates and buys nothing, so this
+    is a secondary safety net on top of the persisted state file — a
+    no-trade day still relies on that state file to avoid a false-positive
+    stale-catchup alert.
+    """
+    try:
+        from core.broker import BrokerClient
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        import datetime as _dt, pytz as _pytz
+        ET = _pytz.timezone("America/New_York")
+        midday_start = _dt.datetime.now(ET).replace(
+            hour=12, minute=0, second=0, microsecond=0
+        )
+        broker = BrokerClient()
+        orders = broker.trade.get_orders(
+            GetOrdersRequest(
+                status=QueryOrderStatus.CLOSED,
+                after=midday_start.isoformat(),
+                limit=10,
+            )
+        )
+        for o in orders:
+            if o.side.value == "buy" and (o.filled_qty or 0) > 0:
+                return True
+        return False
+    except Exception:
+        return False  # Fail-safe: if we can't check, let catchup fire
+
+
 def get_routine(now: datetime.datetime):
     h, m, wd = now.hour, now.minute, now.weekday()
 
@@ -152,6 +188,9 @@ def get_catchup_routine(now: datetime.datetime):
         # cause a false-positive "already ran" claim after a Railway redeploy.
         if module == "routines.market_open" and _market_open_ran_today():
             log.info("market_open: ran today (Alpaca history confirms)")
+            continue
+        if module == "routines.midday_review" and _midday_review_ran_today():
+            log.info("midday_review: ran today (Alpaca history confirms)")
             continue
         scheduled = now.replace(hour=sched_h, minute=m_max, second=0, microsecond=0)
         age_hours = (now - scheduled).total_seconds() / 3600.0
