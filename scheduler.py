@@ -255,22 +255,6 @@ def main():
     now = datetime.datetime.now(ET)
     log.info(f"Scheduler fired: {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
 
-    # TEMP DIAGNOSTIC — remove after root-causing the 2026-08-07/08 false
-    # stale-catchup alerts. Prints exactly what this process sees on disk.
-    try:
-        _exists = os.path.exists(SKIPPED_ROUTINES_FILE)
-        _listing = os.listdir(STATE_DIR) if os.path.isdir(STATE_DIR) else "STATE_DIR missing"
-        _raw = None
-        if _exists:
-            with open(SKIPPED_ROUTINES_FILE) as _f:
-                _raw = _f.read()
-        log.info(
-            f"DIAG STATE_DIR={STATE_DIR!r} listing={_listing!r} "
-            f"skipped_file_exists={_exists} raw={_raw!r}"
-        )
-    except Exception as _e:
-        log.info(f"DIAG failed: {_e!r}")
-
     routine = get_routine(now)
 
     # Catch-up: if we missed a window (e.g. redeploy), run it now
