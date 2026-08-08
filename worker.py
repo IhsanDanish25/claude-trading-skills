@@ -292,15 +292,6 @@ def main() -> None:
 
     startup_health_check()
     startup_rebalance()
-
-    # Reproduced twice on 2026-08-07/08 redeploys: firing tick #1 immediately
-    # raced the Railway volume mount for STATE_DIR, so scheduler.py read an
-    # empty/not-yet-attached state dir and re-alerted "missed" on routines
-    # that had already run under the previous container. A few seconds' grace
-    # before the first tick lets the mount settle; costs nothing on the other
-    # 999,999 ticks since it only runs once per container lifetime.
-    time.sleep(5)
-
     log.info(
         "Worker daemon started — scheduler fires every %ds (RSS=%.1f MB, pid=%d)",
         TICK_SECONDS,
