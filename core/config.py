@@ -266,7 +266,7 @@ EARNMOM_MIN_DRIFT_PCT = float(os.environ.get("EARNMOM_MIN_DRIFT_PCT", "2.0"))
 # stock must be up at least this much since earnings beat
 EARNMOM_LIMIT = int(os.environ.get("EARNMOM_LIMIT", "5"))
 
-# ── Time-series confirming filter (ARIMA directional forecast) ──────────────
+# ── Time-series confirming filter (directional forecast) ────────────────────
 # NOT a standalone strategy — a confirming filter layered on existing
 # strategies (see core/timeseries_signal.py). An existing strategy's entry
 # only proceeds if this model agrees (long) or is neutral/inconclusive; it
@@ -274,6 +274,14 @@ EARNMOM_LIMIT = int(os.environ.get("EARNMOM_LIMIT", "5"))
 # backtest (same harness, same gates as breakout/meanrev/earnmom) clears the
 # 2026-08-06-style bar: trade_count, not_overfit, significant.
 TIMESERIES_ENABLED = os.environ.get("TIMESERIES_ENABLED", "false").lower() == "true"
+# "arima" (ARIMA(1,1,1) on price levels — standalone-backtested 2026-08-10,
+# never cleared 60% confidence, mean 9.7%; see backtests/timeseries_standalone_
+# 2026-08-10/summary.md) or "lstm" (tiny 1-layer LSTM on return sequences —
+# the task's fallback option, tried next; UNVALIDATED, needs its own
+# standalone backtest run before TIMESERIES_ENABLED is ever considered).
+TIMESERIES_MODEL = os.environ.get("TIMESERIES_MODEL", "lstm").strip().lower()
+TIMESERIES_LSTM_LOOKBACK = int(os.environ.get("TIMESERIES_LSTM_LOOKBACK", "20"))
+TIMESERIES_LSTM_EPOCHS = int(os.environ.get("TIMESERIES_LSTM_EPOCHS", "30"))
 # Model must be at least this confident (0-1) in a DISAGREEING direction
 # before it blocks a trade — below this, treated as neutral/inconclusive.
 TIMESERIES_MIN_CONFIDENCE = float(os.environ.get("TIMESERIES_MIN_CONFIDENCE", "0.6"))

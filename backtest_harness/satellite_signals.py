@@ -545,8 +545,9 @@ def get_historical_timeseries_signals(
     live filter (core.timeseries_signal). It is never called live to
     generate entries itself, only to confirm/veto another strategy's.
 
-    Refits the ARIMA model every `refit_stride` trading days rather than
-    daily, reusing that fit's forecast for the days in between — keeps cost
+    Refits/retrains the model (whichever backend TIMESERIES_MODEL selects —
+    ARIMA or LSTM) every `refit_stride` trading days rather than daily,
+    reusing that fit's forecast for the days in between — keeps cost
     tractable across a multi-year, multi-symbol window. Still point-in-time
     honest: every reused forecast was fit using only data available as of
     its own refit date, never later (via store.slice_asof).

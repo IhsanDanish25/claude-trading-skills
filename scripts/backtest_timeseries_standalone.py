@@ -85,7 +85,7 @@ def main() -> int:
     out_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "backtests",
-        f"timeseries_standalone_{datetime.date.today().isoformat()}",
+        f"timeseries_standalone_{cfg.TIMESERIES_MODEL}_{datetime.date.today().isoformat()}",
     )
     os.makedirs(out_dir, exist_ok=True)
 
