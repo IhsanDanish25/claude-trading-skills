@@ -15,13 +15,13 @@ import json
 import pytz
 
 from circuit_breaker import CircuitBreaker, EmergencyLiquidation, TradingHalted
-from core import config, logger, trade_logger
+from core import config, logger, timeseries_signal, trade_logger
 from core.broker import BrokerClient
 from core.earnings_screener import screen_earnings
 from core.notifier import send_trade_alert
 from core.pead_tracker import add_position as pead_track
 from core.protection import reattach_missing_protection
-from core.screener import screen
+from core.screener import fetch_bars, screen
 from core.spy_base import free_cash_for_pead, is_base_symbol, rebalance_to_spy
 from core.spy_base import log_status as spy_log
 from regime_gate import classify
@@ -94,6 +94,48 @@ def _sector_gate(symbol: str, sector_counts: dict, fmp_key: str, strategy: str, 
         return False
     sector_counts[sector] = current + 1
     return True
+
+
+def _timeseries_gate(symbol: str, strategy: str, log) -> bool:
+    """Confirming filter: an existing strategy's entry only proceeds if the
+    time-series directional forecast (core.timeseries_signal) agrees with
+    "long" or is neutral/inconclusive. No-op (returns True) when
+    TIMESERIES_ENABLED is False (the default until it clears its own
+    standalone backtest — see core/config.py).
+
+    Unlike _sector_gate/spread checks, a fetch/model failure here defaults
+    to ALLOW, not block: this is an optional secondary confirmation on top
+    of an already-validated strategy, not a safety check on the order
+    itself — erroring toward "no opinion" can't introduce a new failure
+    mode into a strategy that already passed its own validation bar.
+    """
+    if not getattr(config, "TIMESERIES_ENABLED", False):
+        return True
+    try:
+        bars = fetch_bars([symbol], days=config.TIMESERIES_MIN_HISTORY_DAYS * 2).get(symbol, [])
+        result = timeseries_signal.confirms(
+            "long", bars, min_confidence=config.TIMESERIES_MIN_CONFIDENCE
+        )
+    except Exception as e:
+        log.warning(
+            "  timeseries gate %s: fetch/forecast failed (%s) — defaulting to allow", symbol, e
+        )
+        return True
+    if not result["allowed"]:
+        log.info(
+            f"  SKIP {symbol} — timeseries model disagrees: "
+            f"direction={result['direction']} confidence={result['confidence']:.2f}"
+        )
+        trade_logger.log_event(
+            "gate_failed",
+            strategy,
+            symbol,
+            gate="timeseries_confirm",
+            reason=f"model predicts {result['direction']} (confidence={result['confidence']:.2f})",
+            direction=result["direction"],
+            confidence=result["confidence"],
+        )
+    return result["allowed"]
 
 
 def _affordable_candidates(broker, candidates: list, strategy: str, log) -> list:
@@ -626,6 +668,8 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today, sector_count
         _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
         if not _sector_gate(sym, sector_counts, _fkp, "meanrev", log):
             continue
+        if not _timeseries_gate(sym, "meanrev", log):
+            continue
 
         log.info(
             f"MeanRev BUY {sym} | RSI={c['rsi']} BBpos={c['bb_position']:.0f}% "
@@ -790,6 +834,8 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today, sector_count
         # Sector concentration guard
         _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
         if not _sector_gate(sym, sector_counts, _fkp, "insider", log):
+            continue
+        if not _timeseries_gate(sym, "insider", log):
             continue
 
         log.info(
@@ -1129,6 +1175,8 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today, sector_coun
         _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
         if not _sector_gate(sym, sector_counts, _fkp, "breakout", log):
             continue
+        if not _timeseries_gate(sym, "breakout", log):
+            continue
 
         log.info(
             f"Breakout BUY {sym} | price=${c['price']:.2f} "
@@ -1297,6 +1345,8 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today, sector_count
         # Sector concentration guard
         _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
         if not _sector_gate(sym, sector_counts, _fkp, "earnmom", log):
+            continue
+        if not _timeseries_gate(sym, "earnmom", log):
             continue
 
         log.info(

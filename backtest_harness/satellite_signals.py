@@ -10,6 +10,7 @@ using data through D's close" — consumed the same way earnings_data.py's
 {symbol, date, surprise_pct} rows are: earnings_engine.run_earnings_simulation
 enters at the next trading day's open after D, so there is no look-ahead.
 """
+
 from __future__ import annotations
 
 import bisect
@@ -25,8 +26,8 @@ from core.config import (
     EARNMOM_MIN_DRIFT_PCT,
     EARNMOM_MIN_PRICE,
     EARNMOM_MIN_SURPRISE_PCT,
-    GAPFILL_MIN_GAP_PCT,
     GAPFILL_MAX_GAP_PCT,
+    GAPFILL_MIN_GAP_PCT,
     GAPFILL_MIN_PRICE,
     GAPFILL_MIN_VOLUME,
     MEANREV_BB_THRESHOLD,
@@ -40,13 +41,15 @@ from core.config import (
     PEAD_MIN_AVG_VOLUME,
     PEAD_MIN_PRICE,
     PEAD_MIN_SURPRISE_PCT,
+    SECTOR_MAX_GAP_PCT,
     SECTOR_MIN_AVG_VOLUME,
     SECTOR_MIN_PRICE,
     SECTOR_MIN_RS,
-    SECTOR_MAX_GAP_PCT,
+    TIMESERIES_MIN_CONFIDENCE,
+    TIMESERIES_MIN_HISTORY_DAYS,
 )
 
-_EARNMOM_MIN_AGE = 8   # drift phase starts day 8 (gap-fill done, thesis confirmed)
+_EARNMOM_MIN_AGE = 8  # drift phase starts day 8 (gap-fill done, thesis confirmed)
 
 _RSI_PERIOD = 14
 _SMA200_PERIOD = 200
@@ -89,14 +92,16 @@ def _rsi(closes: list[float], period: int = _RSI_PERIOD) -> float | None:
 def _atr14(bars: list[dict], n: int = 14) -> float:
     if len(bars) < n + 1:
         return 0.0
-    window = bars[-(n + 1):]
+    window = bars[-(n + 1) :]
     trs = []
     for prev, cur in zip(window[:-1], window[1:]):
-        trs.append(max(
-            cur["high"] - cur["low"],
-            abs(cur["high"] - prev["close"]),
-            abs(cur["low"] - prev["close"]),
-        ))
+        trs.append(
+            max(
+                cur["high"] - cur["low"],
+                abs(cur["high"] - prev["close"]),
+                abs(cur["low"] - prev["close"]),
+            )
+        )
     return sum(trs) / len(trs) if trs else 0.0
 
 
@@ -127,6 +132,7 @@ def _compression_score(atr_pct: float) -> float:
 
 
 # ── ATR percentile filter (Fix 11 mirror: core/breakout_screener uses pct < 0.40) ──
+
 
 def _atr_percentile(closes: list[float], highs: list[float], lows: list[float]) -> float | None:
     """
@@ -174,7 +180,10 @@ def _atr_percentile(closes: list[float], highs: list[float], lows: list[float]) 
 
 
 def get_historical_breakout_signals(
-    store, symbols: list[str], start_date, end_date,
+    store,
+    symbols: list[str],
+    start_date,
+    end_date,
 ) -> list[dict]:
     """Replica of core.breakout_screener.screen(), walked day-by-day.
 
@@ -188,7 +197,11 @@ def get_historical_breakout_signals(
     Returns rows sorted by (date, -score): {symbol, date, surprise_pct}
     (field name kept for drop-in reuse with earnings_engine.run_earnings_simulation).
     """
-    start = start_date if isinstance(start_date, datetime.date) else datetime.date.fromisoformat(start_date)
+    start = (
+        start_date
+        if isinstance(start_date, datetime.date)
+        else datetime.date.fromisoformat(start_date)
+    )
     end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
     out: list[dict] = []
 
@@ -208,43 +221,47 @@ def get_historical_breakout_signals(
             price = closes[i]
             if price < BREAKOUT_MIN_PRICE:
                 continue
-            vol_window = volumes[max(0, i - 19):i + 1]
+            vol_window = volumes[max(0, i - 19) : i + 1]
             avg_vol = _avg(vol_window)
             if avg_vol < BREAKOUT_MIN_AVG_VOLUME:
                 continue
-            high_50 = max(b["high"] for b in bars[i - 49:i + 1])
+            high_50 = max(b["high"] for b in bars[i - 49 : i + 1])
             if high_50 <= 0:
                 continue
             clearance = (price - high_50) / high_50 * 100.0
             if price <= high_50 and clearance < -1.0:
                 continue  # not yet broken out (beyond 1% early-breakout tolerance)
-            sma50 = _sma(closes[:i + 1], 50)
+            sma50 = _sma(closes[: i + 1], 50)
             if sma50 is None or price < sma50:
                 continue  # below SMA50 = reversal context, not a breakout
             current_vol = volumes[i]
             vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0.0
             if vol_ratio < BREAKOUT_VOL_MULT:
                 continue
-            atr = _atr14(bars[max(0, i - 14):i + 1])
+            atr = _atr14(bars[max(0, i - 14) : i + 1])
             atr_pct = (atr / price * 100.0) if price > 0 else 0.0
 
             # Fix 11 mirror: reject if ATR is in the upper 60% (not compressed enough).
             # Mirrors core/breakout_screener.py: `_atr_percentile(bars)` filter.
             if i + 1 > 55:
-                atp = _atr_percentile(closes[:i + 1], highs[:i + 1], lows[:i + 1])
+                atp = _atr_percentile(closes[: i + 1], highs[: i + 1], lows[: i + 1])
                 if atp is not None and atp >= 0.40:
                     continue  # ATR not compressed — skip
 
-            score = (_clearance_score(price, high_50)
-                     + _volume_score(current_vol, avg_vol, BREAKOUT_VOL_MULT)
-                     + _compression_score(atr_pct))
-            out.append({
-                "symbol": sym,
-                "date": bars[i]["date"],
-                "surprise_pct": round(score, 2),
-                "clearance_pct": round(clearance, 2),
-                "volume_ratio": round(vol_ratio, 2),
-            })
+            score = (
+                _clearance_score(price, high_50)
+                + _volume_score(current_vol, avg_vol, BREAKOUT_VOL_MULT)
+                + _compression_score(atr_pct)
+            )
+            out.append(
+                {
+                    "symbol": sym,
+                    "date": bars[i]["date"],
+                    "surprise_pct": round(score, 2),
+                    "clearance_pct": round(clearance, 2),
+                    "volume_ratio": round(vol_ratio, 2),
+                }
+            )
 
     out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
     return out
@@ -259,7 +276,10 @@ def _earnmom_score(drift_pct: float, surprise_pct: float) -> float:
 
 
 def get_historical_earnmom_signals(
-    store, symbols: list[str], start_date, end_date,
+    store,
+    symbols: list[str],
+    start_date,
+    end_date,
 ) -> list[dict]:
     """Replica of core.earnings_momentum_screener.screen(), walked day-by-day.
 
@@ -280,7 +300,11 @@ def get_historical_earnmom_signals(
     """
     from backtest_harness import earnings_data
 
-    start = start_date if isinstance(start_date, datetime.date) else datetime.date.fromisoformat(start_date)
+    start = (
+        start_date
+        if isinstance(start_date, datetime.date)
+        else datetime.date.fromisoformat(start_date)
+    )
     end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
     out: list[dict] = []
 
@@ -320,20 +344,22 @@ def get_historical_earnmom_signals(
                 price = closes[i]
                 if price < EARNMOM_MIN_PRICE:
                     continue
-                avg_vol = _avg(volumes[max(0, i - 19):i + 1])
+                avg_vol = _avg(volumes[max(0, i - 19) : i + 1])
                 if avg_vol < EARNMOM_MIN_AVG_VOLUME:
                     continue
                 drift = (price - beat_close) / beat_close * 100.0
                 if drift < EARNMOM_MIN_DRIFT_PCT:
                     continue
-                out.append({
-                    "symbol": sym,
-                    "date": dates[i],
-                    "surprise_pct": round(_earnmom_score(drift, sp), 2),
-                    "drift_pct": round(drift, 2),
-                    "eps_surprise_pct": round(float(sp), 2),
-                    "age_days": age,
-                })
+                out.append(
+                    {
+                        "symbol": sym,
+                        "date": dates[i],
+                        "surprise_pct": round(_earnmom_score(drift, sp), 2),
+                        "drift_pct": round(drift, 2),
+                        "eps_surprise_pct": round(float(sp), 2),
+                        "age_days": age,
+                    }
+                )
                 break  # one entry per beat (held-set would block re-entry anyway)
 
     out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
@@ -341,7 +367,10 @@ def get_historical_earnmom_signals(
 
 
 def get_historical_pead_signals(
-    store, symbols: list[str], start_date, end_date,
+    store,
+    symbols: list[str],
+    start_date,
+    end_date,
 ) -> list[dict]:
     """PEAD (Post-Earnings Announcement Drift) signals.
 
@@ -359,7 +388,11 @@ def get_historical_pead_signals(
     """
     from backtest_harness import earnings_data
 
-    start = start_date if isinstance(start_date, datetime.date) else datetime.date.fromisoformat(start_date)
+    start = (
+        start_date
+        if isinstance(start_date, datetime.date)
+        else datetime.date.fromisoformat(start_date)
+    )
     end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
     cal = store.trading_calendar("SPY")
     out: list[dict] = []
@@ -397,16 +430,18 @@ def get_historical_pead_signals(
             price = closes[bar_idx]
             if price < PEAD_MIN_PRICE:
                 continue
-            avg_vol = _avg(volumes[max(0, bar_idx - 19):bar_idx + 1])
+            avg_vol = _avg(volumes[max(0, bar_idx - 19) : bar_idx + 1])
             if avg_vol < PEAD_MIN_AVG_VOLUME:
                 continue
 
-            out.append({
-                "symbol": sym,
-                "date": rd,                  # report date — engine maps to entry day
-                "surprise_pct": round(float(sp), 2),
-                # "entry_date" stored in engine's Lot.entry_date as the mapped trading day
-            })
+            out.append(
+                {
+                    "symbol": sym,
+                    "date": rd,  # report date — engine maps to entry day
+                    "surprise_pct": round(float(sp), 2),
+                    # "entry_date" stored in engine's Lot.entry_date as the mapped trading day
+                }
+            )
 
     out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
 
@@ -424,7 +459,10 @@ def get_historical_pead_signals(
 
 
 def get_historical_meanrev_signals(
-    store, symbols: list[str], start_date, end_date,
+    store,
+    symbols: list[str],
+    start_date,
+    end_date,
 ) -> list[dict]:
     """Replica of core.meanrev_screener.screen(), walked day-by-day.
 
@@ -437,7 +475,11 @@ def get_historical_meanrev_signals(
     Returns rows sorted by (date, -score): {symbol, date, surprise_pct}
     (field name kept for drop-in reuse with earnings_engine.run_earnings_simulation).
     """
-    start = start_date if isinstance(start_date, datetime.date) else datetime.date.fromisoformat(start_date)
+    start = (
+        start_date
+        if isinstance(start_date, datetime.date)
+        else datetime.date.fromisoformat(start_date)
+    )
     end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
     out: list[dict] = []
 
@@ -455,11 +497,11 @@ def get_historical_meanrev_signals(
             price = closes[i]
             if price < MEANREV_MIN_PRICE:
                 continue
-            vol_window = volumes[max(0, i - 19):i + 1]
+            vol_window = volumes[max(0, i - 19) : i + 1]
             avg_vol = _avg(vol_window)
             if avg_vol < MEANREV_MIN_AVG_VOLUME:
                 continue
-            window_closes = closes[:i + 1]
+            window_closes = closes[: i + 1]
             sma200 = _sma(window_closes, _SMA200_PERIOD)
             if sma200 is None or price <= sma200:
                 continue
@@ -474,13 +516,80 @@ def get_historical_meanrev_signals(
             if price > bb_lower + MEANREV_BB_THRESHOLD:
                 continue
             score = max(0.0, MEANREV_RSI_THRESHOLD - rsi)
-            out.append({
-                "symbol": sym,
-                "date": bars[i]["date"],
-                "surprise_pct": round(score, 2),
-                "rsi": round(rsi, 1),
-                "bb_lower": round(bb_lower, 2),
-            })
+            out.append(
+                {
+                    "symbol": sym,
+                    "date": bars[i]["date"],
+                    "surprise_pct": round(score, 2),
+                    "rsi": round(rsi, 1),
+                    "bb_lower": round(bb_lower, 2),
+                }
+            )
+
+    out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
+    return out
+
+
+def get_historical_timeseries_signals(
+    store,
+    symbols: list[str],
+    start_date,
+    end_date,
+    min_confidence: float = TIMESERIES_MIN_CONFIDENCE,
+    min_history_days: int = TIMESERIES_MIN_HISTORY_DAYS,
+    refit_stride: int = 5,
+) -> list[dict]:
+    """Point-in-time replica for backtesting the time-series confirming
+    filter AS IF it were a standalone strategy (its own entries) — the only
+    way to validate its own directional edge before it's ever trusted as a
+    live filter (core.timeseries_signal). It is never called live to
+    generate entries itself, only to confirm/veto another strategy's.
+
+    Refits the ARIMA model every `refit_stride` trading days rather than
+    daily, reusing that fit's forecast for the days in between — keeps cost
+    tractable across a multi-year, multi-symbol window. Still point-in-time
+    honest: every reused forecast was fit using only data available as of
+    its own refit date, never later (via store.slice_asof).
+
+    Returns rows sorted by (date, -score): {symbol, date, surprise_pct}
+    (field name kept for drop-in reuse with earnings_engine.run_earnings_simulation).
+    """
+    from core.timeseries_signal import forecast_direction
+
+    start = (
+        start_date
+        if isinstance(start_date, datetime.date)
+        else datetime.date.fromisoformat(start_date)
+    )
+    end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
+    calendar_lookback = int(min_history_days * 1.8)
+    out: list[dict] = []
+
+    for sym in symbols:
+        bars = store.series.get(sym, [])
+        in_window = [
+            datetime.date.fromisoformat(b["date"])
+            for b in bars
+            if start <= datetime.date.fromisoformat(b["date"]) <= end
+        ]
+        if not in_window:
+            continue
+
+        cached = None
+        for idx, d in enumerate(in_window):
+            if cached is None or idx % refit_stride == 0:
+                hist = store.slice_asof(sym, d, calendar_days=calendar_lookback)
+                cached = forecast_direction(hist)
+            if cached["direction"] != "long" or cached["confidence"] < min_confidence:
+                continue
+            out.append(
+                {
+                    "symbol": sym,
+                    "date": d.isoformat(),
+                    "surprise_pct": round(cached["confidence"] * 100, 2),
+                    "predicted_pct_change": cached["predicted_pct_change"],
+                }
+            )
 
     out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
     return out
@@ -489,18 +598,21 @@ def get_historical_meanrev_signals(
 # ── Sector universe for backtest ─────────────────────────────────────────────
 # Mirrors core/sector_screener.py SECTOR_UNIVERSE
 _SECTOR_UNIVERSE: dict[str, list[str]] = {
-    "Technology":   ["NVDA","AMD","META","ADBE","CRM","PANW","CRWD","SNOW","DDOG","NET"],
-    "Consumer":      ["TSLA","NFLX","MELI","SHOP","PINS","COIN","RIVN"],
-    "Healthcare":    ["ISRG","DXCM","REGN","MRNA","ELV","CNC"],
-    "Financials":    ["JPM","GS","AXP","SCHW","COIN"],
-    "Industrials":   ["GE","CAT","RTX","HON","PCAR","AXON"],
-    "Energy":        ["FSLR","ENPH","ON","AEHR","SMCI"],
-    "Communications": ["GOOGL","AMZN","OMC","CHTR"],
+    "Technology": ["NVDA", "AMD", "META", "ADBE", "CRM", "PANW", "CRWD", "SNOW", "DDOG", "NET"],
+    "Consumer": ["TSLA", "NFLX", "MELI", "SHOP", "PINS", "COIN", "RIVN"],
+    "Healthcare": ["ISRG", "DXCM", "REGN", "MRNA", "ELV", "CNC"],
+    "Financials": ["JPM", "GS", "AXP", "SCHW", "COIN"],
+    "Industrials": ["GE", "CAT", "RTX", "HON", "PCAR", "AXON"],
+    "Energy": ["FSLR", "ENPH", "ON", "AEHR", "SMCI"],
+    "Communications": ["GOOGL", "AMZN", "OMC", "CHTR"],
 }
 
 
 def get_historical_gapfill_signals(
-    store, symbols: list[str], start_date, end_date,
+    store,
+    symbols: list[str],
+    start_date,
+    end_date,
 ) -> list[dict]:
     """Gap Fill: gap > GAPFILL_MIN_GAP_PCT at open vs prior close.
 
@@ -508,7 +620,11 @@ def get_historical_gapfill_signals(
     Entry day D = day of the gap. Enter at next trading day's open.
     Returns {symbol, date, surprise_pct} rows where surprise_pct carries gap%.
     """
-    start = start_date if isinstance(start_date, datetime.date) else datetime.date.fromisoformat(start_date)
+    start = (
+        start_date
+        if isinstance(start_date, datetime.date)
+        else datetime.date.fromisoformat(start_date)
+    )
     end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
     out: list[dict] = []
 
@@ -516,8 +632,8 @@ def get_historical_gapfill_signals(
         bars = store.series.get(sym, [])
         if len(bars) < 25:
             continue
-        opens   = [b["open"]   for b in bars]
-        closes  = [b["close"]  for b in bars]
+        opens = [b["open"] for b in bars]
+        closes = [b["close"] for b in bars]
         volumes = [b["volume"] for b in bars]
 
         for i in range(1, len(bars)):
@@ -525,7 +641,7 @@ def get_historical_gapfill_signals(
             if prev_close <= 0:
                 continue
             today_open = opens[i] if "open" in bars[i] else closes[i]
-            gap_pct    = (today_open - prev_close) / prev_close * 100.0
+            gap_pct = (today_open - prev_close) / prev_close * 100.0
             if abs(gap_pct) < GAPFILL_MIN_GAP_PCT or abs(gap_pct) > GAPFILL_MAX_GAP_PCT:
                 continue
             d = datetime.date.fromisoformat(bars[i]["date"])
@@ -534,23 +650,28 @@ def get_historical_gapfill_signals(
             price = closes[i]
             if price < GAPFILL_MIN_PRICE:
                 continue
-            avg_vol = _avg(volumes[max(0, i - 19):i])
+            avg_vol = _avg(volumes[max(0, i - 19) : i])
             if avg_vol < GAPFILL_MIN_VOLUME:
                 continue
-            out.append({
-                "symbol": sym,
-                "date": bars[i]["date"],
-                "surprise_pct": round(gap_pct, 2),
-                "gap_pct": round(gap_pct, 2),
-                "prior_close": round(prev_close, 2),
-            })
+            out.append(
+                {
+                    "symbol": sym,
+                    "date": bars[i]["date"],
+                    "surprise_pct": round(gap_pct, 2),
+                    "gap_pct": round(gap_pct, 2),
+                    "prior_close": round(prev_close, 2),
+                }
+            )
 
     out.sort(key=lambda r: (r["date"], -abs(r["surprise_pct"])))
     return out
 
 
 def get_historical_momentum_signals(
-    store, symbols: list[str], start_date, end_date,
+    store,
+    symbols: list[str],
+    start_date,
+    end_date,
 ) -> list[dict]:
     """Momentum: N-day consecutive up closes with volume confirmation.
 
@@ -558,7 +679,11 @@ def get_historical_momentum_signals(
     Entry at next trading day's open after the N-streak day.
     Returns {symbol, date, surprise_pct} where surprise_pct = streak score.
     """
-    start = start_date if isinstance(start_date, datetime.date) else datetime.date.fromisoformat(start_date)
+    start = (
+        start_date
+        if isinstance(start_date, datetime.date)
+        else datetime.date.fromisoformat(start_date)
+    )
     end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
     out: list[dict] = []
 
@@ -566,11 +691,11 @@ def get_historical_momentum_signals(
         bars = store.series.get(sym, [])
         if len(bars) < _SMA200_PERIOD + MOMENTUM_STREAK_DAYS + 5:
             continue
-        closes  = [b["close"]  for b in bars]
+        closes = [b["close"] for b in bars]
         volumes = [b["volume"] for b in bars]
 
         for i in range(MOMENTUM_STREAK_DAYS, len(bars)):
-            window_closes = closes[:i + 1]
+            window_closes = closes[: i + 1]
             sma200 = _sma(window_closes, _SMA200_PERIOD)
             if sma200 is None or closes[i] <= sma200:
                 continue
@@ -587,36 +712,49 @@ def get_historical_momentum_signals(
                     break
             if streak < MOMENTUM_STREAK_DAYS:
                 continue
-            momentum_pct = (closes[i] - closes[i - MOMENTUM_STREAK_DAYS]) / closes[i - MOMENTUM_STREAK_DAYS] * 100.0
+            momentum_pct = (
+                (closes[i] - closes[i - MOMENTUM_STREAK_DAYS])
+                / closes[i - MOMENTUM_STREAK_DAYS]
+                * 100.0
+            )
             if momentum_pct < MOMENTUM_MIN_MOMENTUM_PCT:
                 continue
-            avg_vol = _avg(volumes[max(0, i - 24):i - MOMENTUM_STREAK_DAYS + 1])
+            avg_vol = _avg(volumes[max(0, i - 24) : i - MOMENTUM_STREAK_DAYS + 1])
             if avg_vol < MOMENTUM_MIN_AVG_VOLUME:
                 continue
             d = datetime.date.fromisoformat(bars[i]["date"])
             if d < start or d > end:
                 continue
-            out.append({
-                "symbol": sym,
-                "date": bars[i]["date"],
-                "surprise_pct": round(streak * 10 + min(momentum_pct, 10), 2),
-                "streak_days": streak,
-                "momentum_pct": round(momentum_pct, 2),
-            })
+            out.append(
+                {
+                    "symbol": sym,
+                    "date": bars[i]["date"],
+                    "surprise_pct": round(streak * 10 + min(momentum_pct, 10), 2),
+                    "streak_days": streak,
+                    "momentum_pct": round(momentum_pct, 2),
+                }
+            )
 
     out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
     return out
 
 
 def get_historical_sector_signals(
-    store, symbols: list[str], start_date, end_date,
+    store,
+    symbols: list[str],
+    start_date,
+    end_date,
 ) -> list[dict]:
     """Sector Rotation: top sector leaders above SMA200 with RS > SECTOR_MIN_RS.
 
     Mirrors core/sector_screener.py. Returns top candidate per sector per date.
     Returns {symbol, date, surprise_pct} where surprise_pct = combined score.
     """
-    start = start_date if isinstance(start_date, datetime.date) else datetime.date.fromisoformat(start_date)
+    start = (
+        start_date
+        if isinstance(start_date, datetime.date)
+        else datetime.date.fromisoformat(start_date)
+    )
     end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
     out: list[dict] = []
 
@@ -632,12 +770,18 @@ def get_historical_sector_signals(
             continue
         close_list = [b["close"] for b in bars]
         for i in range(_SMA200_PERIOD, len(bars) - 21):
-            ret21 = (close_list[min(i + 22, len(close_list) - 1)] - close_list[i]) / close_list[i] * 100.0
+            ret21 = (
+                (close_list[min(i + 22, len(close_list) - 1)] - close_list[i])
+                / close_list[i]
+                * 100.0
+            )
             sector = sym_to_sector.get(sym)
             if sector and sector in sector_rets_21:
                 sector_rets_21[sector].append(ret21)
 
-    sector_avg_ret: dict[str, float] = {sec: _avg(rets) if rets else 0.0 for sec, rets in sector_rets_21.items()}
+    sector_avg_ret: dict[str, float] = {
+        sec: _avg(rets) if rets else 0.0 for sec, rets in sector_rets_21.items()
+    }
     ranked_sectors = sorted(sector_avg_ret.items(), key=lambda x: x[1], reverse=True)
     top_sectors = {s for s, _ in ranked_sectors[:4]}
 
@@ -648,18 +792,18 @@ def get_historical_sector_signals(
         bars = store.series.get(sym) or []
         if len(bars) < _SMA200_PERIOD + 22:
             continue
-        closes  = [b["close"]  for b in bars]
+        closes = [b["close"] for b in bars]
         volumes = [b["volume"] for b in bars]
 
         for i in range(_SMA200_PERIOD, len(bars) - 21):
-            window_closes = closes[:i + 1]
+            window_closes = closes[: i + 1]
             sma200 = _sma(window_closes, _SMA200_PERIOD)
             price = closes[i]
             if sma200 is None or price <= sma200:
                 continue
             if price < SECTOR_MIN_PRICE:
                 continue
-            avg_vol = _avg(volumes[max(0, i - 19):i + 1])
+            avg_vol = _avg(volumes[max(0, i - 19) : i + 1])
             if avg_vol < SECTOR_MIN_AVG_VOLUME:
                 continue
             stock_ret = (closes[i] - closes[max(0, i - 21)]) / closes[max(0, i - 21)] * 100.0
@@ -674,15 +818,17 @@ def get_historical_sector_signals(
             d = datetime.date.fromisoformat(bars[i]["date"])
             if d < start or d > end:
                 continue
-            out.append({
-                "symbol": sym,
-                "date": bars[i]["date"],
-                "surprise_pct": round(rs + sector_ret * 0.5, 2),
-                "sector": sector,
-                "sector_ret": round(sector_ret, 2),
-                "stock_ret": round(stock_ret, 2),
-                "rs": round(rs, 2),
-            })
+            out.append(
+                {
+                    "symbol": sym,
+                    "date": bars[i]["date"],
+                    "surprise_pct": round(rs + sector_ret * 0.5, 2),
+                    "sector": sector,
+                    "sector_ret": round(sector_ret, 2),
+                    "stock_ret": round(stock_ret, 2),
+                    "rs": round(rs, 2),
+                }
+            )
 
     # De-dup: top candidate per sector per date
     best: dict[tuple, dict] = {}
