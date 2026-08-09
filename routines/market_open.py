@@ -15,7 +15,7 @@ import json
 import pytz
 
 from circuit_breaker import CircuitBreaker, EmergencyLiquidation, TradingHalted
-from core import config, logger, trade_logger
+from core import config, cost_tracker, logger, trade_logger
 from core.broker import BrokerClient
 from core.earnings_screener import screen_earnings
 from core.notifier import send_trade_alert
@@ -468,6 +468,7 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
                 dollar_amount=amount,
                 stop_loss_pct=config.PEAD_STOP_PCT,
                 take_profit_pct=None,  # no hard target (time-managed 60d exit)
+                strategy="pead",
             )
             if result.get("blocked"):
                 log.warning(f"✗ {sym} buy blocked: {result.get('reason')}")
@@ -662,6 +663,7 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today, sector_count
                 dollar_amount=amount,
                 stop_loss_pct=config.MEANREV_STOP_PCT,
                 take_profit_pct=None,  # no hard target (time-managed exit)
+                strategy="meanrev",
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -833,6 +835,7 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today, sector_count
                 dollar_amount=amount,
                 stop_loss_pct=config.INSIDER_STOP_PCT,
                 take_profit_pct=config.INSIDER_TARGET_PCT,
+                strategy="insider",
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1003,6 +1006,7 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today, sector_count
                 dollar_amount=amount,
                 stop_loss_pct=config.SQUEEZE_STOP_PCT,
                 take_profit_pct=None,
+                strategy="squeeze",
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1172,6 +1176,7 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today, sector_coun
                 dollar_amount=amount,
                 stop_loss_pct=config.BREAKOUT_STOP_PCT,
                 take_profit_pct=None,
+                strategy="breakout",
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1340,6 +1345,7 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today, sector_count
                 dollar_amount=amount,
                 stop_loss_pct=config.EARNMOM_STOP_PCT,
                 take_profit_pct=config.EARNMOM_TARGET_PCT,
+                strategy="earnmom",
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1487,6 +1493,7 @@ def _run_gapfill(broker, cb, pv, slots, held, already_bought_today, sector_count
             dollar_amount=amount,
             stop_loss_pct=config.GAPFILL_STOP_PCT,
             take_profit_pct=None,
+            strategy="gapfill",
         )
         if result.get("blocked"):
             log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1598,6 +1605,7 @@ def _run_momentum(broker, cb, pv, slots, held, already_bought_today, sector_coun
             dollar_amount=amount,
             stop_loss_pct=config.MOMENTUM_STOP_PCT,
             take_profit_pct=config.MOMENTUM_TAKE_PROFIT_PCT,
+            strategy="momentum",
         )
         if result.get("blocked"):
             log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1694,6 +1702,7 @@ def _run_sector(broker, cb, pv, slots, held, already_bought_today, sector_counts
             dollar_amount=amount,
             stop_loss_pct=config.SECTOR_STOP_PCT,
             take_profit_pct=config.SECTOR_TAKE_PROFIT_PCT,
+            strategy="sector",
         )
         if result.get("blocked"):
             log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1864,6 +1873,7 @@ def _run_vcp(broker, cb, pv, slots, held, already_bought_today, sector_counts):
                 dollar_amount=amount,
                 stop_loss_pct=config.VCP_STOP_PCT,
                 take_profit_pct=None,
+                strategy="vcp",
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1988,6 +1998,47 @@ def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts
                 log.warning(f"  ✗ {sym} SKIP — notional ${notional:.2f} below $1 minimum")
                 continue
 
+            spread_check = broker.check_crypto_spread(sym)
+            if not spread_check.get("ok"):
+                log.warning(
+                    f"  ✗ {sym} SKIP — spread gate: {spread_check.get('reason')} "
+                    f"(spread={spread_check.get('spread_pct')})"
+                )
+                trade_logger.log_event(
+                    "order_skipped",
+                    "crypto",
+                    sym,
+                    gate="spread_check",
+                    reason=spread_check.get("reason"),
+                    spread_pct=spread_check.get("spread_pct"),
+                )
+                continue
+
+            if config.DRY_RUN:
+                log.info(
+                    f"[DRY_RUN] Would BUY {sym} ${notional:.2f} notional @ ~${c['price']:,.2f} "
+                    "-- no order submitted"
+                )
+                trade_logger.log_event(
+                    "dry_run_order",
+                    "crypto",
+                    sym,
+                    side="buy",
+                    notional=notional,
+                    ref_price=c["price"],
+                    spread_pct=spread_check.get("spread_pct"),
+                )
+                cost_tracker.record_fill(
+                    strategy="crypto",
+                    symbol=sym,
+                    side="buy",
+                    signal_price=c["price"],
+                    fill_price=c["price"],
+                    qty=round(notional / c["price"], 9),
+                    spread_pct=spread_check.get("spread_pct"),
+                )
+                continue
+
             order = broker.trade.submit_order(
                 MarketOrderRequest(
                     symbol=sym,
@@ -2016,6 +2067,17 @@ def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts
             basis = fill_price or c["price"]
             if filled_qty <= 0:
                 filled_qty = round(notional / basis, 9)
+
+            if fill_price is not None:
+                cost_tracker.record_fill(
+                    strategy="crypto",
+                    symbol=sym,
+                    side="buy",
+                    signal_price=c["price"],
+                    fill_price=fill_price,
+                    qty=filled_qty,
+                    spread_pct=spread_check.get("spread_pct"),
+                )
 
             stop = round(basis * (1 - config.VCP_STOP_PCT), 2)
             stop_attached, _ = broker.attach_stop_target(sym, filled_qty, stop, None)
