@@ -466,7 +466,8 @@ def run():
         if top:
             price_by_symbol = {c["symbol"]: c.get("price", 0) for c in top}
             scored = score_vcp_candidates(top)
-            buys = [s for s in scored if s.get("action") == "BUY" and s.get("score", 0) >= 75]
+            buys = [s for s in scored
+                    if s.get("action") == "BUY" and s.get("score", 0) >= config.MIDDAY_BUY_SCORE_MIN]
             already_bought_today = _load_today_bought()
             if already_bought_today:
                 buys = [s for s in buys if s["symbol"] not in already_bought_today]
