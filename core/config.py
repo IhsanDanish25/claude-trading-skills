@@ -79,6 +79,9 @@ MAX_OPEN_POSITIONS = int(
 )
 STOP_LOSS_PCT = float(os.environ.get("STOP_LOSS_PCT", "0.02"))
 TAKE_PROFIT_PCT = float(os.environ.get("TAKE_PROFIT_PCT", "0.06"))
+# Minimum Claude confidence score (0-100) for midday_review's scan-buy path
+# to treat a VCP candidate as a real buy signal.
+MIDDAY_BUY_SCORE_MIN = float(os.environ.get("MIDDAY_BUY_SCORE_MIN", "70"))
 MIN_RELATIVE_VOLUME = float(os.environ.get("MIN_REL_VOL", "1.5"))
 MIN_PRICE = float(os.environ.get("MIN_PRICE", "5.0"))
 MAX_PRICE = float(os.environ.get("MAX_PRICE", "100.0"))
