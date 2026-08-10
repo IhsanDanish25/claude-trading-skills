@@ -16,6 +16,8 @@ alpaca-py>=0.20.0
 anthropic>=0.25.0
 pytz>=2024.1
 axiom-py>=0.12.0   # durable trade-decision logging (survives Railway redeploys)
+statsmodels>=0.14.0   # core/timeseries_signal.py — ARIMA confirming filter (reference/comparison)
+torch>=2.0.0           # core/timeseries_signal.py — LSTM confirming filter (active default)
 
 # ── Shared ────────────────────────────────────────────────────────────────────
 requests>=2.31.0

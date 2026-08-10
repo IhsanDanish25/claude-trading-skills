@@ -298,6 +298,34 @@ EARNMOM_MIN_DRIFT_PCT = float(os.environ.get("EARNMOM_MIN_DRIFT_PCT", "2.0"))
 # stock must be up at least this much since earnings beat
 EARNMOM_LIMIT = int(os.environ.get("EARNMOM_LIMIT", "5"))
 
+# ── Time-series confirming filter (directional forecast) ────────────────────
+# NOT a standalone strategy — a confirming filter layered on existing
+# strategies (see core/timeseries_signal.py). An existing strategy's entry
+# only proceeds if this model agrees (long) or is neutral/inconclusive; it
+# never opens a trade by itself. Off by default until its own standalone
+# backtest (same harness, same gates as breakout/meanrev/earnmom) clears the
+# 2026-08-06-style bar: trade_count, not_overfit, significant.
+TIMESERIES_ENABLED = os.environ.get("TIMESERIES_ENABLED", "false").lower() == "true"
+# "arima" (ARIMA(1,1,1) on price levels — standalone-backtested 2026-08-10,
+# never cleared 60% confidence, mean 9.7%; see backtests/timeseries_standalone_
+# 2026-08-10/summary.md) or "lstm" (tiny 1-layer LSTM on return sequences —
+# the task's fallback option, tried next; UNVALIDATED, needs its own
+# standalone backtest run before TIMESERIES_ENABLED is ever considered).
+TIMESERIES_MODEL = os.environ.get("TIMESERIES_MODEL", "lstm").strip().lower()
+TIMESERIES_LSTM_LOOKBACK = int(os.environ.get("TIMESERIES_LSTM_LOOKBACK", "20"))
+TIMESERIES_LSTM_EPOCHS = int(os.environ.get("TIMESERIES_LSTM_EPOCHS", "30"))
+# Model must be at least this confident (0-1) in a DISAGREEING direction
+# before it blocks a trade — below this, treated as neutral/inconclusive.
+TIMESERIES_MIN_CONFIDENCE = float(os.environ.get("TIMESERIES_MIN_CONFIDENCE", "0.6"))
+TIMESERIES_MIN_HISTORY_DAYS = int(os.environ.get("TIMESERIES_MIN_HISTORY_DAYS", "60"))
+# Only used by the standalone backtest entry point (get_historical_timeseries_signals)
+# to size/exit a synthetic trade for validation purposes — the live filter
+# never opens or exits positions itself.
+TIMESERIES_HOLD_DAYS = int(os.environ.get("TIMESERIES_HOLD_DAYS", "5"))
+TIMESERIES_STOP_PCT = float(os.environ.get("TIMESERIES_STOP_PCT", "0.05"))
+TIMESERIES_MIN_PRICE = float(os.environ.get("TIMESERIES_MIN_PRICE", "10.0"))
+TIMESERIES_MIN_AVG_VOLUME = float(os.environ.get("TIMESERIES_MIN_AVG_VOLUME", "500000"))
+
 # ── Gap Fill params (morning gap fade — intraday mean reversion) ─────────────
 # Entry: stock gaps > min at open; fade the spike back to prior close.
 # Win rate 55-70% (best on 3-8% gaps with volume confirmation).

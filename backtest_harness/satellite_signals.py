@@ -51,6 +51,8 @@ from core.config import (
     SECTOR_MIN_AVG_VOLUME,
     SECTOR_MIN_PRICE,
     SECTOR_MIN_RS,
+    TIMESERIES_MIN_CONFIDENCE,
+    TIMESERIES_MIN_HISTORY_DAYS,
 )
 
 _EARNMOM_MIN_AGE = 8  # drift phase starts day 8 (gap-fill done, thesis confirmed)
@@ -527,6 +529,72 @@ def get_historical_meanrev_signals(
                     "surprise_pct": round(score, 2),
                     "rsi": round(rsi, 1),
                     "bb_lower": round(bb_lower, 2),
+                }
+            )
+
+    out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
+    return out
+
+
+def get_historical_timeseries_signals(
+    store,
+    symbols: list[str],
+    start_date,
+    end_date,
+    min_confidence: float = TIMESERIES_MIN_CONFIDENCE,
+    min_history_days: int = TIMESERIES_MIN_HISTORY_DAYS,
+    refit_stride: int = 5,
+) -> list[dict]:
+    """Point-in-time replica for backtesting the time-series confirming
+    filter AS IF it were a standalone strategy (its own entries) — the only
+    way to validate its own directional edge before it's ever trusted as a
+    live filter (core.timeseries_signal). It is never called live to
+    generate entries itself, only to confirm/veto another strategy's.
+
+    Refits/retrains the model (whichever backend TIMESERIES_MODEL selects —
+    ARIMA or LSTM) every `refit_stride` trading days rather than daily,
+    reusing that fit's forecast for the days in between — keeps cost
+    tractable across a multi-year, multi-symbol window. Still point-in-time
+    honest: every reused forecast was fit using only data available as of
+    its own refit date, never later (via store.slice_asof).
+
+    Returns rows sorted by (date, -score): {symbol, date, surprise_pct}
+    (field name kept for drop-in reuse with earnings_engine.run_earnings_simulation).
+    """
+    from core.timeseries_signal import forecast_direction
+
+    start = (
+        start_date
+        if isinstance(start_date, datetime.date)
+        else datetime.date.fromisoformat(start_date)
+    )
+    end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
+    calendar_lookback = int(min_history_days * 1.8)
+    out: list[dict] = []
+
+    for sym in symbols:
+        bars = store.series.get(sym, [])
+        in_window = [
+            datetime.date.fromisoformat(b["date"])
+            for b in bars
+            if start <= datetime.date.fromisoformat(b["date"]) <= end
+        ]
+        if not in_window:
+            continue
+
+        cached = None
+        for idx, d in enumerate(in_window):
+            if cached is None or idx % refit_stride == 0:
+                hist = store.slice_asof(sym, d, calendar_days=calendar_lookback)
+                cached = forecast_direction(hist)
+            if cached["direction"] != "long" or cached["confidence"] < min_confidence:
+                continue
+            out.append(
+                {
+                    "symbol": sym,
+                    "date": d.isoformat(),
+                    "surprise_pct": round(cached["confidence"] * 100, 2),
+                    "predicted_pct_change": cached["predicted_pct_change"],
                 }
             )
 
