@@ -351,11 +351,18 @@ class BrokerClient:
 
         return True, target is not None
 
-    def _verify_stop_live(self, symbol: str, max_attempts: int = 6, delay: float = 0.5) -> bool:
+    def _verify_stop_live(self, symbol: str, max_attempts: int = 10, delay: float = 0.75) -> bool:
         """Poll Alpaca's open orders for a resting sell stop/stop-limit/OCO
         order on symbol. Used right after submission to confirm the order
         Alpaca accepted synchronously is still alive, rather than trusting
-        that submit_order() not raising means the order exists."""
+        that submit_order() not raising means the order exists.
+
+        Budget is ~6.75s (10 attempts x 0.75s between polls), not the
+        original ~2.5s (6 x 0.5s) — the 2026-08-05 12:07 ET incident flattened
+        BAC/NKE/WFC when three back-to-back OCO submissions in the same
+        midday_review pass outran Alpaca's order-list propagation under the
+        old budget; order history confirmed all three attaches had actually
+        succeeded on Alpaca, just not visible here in time."""
         for attempt in range(max_attempts):
             try:
                 open_orders = self.get_open_orders()
