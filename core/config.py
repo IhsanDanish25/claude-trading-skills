@@ -36,6 +36,15 @@ PAPER_TRADE = (
     == "true"
 )
 
+# Dry-run mode: runs the full live pipeline (signal, spread check, cost
+# tracker) against real market data, but BrokerClient.buy()/_buy_fractional()
+# short-circuit right before order submission — no order ever reaches Alpaca.
+# Introduced because the paper trading account was deleted (2026-08-01), so
+# this is the only way to validate the pipeline end-to-end without risking
+# real capital. Set DRY_RUN=true in Railway secrets, run for a few trading
+# days, confirm clean logs, then unset before real orders resume.
+DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
+
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 

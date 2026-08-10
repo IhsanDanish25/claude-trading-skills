@@ -27,6 +27,7 @@ except ImportError:
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import (
     CryptoBarsRequest,
+    CryptoLatestQuoteRequest,
     CryptoLatestTradeRequest,
     StockBarsRequest,
     StockLatestQuoteRequest,
@@ -35,10 +36,12 @@ from alpaca.data.requests import (
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
 
+from core import cost_tracker, trade_logger
 from core.config import (
     ALPACA_API_KEY,
     ALPACA_BASE_URL,
     ALPACA_SECRET_KEY,
+    DRY_RUN,
     MAX_OPEN_POSITIONS,
     MAX_POSITION_SIZE_PCT,
     MAX_SPREAD_PCT,
@@ -167,6 +170,76 @@ class BrokerClient:
         if last is not None and last > 0:
             return last
         raise RuntimeError(f"no usable price for {symbol}")
+
+    # ── Pre-trade spread gate ────────────────────────────────────────────────
+    def check_spread(self, symbol: str) -> dict:
+        """Hard pre-trade gate: block the entry when the bid-ask spread
+        exceeds MAX_SPREAD_PCT of price. Unlike get_price()'s soft fallback
+        (silently switches to last-trade), this BLOCKS the order outright.
+
+        Returns {"ok": True/False, "reason": str|None, "spread_pct": float|None}.
+
+        Fail-safe by design: missing quote data, a crossed/zero quote, or an
+        API error all return ok=False (block the trade) rather than letting
+        an unverified spread through. The one deliberate exception is a
+        confirmed-closed market — quotes are stale/one-sided after hours by
+        definition, so the check is skipped (ok=True, reason="market_closed")
+        instead of false-positiving on every off-hours call.
+        """
+        try:
+            market_open = self.is_market_open()
+        except Exception as e:
+            log.warning("check_spread %s: market clock check failed: %s", symbol, e)
+            return {"ok": False, "reason": "clock_check_failed", "spread_pct": None}
+
+        if not market_open:
+            return {"ok": True, "reason": "market_closed", "spread_pct": None}
+
+        try:
+            q = self.get_latest_quotes([symbol])[symbol]
+        except Exception as e:
+            log.warning("check_spread %s: quote fetch failed: %s", symbol, e)
+            return {"ok": False, "reason": "quote_unavailable", "spread_pct": None}
+
+        bid = float(getattr(q, "bid_price", 0) or 0)
+        ask = float(getattr(q, "ask_price", 0) or 0)
+        if bid <= 0 or ask <= 0 or ask < bid:
+            return {"ok": False, "reason": "invalid_quote", "spread_pct": None}
+
+        mid = (bid + ask) / 2
+        if mid <= 0:
+            return {"ok": False, "reason": "invalid_quote", "spread_pct": None}
+
+        spread_pct = (ask - bid) / mid
+        if spread_pct > MAX_SPREAD_PCT:
+            return {"ok": False, "reason": "spread_too_wide", "spread_pct": spread_pct}
+        return {"ok": True, "reason": None, "spread_pct": spread_pct}
+
+    def check_crypto_spread(self, symbol: str) -> dict:
+        """Crypto counterpart to check_spread — same MAX_SPREAD_PCT gate,
+        against Alpaca's crypto quote endpoint. No market-closed skip:
+        crypto trades 24/7, so the check always applies."""
+        try:
+            q = self.crypto_data.get_crypto_latest_quote(
+                CryptoLatestQuoteRequest(symbol_or_symbols=symbol)
+            )[symbol]
+        except Exception as e:
+            log.warning("check_crypto_spread %s: quote fetch failed: %s", symbol, e)
+            return {"ok": False, "reason": "quote_unavailable", "spread_pct": None}
+
+        bid = float(getattr(q, "bid_price", 0) or 0)
+        ask = float(getattr(q, "ask_price", 0) or 0)
+        if bid <= 0 or ask <= 0 or ask < bid:
+            return {"ok": False, "reason": "invalid_quote", "spread_pct": None}
+
+        mid = (bid + ask) / 2
+        if mid <= 0:
+            return {"ok": False, "reason": "invalid_quote", "spread_pct": None}
+
+        spread_pct = (ask - bid) / mid
+        if spread_pct > MAX_SPREAD_PCT:
+            return {"ok": False, "reason": "spread_too_wide", "spread_pct": spread_pct}
+        return {"ok": True, "reason": None, "spread_pct": spread_pct}
 
     def get_crypto_price(self, symbol: str) -> float:
         """Latest trade price for a crypto symbol (e.g. 'BTC/USD')."""
@@ -323,6 +396,80 @@ class BrokerClient:
         remaining_cap = max(0.0, max_position_dollars - existing_value)
         return min(remaining_cap, self.buying_power())
 
+    # ── Dry-run short-circuit ────────────────────────────────────────────────
+    def _dry_run_fill(
+        self,
+        *,
+        symbol: str,
+        qty: float | None,
+        notional: float | None,
+        ref_price: float,
+        stop_loss_pct: float,
+        take_profit_pct: float | None,
+        strategy: str | None,
+        spread_pct: float | None,
+    ) -> dict:
+        """DRY_RUN short-circuit for buy()/_buy_fractional(): everything up to
+        this point (spread gate, sizing guardrails) ran against real market
+        data — this just replaces the real order submission + fill poll +
+        stop/target attach with a simulated fill at ref_price, so no order
+        ever reaches Alpaca. Logs what WOULD have been sent and still runs
+        cost_tracker (signal_price == fill_price here, so realized slippage
+        is 0 by construction — this validates the logging pipeline, not real
+        execution cost, until DRY_RUN is turned off).
+        """
+        if qty is None:
+            qty = round(notional / ref_price, 9)
+        if notional is None:
+            notional = round(qty * ref_price, 2)
+        basis = ref_price
+        stop = round(basis * (1 - stop_loss_pct), 2)
+        target = round(basis * (1 + take_profit_pct), 2) if take_profit_pct is not None else None
+
+        log.info(
+            "[DRY_RUN] Would BUY %s qty=%s ($%.2f notional) @ ~$%.2f | SL=%s TP=%s "
+            "-- no order submitted",
+            symbol,
+            qty,
+            notional,
+            basis,
+            stop,
+            target,
+        )
+        trade_logger.log_event(
+            "dry_run_order",
+            strategy or "unknown",
+            symbol,
+            side="buy",
+            qty=qty,
+            notional=notional,
+            ref_price=basis,
+            stop=stop,
+            target=target,
+            spread_pct=spread_pct,
+        )
+        if strategy is not None:
+            cost_tracker.record_fill(
+                strategy=strategy,
+                symbol=symbol,
+                side="buy",
+                signal_price=ref_price,
+                fill_price=basis,
+                qty=qty,
+                spread_pct=spread_pct,
+            )
+
+        return {
+            "order": None,
+            "qty": qty,
+            "price": basis,
+            "stop": stop,
+            "target": target,
+            "stop_attached": True,
+            "target_attached": target is not None,
+            "dry_run": True,
+        }
+
     def buy(
         self,
         symbol: str,
@@ -330,19 +477,43 @@ class BrokerClient:
         shares: int = None,
         stop_loss_pct: float = STOP_LOSS_PCT,
         take_profit_pct: float = TAKE_PROFIT_PCT,
+        strategy: str | None = None,
     ) -> dict:
         """
         Simple market BUY with hard position-sizing guardrails, then attach a
         protective OCO exit (stop + target) priced off the REAL fill price.
 
         Guardrails enforced before every order:
+        0. Bid-ask spread must not exceed MAX_SPREAD_PCT of price (see
+           check_spread) — hard block, applies uniformly across all
+           strategies that route through buy()/_buy_fractional().
         1. Position count must be below MAX_OPEN_POSITIONS (new symbols only).
         2. Order value is clamped to equity * MAX_POSITION_SIZE_PCT, accounting
            for any existing position in the same symbol.
 
-        Pass either dollar_amount OR shares. Returns qty, price (fill basis),
-        stop, target, and stop_attached / target_attached bools.
+        Pass either dollar_amount OR shares. `strategy` (e.g. "breakout",
+        "meanrev") is optional and only used to attribute cost-tracking
+        (slippage) logging — omitting it just means that fill isn't logged
+        to cost_tracker, everything else behaves the same.
+
+        Returns qty, price (fill basis), stop, target, and stop_attached /
+        target_attached bools.
         """
+        # ── Guardrail 0: hard pre-trade spread gate ──────────────────────────
+        spread_check = self.check_spread(symbol)
+        if not spread_check.get("ok"):
+            log.warning(
+                "BUY %s BLOCKED — spread gate: %s (spread=%s)",
+                symbol,
+                spread_check.get("reason"),
+                spread_check.get("spread_pct"),
+            )
+            return {
+                "blocked": True,
+                "reason": spread_check.get("reason", "spread_check_failed"),
+                "spread_pct": spread_check.get("spread_pct"),
+            }
+
         ref_price = self.get_price(symbol)
         equity = self.portfolio_value()
         max_position_dollars = equity * MAX_POSITION_SIZE_PCT
@@ -463,7 +634,13 @@ class BrokerClient:
                     )
                     return {"blocked": True, "reason": "insufficient_cash"}
                 return self._buy_fractional(
-                    symbol, notional, ref_price, stop_loss_pct, take_profit_pct
+                    symbol,
+                    notional,
+                    ref_price,
+                    stop_loss_pct,
+                    take_profit_pct,
+                    strategy=strategy,
+                    spread_pct=spread_check.get("spread_pct"),
                 )
 
             log.warning(
@@ -475,6 +652,18 @@ class BrokerClient:
                 available_cash,
             )
             return {"blocked": True, "reason": "insufficient_cash"}
+
+        if DRY_RUN:
+            return self._dry_run_fill(
+                symbol=symbol,
+                qty=qty,
+                notional=None,
+                ref_price=ref_price,
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
+                strategy=strategy,
+                spread_pct=spread_check.get("spread_pct"),
+            )
 
         # 1. Simple market BUY
         order = self.trade.submit_order(
@@ -524,6 +713,17 @@ class BrokerClient:
             f"| stop_attached={stop_attached} target_attached={target_attached}"
         )
 
+        if strategy is not None and fill_price is not None:
+            cost_tracker.record_fill(
+                strategy=strategy,
+                symbol=symbol,
+                side="buy",
+                signal_price=ref_price,
+                fill_price=fill_price,
+                qty=filled_qty,
+                spread_pct=spread_check.get("spread_pct"),
+            )
+
         return {
             "order": order,
             "qty": filled_qty,
@@ -541,11 +741,25 @@ class BrokerClient:
         ref_price: float,
         stop_loss_pct: float,
         take_profit_pct: float,
+        strategy: str | None = None,
+        spread_pct: float | None = None,
     ) -> dict:
         """Notional (fractional-share) market BUY, then attach a DAY-tif
         protective exit. Mirrors buy()'s whole-share flow above; kept
         separate because the order request and fill-qty math differ
         (notional in/qty out, vs. qty in/qty out)."""
+        if DRY_RUN:
+            return self._dry_run_fill(
+                symbol=symbol,
+                qty=None,
+                notional=notional,
+                ref_price=ref_price,
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
+                strategy=strategy,
+                spread_pct=spread_pct,
+            )
+
         order = self.trade.submit_order(
             MarketOrderRequest(
                 symbol=symbol,
@@ -591,6 +805,17 @@ class BrokerClient:
             f"TP={'None (no cap)' if target is None else target} "
             f"| stop_attached={stop_attached} target_attached={target_attached}"
         )
+
+        if strategy is not None and fill_price is not None:
+            cost_tracker.record_fill(
+                strategy=strategy,
+                symbol=symbol,
+                side="buy",
+                signal_price=ref_price,
+                fill_price=fill_price,
+                qty=filled_qty,
+                spread_pct=spread_pct,
+            )
 
         return {
             "order": order,
