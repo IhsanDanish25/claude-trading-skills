@@ -141,8 +141,26 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
         # Need to BUY more SPY — use notional so fractional shares work
         buy_dollars = info["diff"]
         notional = round(buy_dollars, 2)
+
+        # Clamp to available buying power — sizing off the equity/target diff
+        # alone can exceed actual spendable cash (e.g. PEAD positions eating
+        # into it). Mirrors the guardrail BrokerClient.buy() has for the same
+        # failure mode. Skip (don't submit a sub-minimum order) rather than
+        # let Alpaca reject it for insufficient buying power.
+        available_cash = broker.buying_power()
+        if notional > available_cash:
+            notional = round(available_cash, 2)
+            log.warning(
+                "SPY base BUY CLAMPED to available buying power: $%.2f",
+                notional,
+            )
+
         if notional < 1.0:
-            return {"action": "none", "reason": "below_min_notional", **info}
+            log.warning(
+                "SPY base BUY SKIPPED — insufficient buying power ($%.2f)",
+                available_cash,
+            )
+            return {"action": "insufficient_cash", "reason": "insufficient buying power", **info}
         est_qty = round(notional / spy_price, 4)
         log.info(f"SPY base: BUYING ${notional:,.2f} notional (~{est_qty} shares, underweight)")
         try:

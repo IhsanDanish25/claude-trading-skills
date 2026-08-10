@@ -1,14 +1,20 @@
 """Unit tests for rebalance_to_spy()'s BUY-branch buying-power guardrail.
 
-rebalance_to_spy() sized its BUY branch off the equity-vs-target dollar diff
-alone (qty = max(1, int(buy_dollars / spy_price))) and submitted straight to
+rebalance_to_spy() sizes its BUY branch off the equity-vs-target dollar diff
+alone and submits a notional (dollar-amount) order straight to
 broker.trade.submit_order(), never checking BrokerClient.buying_power() —
-unlike BrokerClient.buy(), which got that exact guardrail in a prior fix
+unlike BrokerClient.buy(), which has that exact guardrail
 (core/tests/test_broker_buy_cash_cap.py). On an already-invested account,
 buying_power can be far smaller than the equity-sized diff, so this path
-could submit a BUY Alpaca rejects with "insufficient buying power". These
-tests exercise the added guardrail that clamps (or skips) the SPY rebalance
-BUY against BrokerClient.buying_power().
+could submit a BUY Alpaca rejects with "insufficient buying power".
+
+History: a buying-power clamp was added in 41befa3, then silently dropped
+two days later by a388d9b when the BUY branch was refactored from whole-share
+qty to notional/fractional ordering (a separate, legitimate fix for accounts
+too small to afford one SPY share) — the refactor didn't carry the guard
+forward. These tests exercise the guard re-added against the current notional
+model: clamp the notional to available buying power, or skip entirely if
+buying power can't cover even the $1 minimum notional Alpaca accepts.
 
 Pure-logic tests: no real BrokerClient is constructed, just a duck-typed fake
 exposing the methods rebalance_to_spy() calls.
@@ -75,27 +81,45 @@ def test_rebalance_buy_unaffected_when_cash_covers_order(monkeypatch):
     result = spy_base.rebalance_to_spy(broker)
 
     assert result["action"] == "buy"
-    assert result["qty"] == 152  # int(90_000 / 590)
-    assert broker.trade.submitted[-1].qty == 152
+    assert result["notional"] == 90_000.0
+    assert result["qty"] == round(90_000.0 / 590.0, 4)
+    assert broker.trade.submitted[-1].notional == 90_000.0
 
 
 def test_rebalance_buy_clamped_when_order_exceeds_buying_power(monkeypatch):
-    # Sized qty (152 sh, ~$89.7k) would exceed the $5k actually available.
+    # Sized notional (~$90k) would exceed the $5k actually available.
     _patch_spy_config(monkeypatch)
     broker = _FakeBroker(equity=100_000.0, buying_power=5_000.0, spy_price=590.0)
 
     result = spy_base.rebalance_to_spy(broker)
 
     assert result["action"] == "buy"
-    assert result["qty"] == 8  # int(5_000 / 590)
-    assert broker.trade.submitted[-1].qty == 8
+    assert result["notional"] == 5_000.0
+    assert result["qty"] == round(5_000.0 / 590.0, 4)
+    assert broker.trade.submitted[-1].notional == 5_000.0
 
 
-def test_rebalance_buy_skipped_when_cannot_afford_one_share(monkeypatch):
-    # Regression: this is the exact shape of the live bug — 1 share forced
-    # via max(1, ...) against buying power too small to afford it.
+def test_rebalance_buy_uses_full_cash_when_below_share_price(monkeypatch):
+    # $263.43 can't afford a whole SPY share (~$590), but notional/fractional
+    # ordering means it's still a perfectly valid buy — this is exactly the
+    # account size a388d9b's notional refactor was meant to support. Must NOT
+    # be treated as insufficient cash.
     _patch_spy_config(monkeypatch)
     broker = _FakeBroker(equity=100_000.0, buying_power=263.43, spy_price=590.0)
+
+    result = spy_base.rebalance_to_spy(broker)
+
+    assert result["action"] == "buy"
+    assert result["notional"] == 263.43
+    assert broker.trade.submitted[-1].notional == 263.43
+
+
+def test_rebalance_buy_skipped_when_below_min_notional(monkeypatch):
+    # Regression: buying power too small for even Alpaca's $1 minimum
+    # notional must skip cleanly instead of submitting an order Alpaca
+    # will reject.
+    _patch_spy_config(monkeypatch)
+    broker = _FakeBroker(equity=100_000.0, buying_power=0.50, spy_price=590.0)
 
     result = spy_base.rebalance_to_spy(broker)
 
