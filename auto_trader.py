@@ -666,8 +666,12 @@ def wait_for_fill(client, order_id, timeout=FILL_WAIT_SECS, poll=3):
     except Exception:
         return 0
 
-def attach_stop(client, ticker, qty, stop_price, parent_order_id, attempts=3):
-    """Attach a GTC stop-loss to a filled position. Returns order or None."""
+def attach_stop(client, ticker, qty, stop_price, parent_order_id, attempts=3,
+                 time_in_force=TimeInForce.GTC):
+    """Attach a standalone stop-loss to a filled position (not OCO/bracket).
+    Alpaca rejects GTC stop orders on fractional-qty positions (error
+    42210000, "fractional orders must be DAY orders") — pass
+    time_in_force=TimeInForce.DAY for fractional qty. Returns order or None."""
     if DRY_RUN:
         logger.info("  [DRY-RUN] would attach stop @ $%.2f for %s", stop_price, ticker)
         return None
@@ -680,11 +684,12 @@ def attach_stop(client, ticker, qty, stop_price, parent_order_id, attempts=3):
                     qty=qty,
                     side=OrderSide.SELL,
                     stop_price=round(stop_price, 2),
-                    time_in_force=TimeInForce.GTC,
+                    time_in_force=time_in_force,
                     client_order_id=f"sl-{parent_order_id}",
                 )
             )
-            logger.info("  ↳ Stop-loss attached @ $%.2f (ID:%s)", stop_price, stop_order.id)
+            logger.info("  ↳ Stop-loss attached @ $%.2f %s (ID:%s)",
+                        stop_price, time_in_force.value, stop_order.id)
             return stop_order
         except Exception as e:
             logger.error("  ↳ Stop-loss attach FAILED for %s (attempt %d/%d): %s",
@@ -788,7 +793,13 @@ def _place_trade(client, data_client, ticker, price, stop_pct, take_profit_pct, 
                         "Claude:%s/10 | ID:%s",
                         notional, ticker, filled_qty_f, stop, take_profit,
                         analysis.get("confidence"), order.id)
-            # Alpaca doesn't support GTC stops on fractional — skip stop, attach take-profit only
+            # Fractional positions reject GTC (Alpaca requires DAY tif for
+            # fractional stop orders) and OCO/bracket + fractional qty is
+            # unreliable per Alpaca's own community reports, so stop and
+            # take-profit are attached as two independent standalone orders,
+            # same as the whole-share path below, just with DAY tif on the stop.
+            attach_stop(client, ticker, round(filled_qty_f, 9), stop, str(order.id),
+                        time_in_force=TimeInForce.DAY)
             attach_take_profit(client, ticker, round(filled_qty_f, 9), take_profit, str(order.id))
         else:
             order_req = LimitOrderRequest(
