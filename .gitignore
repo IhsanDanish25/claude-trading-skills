@@ -22,6 +22,8 @@ env/
 !.claude/settings.json
 !.claude/hooks/
 .env
+.env.backup
+.env.backup2
 .envrc
 .mcp.json
 

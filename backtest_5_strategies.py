@@ -73,6 +73,14 @@ STRATEGY_CONFIGS = {
         "min_avg_volume_attr": "TIMESERIES_MIN_AVG_VOLUME",
         "min_score": 0.0,
     },
+    "macross": {
+        "label": "MA Crossover",
+        "stop_pct_attr": "MACROSS_STOP_PCT",
+        "hold_days_attr": "MACROSS_HOLD_DAYS",
+        "min_price_attr": "MACROSS_MIN_PRICE",
+        "min_avg_volume_attr": "MACROSS_MIN_AVG_VOLUME",
+        "min_score": 0.0,
+    },
 }
 
 # insider/squeeze are blocked by FMP PLAN (not network): /stable/insider-trading
@@ -145,6 +153,10 @@ def _run_satellite_strategy(
         )
     elif key == "timeseries":
         signals = satellite_signals.get_historical_timeseries_signals(
+            store, universe, window_start, window_end
+        )
+    elif key == "macross":
+        signals = satellite_signals.get_historical_macross_signals(
             store, universe, window_start, window_end
         )
     else:
@@ -320,7 +332,7 @@ def main() -> int:
     os.makedirs(out_dir, exist_ok=True)
 
     results: dict[str, dict] = {}
-    for key in ("breakout", "meanrev", "earnmom", "timeseries"):
+    for key in ("breakout", "meanrev", "earnmom", "timeseries", "macross"):
         try:
             results[key] = _run_satellite_strategy(
                 key, store, universe, args.start_equity, args.slippage_bps, out_dir
@@ -370,12 +382,12 @@ def main() -> int:
 def _print_summary_table(results: dict[str, dict]) -> None:
     line = "=" * 92
     print("\n" + line)
-    print("  5-STRATEGY BACKTEST SUMMARY")
+    print("  7-STRATEGY BACKTEST SUMMARY")
     print(line)
     header = f"  {'Strategy':<20}{'Status':<20}{'Sharpe':>8}{'Win%':>8}{'p-value':>10}{'Trades':>9}"
     print(header)
     print("  " + "-" * 88)
-    for key in ("breakout", "meanrev", "earnmom", "insider", "squeeze"):
+    for key in ("breakout", "meanrev", "earnmom", "timeseries", "macross", "insider", "squeeze"):
         r = results[key]
         label = r.get("label", key)
         status = r.get("status", "?")

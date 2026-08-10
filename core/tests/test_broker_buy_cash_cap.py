@@ -53,6 +53,9 @@ def _make_broker(
     broker.buying_power = lambda: buying_power
     broker.get_position = lambda symbol: existing_position
     broker.position_count = lambda: position_count
+    # These tests exercise the cash-cap guardrail specifically; the spread
+    # gate has its own dedicated coverage in test_broker_spread_check.py.
+    broker.check_spread = lambda symbol: {"ok": True, "reason": None, "spread_pct": 0.001}
     broker.is_market_open = lambda: True
     broker.attach_stop_target = lambda symbol, qty, stop, target: (True, True)
     return broker

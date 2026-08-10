@@ -36,6 +36,15 @@ PAPER_TRADE = (
     == "true"
 )
 
+# Dry-run mode: runs the full live pipeline (signal, spread check, cost
+# tracker) against real market data, but BrokerClient.buy()/_buy_fractional()
+# short-circuit right before order submission — no order ever reaches Alpaca.
+# Introduced because the paper trading account was deleted (2026-08-01), so
+# this is the only way to validate the pipeline end-to-end without risking
+# real capital. Set DRY_RUN=true in Railway secrets, run for a few trading
+# days, confirm clean logs, then unset before real orders resume.
+DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
+
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 
@@ -142,7 +151,10 @@ WATCHLIST = [
 ]
 
 # ── Strategy mode (comma-separated, run in order listed) ─────────────────────
-# Supported: pead, meanrev, insider, squeeze, breakout, earnmom, gapfill, momentum, sector, vcp
+# Supported: pead, meanrev, insider, squeeze, breakout, earnmom, gapfill, momentum, sector, vcp, macross
+# macross (MA crossover, trend-following) added 2026-08 — opt-in, unvalidated
+# until its own standalone backtest clears the same bar as breakout/meanrev/
+# earnmom (see backtest_5_strategies.py). Do not add to the default list below.
 # Recommended: STRATEGY_MODE=breakout,meanrev,earnmom,insider
 #
 # 2026-08-06 reconciliation (backtest_5_strategies.py, fixed sizing per
@@ -242,6 +254,26 @@ BREAKOUT_MIN_PRICE = float(os.environ.get("BREAKOUT_MIN_PRICE", "10.0"))
 BREAKOUT_VOL_MULT = float(os.environ.get("BREAKOUT_VOL_MULT", "1.5"))
 BREAKOUT_MIN_AVG_VOLUME = float(os.environ.get("BREAKOUT_MIN_AVG_VOLUME", "500000"))
 BREAKOUT_LIMIT = int(os.environ.get("BREAKOUT_LIMIT", "5"))
+
+# ── MA Crossover params (20/50-day golden cross, volume-confirmed) ──────────
+# Pure trend-following: unlike breakout (resistance level), meanrev (RSI
+# extreme), or earnmom (earnings catalyst), this reacts only to two moving
+# averages agreeing the intermediate trend just turned up. No hard target —
+# time/trail-managed exit, same as breakout, so a real trend is left to run.
+MACROSS_FAST_PERIOD = int(os.environ.get("MACROSS_FAST_PERIOD", "20"))
+MACROSS_SLOW_PERIOD = int(os.environ.get("MACROSS_SLOW_PERIOD", "50"))
+# How many trading days back a golden cross is still considered "fresh"
+# enough to act on — 0 would mean today only, misses the setup entirely.
+MACROSS_MAX_DAYS_SINCE_CROSS = int(os.environ.get("MACROSS_MAX_DAYS_SINCE_CROSS", "3"))
+# Cross-day volume vs. its own trailing 20-day average — filters out
+# low-conviction crosses that drift through the average on thin volume.
+MACROSS_MIN_VOLUME_RATIO = float(os.environ.get("MACROSS_MIN_VOLUME_RATIO", "1.2"))
+MACROSS_HOLD_DAYS = int(os.environ.get("MACROSS_HOLD_DAYS", "21"))
+MACROSS_STOP_PCT = float(os.environ.get("MACROSS_STOP_PCT", "0.06"))
+MACROSS_SIZE_PCT = float(os.environ.get("MACROSS_SIZE_PCT", "0.04"))
+MACROSS_MIN_PRICE = float(os.environ.get("MACROSS_MIN_PRICE", "10.0"))
+MACROSS_MIN_AVG_VOLUME = float(os.environ.get("MACROSS_MIN_AVG_VOLUME", "500000"))
+MACROSS_LIMIT = int(os.environ.get("MACROSS_LIMIT", "5"))
 
 # ── Earnings Momentum params (beat 8-45 days ago, still drifting up) ────────
 EARNMOM_HOLD_DAYS = int(os.environ.get("EARNMOM_HOLD_DAYS", "35"))

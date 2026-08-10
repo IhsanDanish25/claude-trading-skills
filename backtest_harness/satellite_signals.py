@@ -30,6 +30,12 @@ from core.config import (
     GAPFILL_MIN_GAP_PCT,
     GAPFILL_MIN_PRICE,
     GAPFILL_MIN_VOLUME,
+    MACROSS_FAST_PERIOD,
+    MACROSS_MAX_DAYS_SINCE_CROSS,
+    MACROSS_MIN_AVG_VOLUME,
+    MACROSS_MIN_PRICE,
+    MACROSS_MIN_VOLUME_RATIO,
+    MACROSS_SLOW_PERIOD,
     MEANREV_BB_THRESHOLD,
     MEANREV_MIN_AVG_VOLUME,
     MEANREV_MIN_PRICE,
@@ -589,6 +595,124 @@ def get_historical_timeseries_signals(
                     "date": d.isoformat(),
                     "surprise_pct": round(cached["confidence"] * 100, 2),
                     "predicted_pct_change": cached["predicted_pct_change"],
+                }
+            )
+
+    out.sort(key=lambda r: (r["date"], -r["surprise_pct"]))
+    return out
+
+
+def _sma_series(closes: list[float], n: int) -> list[float | None]:
+    """SMA(n) at every index of `closes` (None where insufficient history).
+    Mirrors core.macross_screener._sma_series exactly."""
+    out: list[float | None] = []
+    running: list[float] = []
+    for c in closes:
+        running.append(c)
+        out.append(_sma(running, n))
+    return out
+
+
+def _cross_idx_asof(
+    fast: list[float | None], slow: list[float | None], i: int, max_days_back: int
+) -> int | None:
+    """Index of the most recent bar at/before `i` where fast crossed from <=
+    slow to > slow, if within `max_days_back` bars of `i`. Mirrors
+    core.macross_screener._find_recent_cross's logic, bounded to `i` instead
+    of the series end (point-in-time: `i` is "today" in the day-by-day walk)."""
+    for days_back in range(0, max_days_back + 1):
+        j = i - days_back
+        if j < 1:
+            break
+        f_now, s_now = fast[j], slow[j]
+        f_prev, s_prev = fast[j - 1], slow[j - 1]
+        if None in (f_now, s_now, f_prev, s_prev):
+            continue
+        if f_prev <= s_prev and f_now > s_now:
+            return j
+    return None
+
+
+def get_historical_macross_signals(
+    store,
+    symbols: list[str],
+    start_date,
+    end_date,
+) -> list[dict]:
+    """Replica of core.macross_screener.screen() (20/50d golden cross,
+    volume-confirmed), walked day-by-day.
+
+    Filters (identical to live): price>=MACROSS_MIN_PRICE, 20d avg
+    volume>=MACROSS_MIN_AVG_VOLUME, a fast/slow SMA golden cross within the
+    last MACROSS_MAX_DAYS_SINCE_CROSS trading days, price still above the
+    slow SMA, and cross-day volume>=MACROSS_MIN_VOLUME_RATIO x its own
+    trailing average. Score rewards freshness, volume confirmation, and SMA
+    separation — same weighting as the live scorer.
+
+    Returns rows sorted by (date, -score): {symbol, date, surprise_pct}
+    (field name kept for drop-in reuse with earnings_engine.run_earnings_simulation).
+    """
+    start = (
+        start_date
+        if isinstance(start_date, datetime.date)
+        else datetime.date.fromisoformat(start_date)
+    )
+    end = end_date if isinstance(end_date, datetime.date) else datetime.date.fromisoformat(end_date)
+    min_bars = MACROSS_SLOW_PERIOD + MACROSS_MAX_DAYS_SINCE_CROSS + 1
+    out: list[dict] = []
+
+    for sym in symbols:
+        bars = store.series.get(sym, [])
+        if len(bars) < min_bars:
+            continue
+        closes = [b["close"] for b in bars]
+        volumes = [b["volume"] for b in bars]
+
+        fast_series = _sma_series(closes, MACROSS_FAST_PERIOD)
+        slow_series = _sma_series(closes, MACROSS_SLOW_PERIOD)
+
+        for i in range(min_bars - 1, len(bars)):
+            d = datetime.date.fromisoformat(bars[i]["date"])
+            if d < start or d > end:
+                continue
+            price = closes[i]
+            if price < MACROSS_MIN_PRICE:
+                continue
+            avg_vol = _avg(volumes[max(0, i - 19) : i + 1])
+            if avg_vol < MACROSS_MIN_AVG_VOLUME:
+                continue
+
+            cross_idx = _cross_idx_asof(fast_series, slow_series, i, MACROSS_MAX_DAYS_SINCE_CROSS)
+            if cross_idx is None:
+                continue
+
+            sma_fast, sma_slow = fast_series[i], slow_series[i]
+            if sma_fast is None or sma_slow is None or sma_fast <= sma_slow:
+                continue  # cross has since reversed — stale signal
+            if price <= sma_slow:
+                continue
+
+            days_since_cross = i - cross_idx
+            cross_vol = volumes[cross_idx] if cross_idx < len(volumes) else 0.0
+            cross_day_avg_vol = _avg(volumes[max(0, cross_idx - 19) : cross_idx + 1])
+            volume_ratio = round(cross_vol / cross_day_avg_vol, 2) if cross_day_avg_vol > 0 else 0.0
+            if volume_ratio < MACROSS_MIN_VOLUME_RATIO:
+                continue
+
+            sma_separation_pct = (sma_fast - sma_slow) / sma_slow * 100.0
+            score = (
+                max(0.0, MACROSS_MAX_DAYS_SINCE_CROSS - days_since_cross) * 10.0
+                + volume_ratio * 5.0
+                + sma_separation_pct
+            )
+
+            out.append(
+                {
+                    "symbol": sym,
+                    "date": bars[i]["date"],
+                    "surprise_pct": round(score, 2),
+                    "days_since_cross": days_since_cross,
+                    "volume_ratio": volume_ratio,
                 }
             )
 

@@ -15,7 +15,7 @@ import json
 import pytz
 
 from circuit_breaker import CircuitBreaker, EmergencyLiquidation, TradingHalted
-from core import config, logger, timeseries_signal, trade_logger
+from core import config, cost_tracker, logger, timeseries_signal, trade_logger
 from core.broker import BrokerClient
 from core.earnings_screener import screen_earnings
 from core.notifier import send_trade_alert
@@ -216,6 +216,11 @@ try:
 except Exception as e:
     log.error("Sector screener import failed: %s", e)
     screen_sector = None
+try:
+    from core.macross_screener import screen as screen_macross
+except Exception as e:
+    log.error("MACross screener import failed: %s", e)
+    screen_macross = None
 
 
 def _build_breaker(broker: BrokerClient, day_start_equity: float) -> CircuitBreaker:
@@ -510,6 +515,7 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
                 dollar_amount=amount,
                 stop_loss_pct=config.PEAD_STOP_PCT,
                 take_profit_pct=None,  # no hard target (time-managed 60d exit)
+                strategy="pead",
             )
             if result.get("blocked"):
                 log.warning(f"✗ {sym} buy blocked: {result.get('reason')}")
@@ -706,6 +712,7 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today, sector_count
                 dollar_amount=amount,
                 stop_loss_pct=config.MEANREV_STOP_PCT,
                 take_profit_pct=None,  # no hard target (time-managed exit)
+                strategy="meanrev",
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -879,6 +886,7 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today, sector_count
                 dollar_amount=amount,
                 stop_loss_pct=config.INSIDER_STOP_PCT,
                 take_profit_pct=config.INSIDER_TARGET_PCT,
+                strategy="insider",
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1049,6 +1057,7 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today, sector_count
                 dollar_amount=amount,
                 stop_loss_pct=config.SQUEEZE_STOP_PCT,
                 take_profit_pct=None,
+                strategy="squeeze",
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1220,6 +1229,7 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today, sector_coun
                 dollar_amount=amount,
                 stop_loss_pct=config.BREAKOUT_STOP_PCT,
                 take_profit_pct=None,
+                strategy="breakout",
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1300,6 +1310,182 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today, sector_coun
                 break
         except Exception as e:
             log.error(f"  ✗ Breakout {sym} failed: {e}")
+
+
+def _run_macross(broker, cb, pv, slots, held, already_bought_today, sector_counts):
+    """MA Crossover: 20/50d golden cross, volume-confirmed. Hold ~21d.
+
+    Opt-in only — not in the default STRATEGY_MODE. See core/config.py's
+    STRATEGY_MODES comment: unvalidated until its own standalone backtest
+    clears the same bar as breakout/meanrev/earnmom.
+    """
+    if screen_macross is None:
+        log.warning("MACross: screener not loaded — see import error above — skipping")
+        return
+    log.info("MACross: screening for 20/50d golden crosses...")
+    candidates = screen_macross()
+    log.info(f"MACross: {len(candidates)} candidates")
+    if not candidates:
+        return
+
+    for c in candidates:
+        sym = c["symbol"]
+        size_pct = config.MACROSS_SIZE_PCT
+        amount = pv * size_pct
+
+        trade_logger.log_event(
+            "signal_detected",
+            "macross",
+            sym,
+            price=c["price"],
+            sma_fast=c["sma_fast"],
+            sma_slow=c["sma_slow"],
+            days_since_cross=c["days_since_cross"],
+            volume_ratio=c["volume_ratio"],
+            score=c["score"],
+        )
+
+        if sym in held:
+            log.info(f"  ✗ {sym} SKIP — already holding")
+            trade_logger.log_event(
+                "order_skipped", "macross", sym, gate="already_held", reason="already holding"
+            )
+            continue
+        if sym in already_bought_today:
+            log.info(f"  ✗ {sym} SKIP — already bought today")
+            trade_logger.log_event(
+                "order_skipped", "macross", sym, gate="idempotency", reason="already bought today"
+            )
+            continue
+
+        # Sector concentration guard
+        _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
+        if not _sector_gate(sym, sector_counts, _fkp, "macross", log):
+            continue
+
+        log.info(
+            f"MACross BUY {sym} | price=${c['price']:.2f} "
+            f"cross {c['days_since_cross']}d ago vol={c['volume_ratio']}x "
+            f"score={c['score']:.0f} | ${amount:,.0f}"
+        )
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"  ✗ {sym} SKIP — cannot free cash")
+                trade_logger.log_event(
+                    "gate_failed",
+                    "macross",
+                    sym,
+                    gate="free_cash",
+                    amount=round(amount, 2),
+                    reason="cannot free cash from SPY base",
+                )
+                continue
+            trade_logger.log_event(
+                "gate_passed", "macross", sym, gate="free_cash", amount=round(amount, 2)
+            )
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+                trade_logger.log_event(
+                    "gate_passed", "macross", sym, gate="circuit_breaker", amount=round(amount, 2)
+                )
+            except EmergencyLiquidation as emerg:
+                log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
+                trade_logger.log_event(
+                    "gate_failed", "macross", sym, gate="emergency_liquidation", reason=str(emerg)
+                )
+                raise
+            except TradingHalted as halt:
+                log.warning(f"  ✗ {sym} circuit breaker: {halt}")
+                trade_logger.log_event(
+                    "gate_failed", "macross", sym, gate="circuit_breaker", reason=str(halt)
+                )
+                continue
+            result = broker.buy(
+                sym,
+                dollar_amount=amount,
+                stop_loss_pct=config.MACROSS_STOP_PCT,
+                take_profit_pct=None,
+            )
+            if result.get("blocked"):
+                log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
+                trade_logger.log_event(
+                    "order_skipped", "macross", sym, gate="broker_buy", reason=result.get("reason")
+                )
+                continue
+            if not result.get("stop_attached"):
+                broker.sell(sym, qty=result["qty"])
+                trade_logger.log_event(
+                    "order_skipped",
+                    "macross",
+                    sym,
+                    gate="stop_attach",
+                    reason="stop-loss attach failed — flattened",
+                    qty=result["qty"],
+                    price=result["price"],
+                )
+                continue
+
+            log.info(
+                f"  ✓ MACross {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                f"SL={result['stop']} (hold {config.MACROSS_HOLD_DAYS}d)"
+            )
+            trade_logger.log_event(
+                "order_placed",
+                "macross",
+                sym,
+                qty=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                amount=round(amount, 2),
+                hold_days=config.MACROSS_HOLD_DAYS,
+            )
+
+            pead_track(
+                sym,
+                result["price"],
+                surprise_pct=c.get("score", 0),
+                report_date=datetime.date.today().isoformat(),
+                strategy="macross",
+                hold_days=config.MACROSS_HOLD_DAYS,
+            )
+            send_trade_alert(
+                action="BUY",
+                ticker=sym,
+                shares=result["qty"],
+                price=result["price"],
+                stop=result["stop"],
+                target=None,
+                reason=(
+                    f"MACross {config.MACROSS_FAST_PERIOD}/{config.MACROSS_SLOW_PERIOD}d "
+                    f"cross {c['days_since_cross']}d ago, vol={c['volume_ratio']}x"
+                ),
+            )
+            _mark_bought(sym, result)
+            _append_trade_log(
+                {
+                    "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                    "symbol": sym,
+                    "side": "buy",
+                    "qty": result.get("qty"),
+                    "price": result.get("price"),
+                    "stop": result.get("stop"),
+                    "target": None,
+                    "strategy": "macross",
+                    "sma_fast": c["sma_fast"],
+                    "sma_slow": c["sma_slow"],
+                    "days_since_cross": c["days_since_cross"],
+                    "volume_ratio": c["volume_ratio"],
+                    "exit_date": None,
+                    "exit_price": None,
+                    "pnl_pct": None,
+                }
+            )
+            slots[0] -= 1
+            if slots[0] <= 0:
+                log.info("Slots exhausted — MACross stopping")
+                break
+        except Exception as e:
+            log.error(f"  ✗ MACross {sym} failed: {e}")
 
 
 def _run_earnmom(broker, cb, pv, slots, held, already_bought_today, sector_counts):
@@ -1390,6 +1576,7 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today, sector_count
                 dollar_amount=amount,
                 stop_loss_pct=config.EARNMOM_STOP_PCT,
                 take_profit_pct=config.EARNMOM_TARGET_PCT,
+                strategy="earnmom",
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1537,6 +1724,7 @@ def _run_gapfill(broker, cb, pv, slots, held, already_bought_today, sector_count
             dollar_amount=amount,
             stop_loss_pct=config.GAPFILL_STOP_PCT,
             take_profit_pct=None,
+            strategy="gapfill",
         )
         if result.get("blocked"):
             log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1648,6 +1836,7 @@ def _run_momentum(broker, cb, pv, slots, held, already_bought_today, sector_coun
             dollar_amount=amount,
             stop_loss_pct=config.MOMENTUM_STOP_PCT,
             take_profit_pct=config.MOMENTUM_TAKE_PROFIT_PCT,
+            strategy="momentum",
         )
         if result.get("blocked"):
             log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1744,6 +1933,7 @@ def _run_sector(broker, cb, pv, slots, held, already_bought_today, sector_counts
             dollar_amount=amount,
             stop_loss_pct=config.SECTOR_STOP_PCT,
             take_profit_pct=config.SECTOR_TAKE_PROFIT_PCT,
+            strategy="sector",
         )
         if result.get("blocked"):
             log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -1914,6 +2104,7 @@ def _run_vcp(broker, cb, pv, slots, held, already_bought_today, sector_counts):
                 dollar_amount=amount,
                 stop_loss_pct=config.VCP_STOP_PCT,
                 take_profit_pct=None,
+                strategy="vcp",
             )
             if result.get("blocked"):
                 log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
@@ -2038,6 +2229,47 @@ def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts
                 log.warning(f"  ✗ {sym} SKIP — notional ${notional:.2f} below $1 minimum")
                 continue
 
+            spread_check = broker.check_crypto_spread(sym)
+            if not spread_check.get("ok"):
+                log.warning(
+                    f"  ✗ {sym} SKIP — spread gate: {spread_check.get('reason')} "
+                    f"(spread={spread_check.get('spread_pct')})"
+                )
+                trade_logger.log_event(
+                    "order_skipped",
+                    "crypto",
+                    sym,
+                    gate="spread_check",
+                    reason=spread_check.get("reason"),
+                    spread_pct=spread_check.get("spread_pct"),
+                )
+                continue
+
+            if config.DRY_RUN:
+                log.info(
+                    f"[DRY_RUN] Would BUY {sym} ${notional:.2f} notional @ ~${c['price']:,.2f} "
+                    "-- no order submitted"
+                )
+                trade_logger.log_event(
+                    "dry_run_order",
+                    "crypto",
+                    sym,
+                    side="buy",
+                    notional=notional,
+                    ref_price=c["price"],
+                    spread_pct=spread_check.get("spread_pct"),
+                )
+                cost_tracker.record_fill(
+                    strategy="crypto",
+                    symbol=sym,
+                    side="buy",
+                    signal_price=c["price"],
+                    fill_price=c["price"],
+                    qty=round(notional / c["price"], 9),
+                    spread_pct=spread_check.get("spread_pct"),
+                )
+                continue
+
             order = broker.trade.submit_order(
                 MarketOrderRequest(
                     symbol=sym,
@@ -2066,6 +2298,17 @@ def _run_crypto(broker, cb, pv, slots, held, already_bought_today, sector_counts
             basis = fill_price or c["price"]
             if filled_qty <= 0:
                 filled_qty = round(notional / basis, 9)
+
+            if fill_price is not None:
+                cost_tracker.record_fill(
+                    strategy="crypto",
+                    symbol=sym,
+                    side="buy",
+                    signal_price=c["price"],
+                    fill_price=fill_price,
+                    qty=filled_qty,
+                    spread_pct=spread_check.get("spread_pct"),
+                )
 
             stop = round(basis * (1 - config.VCP_STOP_PCT), 2)
             stop_attached, _ = broker.attach_stop_target(sym, filled_qty, stop, None)
@@ -2122,6 +2365,7 @@ STRATEGY_HANDLERS = {
     "sector": _run_sector,
     "vcp": _run_vcp,
     "crypto": _run_crypto,
+    "macross": _run_macross,
 }
 
 
