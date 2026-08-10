@@ -22,3 +22,6 @@ requests>=2.31.0
 pandas>=2.0.0
 numpy>=1.26.0
 finvizfinance>=0.14.0
+
+# ── Backtesting (backtest_harness/, backtest_5_strategies.py) ───────────────
+matplotlib>=3.8.0   # equity-curve plots — was an undeclared dependency; backtests/*.py crashed without it
