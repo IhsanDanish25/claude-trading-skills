@@ -62,7 +62,7 @@ def run():
         return
 
     # ── Screen candidates ──────────────────────────────────────────────────
-    candidates = screen_csp_candidates(broker, min_premium=10)
+    candidates = screen_csp_candidates(broker, min_premium_pct=0.30)
     log.info(f"  Candidates: {len(candidates)}")
 
     best = pick_best(candidates)

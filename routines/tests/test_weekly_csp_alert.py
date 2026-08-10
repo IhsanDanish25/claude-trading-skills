@@ -66,7 +66,7 @@ def _run_csp_execution(monkeypatch, tmp_path):
     monkeypatch.setattr(fmp_module, "get_market_breadth", _raise_breadth_error)
 
     best = _best_pick()
-    monkeypatch.setattr(weekly_csp, "screen_csp_candidates", lambda broker, min_premium=10: [best])
+    monkeypatch.setattr(weekly_csp, "screen_csp_candidates", lambda broker, min_premium_pct=0.30: [best])
     monkeypatch.setattr(weekly_csp, "pick_best", lambda candidates: best)
 
     broker = _make_broker()
@@ -109,7 +109,7 @@ def test_regime_classifier_selects_the_correct_bucket_not_always_avoid_csp(monke
     branch (not the exception fallback) for the full threshold range."""
     monkeypatch.setattr(weekly_csp, "STATE_FILE", str(tmp_path / "weekly_csp_order.json"))
     monkeypatch.setattr(weekly_csp.config, "validate", lambda: None)
-    monkeypatch.setattr(weekly_csp, "screen_csp_candidates", lambda broker, min_premium=10: [])
+    monkeypatch.setattr(weekly_csp, "screen_csp_candidates", lambda broker, min_premium_pct=0.30: [])
     monkeypatch.setattr(weekly_csp, "pick_best", lambda candidates: None)
     monkeypatch.setattr(weekly_csp, "BrokerClient", lambda: _make_broker())
 
