@@ -55,11 +55,15 @@ def cancel_open_sell_orders(broker, symbol: str) -> int:
 
 def safe_attach_oco(broker, symbol: str, qty: int, stop: float, target: float,
                      submit_fn: Callable[[], object],
-                     max_retries: int = 2, retry_delay: float = 1.0) -> bool:
+                     max_retries: int = 2, retry_delay: float = 1.0) -> object:
     """Call submit_fn() (the raw OCO order submission), retrying on Alpaca's
     40310000 "insufficient qty" failure by cancelling stale open sell orders
     for symbol first. Any other exception is NOT retried and re-raises
     immediately. Re-raises once max_retries is exhausted.
+
+    Returns submit_fn()'s return value (the submitted Order) so callers can
+    verify the specific order that ended up live, rather than re-deriving it
+    from a symbol-wide list scan later.
 
     stop/target are accepted (not used directly here) so log messages have
     the full context of what was being attached when a retry happens.
@@ -67,8 +71,7 @@ def safe_attach_oco(broker, symbol: str, qty: int, stop: float, target: float,
     attempt = 0
     while True:
         try:
-            submit_fn()
-            return True
+            return submit_fn()
         except Exception as e:
             if not _is_insufficient_qty_error(e) or attempt >= max_retries:
                 raise

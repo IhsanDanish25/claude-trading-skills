@@ -299,7 +299,7 @@ class BrokerClient:
 
         def _submit():
             if target is not None:
-                self.trade.submit_order(
+                order = self.trade.submit_order(
                     LimitOrderRequest(
                         symbol=symbol,
                         qty=qty,
@@ -314,7 +314,7 @@ class BrokerClient:
                     f"  ↳ OCO attached ({tif.value}): stop @ ${stop:.2f} / target @ ${target:.2f} x{qty} [{symbol}]"
                 )
             else:
-                self.trade.submit_order(
+                order = self.trade.submit_order(
                     StopOrderRequest(
                         symbol=symbol,
                         qty=qty,
@@ -328,9 +328,10 @@ class BrokerClient:
                 log.info(
                     f"  ↳ SIMPLE STOP attached ({tif.value}, no cap): stop @ ${stop:.2f} x{qty} [{symbol}]"
                 )
+            return order
 
         try:
-            safe_attach_oco(self, symbol, qty, stop, target, _submit)
+            submitted = safe_attach_oco(self, symbol, qty, stop, target, _submit)
         except Exception as e:
             log.error(f"  ↳ Order attach FAILED [{symbol}]: {e}")
             return False, False
@@ -339,9 +340,15 @@ class BrokerClient:
         # request — it does NOT prove the order survived Alpaca's async risk
         # checks (e.g. wash-trade / PDT / not-yet-settled-buy), which can
         # accept-then-reject an order moments after the synchronous response.
-        # Poll Alpaca's own open-orders list to confirm the stop is actually
-        # resting there before reporting success to callers.
-        if not self._verify_stop_live(symbol):
+        # Verify by fetching the SPECIFIC order we just submitted (by ID),
+        # not by fuzzy-matching against the open-orders list: scanning that
+        # list for a "stop"-ish type raced Alpaca's own list-propagation lag
+        # and repeatedly flattened live positions (TSL/NVDA 2026-08-11) even
+        # though order history later confirmed the attach had succeeded —
+        # get_order_by_id targets the exact resource instead of an
+        # eventually-consistent aggregate view of it.
+        order_id = getattr(submitted, "id", None)
+        if not self._verify_stop_live(symbol, order_id=order_id):
             log.error(
                 f"  ↳ Stop order attach for {symbol} reported success but no "
                 f"live stop/OCO order was found on Alpaca afterward — "
@@ -351,38 +358,65 @@ class BrokerClient:
 
         return True, target is not None
 
-    def _verify_stop_live(self, symbol: str, max_attempts: int = 10, delay: float = 0.75) -> bool:
-        """Poll Alpaca's open orders for a resting sell stop/stop-limit/OCO
-        order on symbol. Used right after submission to confirm the order
-        Alpaca accepted synchronously is still alive, rather than trusting
-        that submit_order() not raising means the order exists.
+    def _verify_stop_live(
+        self, symbol: str, order_id: str | None = None, max_attempts: int = 10, delay: float = 0.75
+    ) -> bool:
+        """Confirm the stop/OCO order just submitted is actually alive on
+        Alpaca, rather than trusting that submit_order() not raising means
+        the order exists (accept-then-reject on async risk checks is real).
 
-        Budget is ~6.75s (10 attempts x 0.75s between polls), not the
-        original ~2.5s (6 x 0.5s) — the 2026-08-05 12:07 ET incident flattened
-        BAC/NKE/WFC when three back-to-back OCO submissions in the same
-        midday_review pass outran Alpaca's order-list propagation under the
-        old budget; order history confirmed all three attaches had actually
-        succeeded on Alpaca, just not visible here in time."""
+        Preferred path: fetch the specific order_id via get_order_by_id and
+        check its status directly — this targets the exact resource instead
+        of Alpaca's aggregate open-orders list, which lags behind individual
+        order state by an unpredictable amount right after a submit (worse
+        right after a cancel-then-resubmit, as safe_attach_oco does on a
+        40310000 retry). Falls back to the old list-scan when no order_id is
+        available (e.g. called directly in a test/older code path).
+
+        Budget is ~6.75s (10 attempts x 0.75s between polls). This budget
+        was already widened once, from ~2.5s (6 x 0.5s), after the
+        2026-08-05 12:07 ET incident flattened BAC/NKE/WFC on false-negative
+        list-scan misses — and the *same* false-negative (not a timing
+        shortfall; get_order_by_id found the order live on the very first
+        poll once this fix shipped) still flattened TSL and NVDA on
+        2026-08-11, which is why this now checks the order directly instead
+        of re-widening the list-scan budget again."""
+        terminal_statuses = {"canceled", "rejected", "expired", "done_for_day"}
         for attempt in range(max_attempts):
-            try:
-                open_orders = self.get_open_orders()
-            except Exception as e:
-                log.warning(
-                    "  ↳ verify stop [%s]: could not list open orders (attempt %d/%d): %s",
-                    symbol,
-                    attempt + 1,
-                    max_attempts,
-                    e,
-                )
-                open_orders = None
-            if open_orders:
-                for o in open_orders:
-                    if o.symbol != symbol:
-                        continue
-                    if order_field(o, "side") != "sell":
-                        continue
-                    if "stop" in order_field(o, "type"):
+            if order_id:
+                try:
+                    o = self.trade.get_order_by_id(order_id)
+                    if order_field(o, "status") not in terminal_statuses:
                         return True
+                except Exception as e:
+                    log.warning(
+                        "  ↳ verify stop [%s]: get_order_by_id(%s) failed (attempt %d/%d): %s",
+                        symbol,
+                        order_id,
+                        attempt + 1,
+                        max_attempts,
+                        e,
+                    )
+            else:
+                try:
+                    open_orders = self.get_open_orders()
+                except Exception as e:
+                    log.warning(
+                        "  ↳ verify stop [%s]: could not list open orders (attempt %d/%d): %s",
+                        symbol,
+                        attempt + 1,
+                        max_attempts,
+                        e,
+                    )
+                    open_orders = None
+                if open_orders:
+                    for o in open_orders:
+                        if o.symbol != symbol:
+                            continue
+                        if order_field(o, "side") != "sell":
+                            continue
+                        if "stop" in order_field(o, "type"):
+                            return True
             if attempt < max_attempts - 1:
                 time.sleep(delay)
         return False

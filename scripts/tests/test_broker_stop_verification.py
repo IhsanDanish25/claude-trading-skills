@@ -116,6 +116,44 @@ class TestVerifyStopLiveRetryBudget:
         assert mock_sleep.call_count == sig.parameters["max_attempts"].default - 1
 
 
+class TestVerifyStopLiveByOrderId:
+    """Regression: TSL and NVDA both flattened on 2026-08-11 despite the
+    submit succeeding and Alpaca's order history later confirming the OCO
+    was live — the list-scan in get_open_orders() just hadn't caught up yet
+    when _verify_stop_live checked it, and cancel-then-resubmit (the
+    40310000 retry path) makes that propagation lag worse. Checking the
+    exact submitted order_id via get_order_by_id sidesteps the aggregate
+    list's lag entirely."""
+
+    def test_finds_order_live_by_id_even_when_list_scan_would_miss_it(self):
+        fake = _fake_broker()
+        fake.get_open_orders.return_value = []  # list hasn't caught up
+        fake.trade.get_order_by_id.return_value = SimpleNamespace(status="held")
+        assert BrokerClient._verify_stop_live(fake, "TSL", order_id="abc123", max_attempts=1) is True
+
+    def test_terminal_status_is_not_live(self):
+        fake = _fake_broker()
+        fake.trade.get_order_by_id.return_value = SimpleNamespace(status="canceled")
+        assert (
+            BrokerClient._verify_stop_live(fake, "TSL", order_id="abc123", max_attempts=1, delay=0)
+            is False
+        )
+
+    def test_get_order_by_id_exception_falls_through_to_retry(self):
+        fake = _fake_broker()
+        fake.trade.get_order_by_id.side_effect = Exception("network blip")
+        assert (
+            BrokerClient._verify_stop_live(fake, "TSL", order_id="abc123", max_attempts=1, delay=0)
+            is False
+        )
+
+    def test_falls_back_to_list_scan_when_no_order_id(self):
+        fake = _fake_broker()
+        fake.get_open_orders.return_value = [_order("BAC", OrderType.STOP_LIMIT)]
+        assert BrokerClient._verify_stop_live(fake, "BAC", max_attempts=1) is True
+        fake.trade.get_order_by_id.assert_not_called()
+
+
 class TestAttachStopTargetVerification:
     def test_reports_not_attached_when_alpaca_verification_fails(self):
         """Core regression guard: a clean submit_order() call must NOT be
@@ -131,7 +169,9 @@ class TestAttachStopTargetVerification:
         assert stop_attached is False
         assert target_attached is False
         fake.trade.submit_order.assert_called_once()
-        fake._verify_stop_live.assert_called_once_with("BAC")
+        fake._verify_stop_live.assert_called_once_with(
+            "BAC", order_id=fake.trade.submit_order.return_value.id
+        )
 
     def test_reports_attached_when_alpaca_verification_succeeds(self):
         fake = _fake_broker()

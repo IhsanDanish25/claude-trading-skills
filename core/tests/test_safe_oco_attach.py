@@ -44,13 +44,18 @@ def _order(id_, symbol, side=OrderSide.SELL):
 def test_success_on_first_try_does_not_cancel_anything():
     broker = _FakeBroker(open_orders=[_order("o1", "AAPL")])
     calls = []
+    submitted_order = SimpleNamespace(id="new-order-1")
 
     def submit():
         calls.append(1)
+        return submitted_order
 
-    ok = safe_attach_oco(broker, "AAPL", 10, 90.0, 110.0, submit)
+    result = safe_attach_oco(broker, "AAPL", 10, 90.0, 110.0, submit)
 
-    assert ok is True
+    # safe_attach_oco returns submit_fn()'s own return value (the submitted
+    # order) so callers can verify that exact order by ID, instead of a bare
+    # True that discards which order actually ended up live.
+    assert result is submitted_order
     assert calls == [1]
     assert broker.trade.cancelled_ids == []
 
@@ -62,15 +67,17 @@ def test_insufficient_qty_error_cancels_stale_sell_orders_then_retries():
         _order("other-sym", "MSFT", side=OrderSide.SELL),  # wrong symbol — not cancelled
     ])
     attempts = []
+    submitted_order = SimpleNamespace(id="new-order-2")
 
     def submit():
         attempts.append(1)
         if len(attempts) == 1:
             raise Exception('{"code":40310000,"message":"insufficient qty available for order"}')
+        return submitted_order
 
-    ok = safe_attach_oco(broker, "AAPL", 10, 90.0, 110.0, submit, retry_delay=0)
+    result = safe_attach_oco(broker, "AAPL", 10, 90.0, 110.0, submit, retry_delay=0)
 
-    assert ok is True
+    assert result is submitted_order
     assert len(attempts) == 2
     assert broker.trade.cancelled_ids == ["stale-1"]
 
