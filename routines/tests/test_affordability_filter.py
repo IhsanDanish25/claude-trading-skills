@@ -24,12 +24,30 @@ def _make_log():
     return MagicMock()
 
 
-def test_affordable_candidates_drops_unaffordable_and_keeps_affordable():
+def test_affordable_candidates_keeps_whole_share_and_fractional_affordable():
     broker = MagicMock()
-    # AAPL costs more than its own affordable budget; MSFT does not.
+    # AAPL costs more than its own whole-share budget, but the budget still
+    # clears the fractional floor — broker.buy() will size it as a notional
+    # order, so it must NOT be dropped here. MSFT is affordable outright.
     broker.affordable_budget.side_effect = lambda sym: {"AAPL": 20.0, "MSFT": 500.0}[sym]
     candidates = [
         {"symbol": "AAPL", "price": 340.0},
+        {"symbol": "MSFT", "price": 400.0},
+    ]
+
+    result = market_open._affordable_candidates(broker, candidates, "pead", _make_log())
+
+    assert [c["symbol"] for c in result] == ["AAPL", "MSFT"]
+
+
+def test_affordable_candidates_drops_below_fractional_floor():
+    broker = MagicMock()
+    # Budget below MIN_FRACTIONAL_NOTIONAL (default $5) — not even a sliver
+    # fractional order is worth the round-trip cost, so this is genuinely
+    # unaffordable regardless of price.
+    broker.affordable_budget.side_effect = lambda sym: {"PENNIES": 2.50, "MSFT": 500.0}[sym]
+    candidates = [
+        {"symbol": "PENNIES", "price": 340.0},
         {"symbol": "MSFT", "price": 400.0},
     ]
 
@@ -54,6 +72,11 @@ def test_run_pead_skips_unaffordable_top_candidate_and_buys_cheaper_one(monkeypa
     # blocked, and never reached the cheap one — zero buys despite an
     # affordable candidate existing. The filter must run first so the
     # truncated window contains only buyable names.
+    #
+    # EXPENSIVE's budget here is below MIN_FRACTIONAL_NOTIONAL (genuinely
+    # unaffordable, not even as a fractional sliver) — a merely
+    # whole-share-unaffordable price is no longer dropped by the filter,
+    # since broker.buy() sizes those as a fractional order instead.
     monkeypatch.setattr(market_open, "_sector_gate", lambda *a, **k: True)
     monkeypatch.setattr(market_open, "free_cash_for_pead", lambda broker, amount: True)
     monkeypatch.setattr(market_open, "pead_track", lambda *a, **k: None)
@@ -71,7 +94,7 @@ def test_run_pead_skips_unaffordable_top_candidate_and_buys_cheaper_one(monkeypa
     monkeypatch.setattr(market_open, "screen_earnings", lambda **k: candidates)
 
     broker = MagicMock()
-    broker.affordable_budget.side_effect = lambda sym: {"EXPENSIVE": 21.44, "CHEAP": 21.44}[sym]
+    broker.affordable_budget.side_effect = lambda sym: {"EXPENSIVE": 2.00, "CHEAP": 21.44}[sym]
     broker.buy.return_value = {
         "qty": 1, "price": 15.0, "stop": 12.75, "stop_attached": True,
     }

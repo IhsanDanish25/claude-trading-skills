@@ -39,17 +39,13 @@ _SECTOR_CACHE: dict = {}
 
 @lru_cache(maxsize=500)
 def _fetch_symbol_sector(symbol: str, api_key: str) -> str | None:
-    """Look up GICS sector via FMP profile. Cached in-process."""
-    if not api_key:
-        return None
+    """Look up GICS sector via yfinance info. Cached in-process."""
     try:
-        url = f"https://financialmodelingprep.com/api/v3/profile/{symbol}?apikey={api_key}"
-        resp = _req.get(url, timeout=10)
-        if resp.ok:
-            data = resp.json()
-            if data and isinstance(data, list) and len(data):
-                sector = (data[0].get("sector") or "").strip()
-                return sector or None
+        import yfinance as yf
+        ticker = yf.Ticker(symbol)
+        sector = ticker.info.get('sector')
+        if sector:
+            return sector.strip()
     except Exception:
         pass
     return None
@@ -139,27 +135,36 @@ def _timeseries_gate(symbol: str, strategy: str, log) -> bool:
 
 
 def _affordable_candidates(broker, candidates: list, strategy: str, log) -> list:
-    """Drop candidates priced above what the account can currently afford as a
-    whole share, using each candidate's own affordable_budget() (which nets
-    out any existing position in that symbol). Screeners rank by signal
-    strength, not price — on a small account the top-ranked names are often
-    unaffordable, so this must run BEFORE any candidates[:slots] truncation,
+    """Drop candidates the account genuinely cannot buy any of, using each
+    candidate's own affordable_budget() (which nets out any existing
+    position in that symbol). Screeners rank by signal strength, not price —
+    on a small account the top-ranked names are often priced above a single
+    whole share, so this must run BEFORE any candidates[:slots] truncation,
     or an expensive top candidate silently crowds out a cheaper one further
     down the list that the account could actually buy.
+
+    A candidate priced above its whole-share budget is still kept as long as
+    the budget clears MIN_FRACTIONAL_NOTIONAL — broker.buy() falls back to a
+    notional (fractional-share) order in exactly that case (see buy()'s
+    qty<1 branch), so rejecting it here on a whole-share-only price check
+    silently dropped good signals (e.g. an insider-buy candidate priced at
+    $215 on a $21 budget) that the broker was fully capable of executing as
+    a $21 fractional buy. Only candidates below the fractional floor — where
+    even a sliver order isn't worth the round-trip cost — are dropped.
     """
     affordable = []
     for c in candidates:
         sym = c["symbol"]
         price = c.get("price", 0)
         budget = broker.affordable_budget(sym)
-        if price <= 0 or price > budget:
-            log.info(f"  ✗ {sym} SKIP — price ${price:.2f} exceeds affordable budget ${budget:.2f}")
+        if price <= 0 or budget < config.MIN_FRACTIONAL_NOTIONAL:
+            log.info(f"  ✗ {sym} SKIP — affordable budget ${budget:.2f} below fractional minimum")
             trade_logger.log_event(
                 "order_skipped",
                 strategy,
                 sym,
                 gate="affordability",
-                reason=f"price ${price:.2f} > budget ${budget:.2f}",
+                reason=f"budget ${budget:.2f} < fractional minimum ${config.MIN_FRACTIONAL_NOTIONAL:.2f}",
                 price=price,
                 budget=round(budget, 2),
             )
