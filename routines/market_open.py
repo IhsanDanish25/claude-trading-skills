@@ -42,8 +42,9 @@ def _fetch_symbol_sector(symbol: str, api_key: str) -> str | None:
     """Look up GICS sector via yfinance info. Cached in-process."""
     try:
         import yfinance as yf
+
         ticker = yf.Ticker(symbol)
-        sector = ticker.info.get('sector')
+        sector = ticker.info.get("sector")
         if sector:
             return sector.strip()
     except Exception:
@@ -2477,10 +2478,35 @@ def run():
         highs = [b["high"] for b in spy_bars]
         lows = [b["low"] for b in spy_bars]
         closes = [b["close"] for b in spy_bars]
-        reg = classify(highs, lows, closes)
+
+        # REGIME_GATE_MODE=hmm opts into the HMM-based gate (regime_gate_hmm.py);
+        # default "sma_adx" (or unset) keeps today's proven ADX/SMA gate as-is.
+        gate_mode = os.environ.get("REGIME_GATE_MODE", "sma_adx").strip().lower()
+        if gate_mode == "hmm":
+            from regime_gate_hmm import classify as classify_hmm
+
+            reg = classify_hmm(highs, lows, closes)
+        else:
+            reg = classify(highs, lows, closes)
         log.info(
-            f"Regime gate: state={reg.state} trend={reg.trend} adx={reg.adx:.1f} sma50={reg.sma50:.2f} sma200={reg.sma200:.2f} reason={reg.reason}"
+            f"Regime gate ({gate_mode}): state={reg.state} trend={reg.trend} adx={reg.adx:.1f} sma50={reg.sma50:.2f} sma200={reg.sma200:.2f} reason={reg.reason}"
         )
+
+        # Side-by-side shadow read: always log what the HMM gate would say,
+        # without ever letting it gate unless REGIME_GATE_MODE=hmm above -
+        # lets it be observed for real before ever being trusted to decide.
+        if gate_mode != "hmm":
+            try:
+                from regime_gate_hmm import classify as classify_hmm_shadow
+
+                shadow = classify_hmm_shadow(highs, lows, closes)
+                log.info(
+                    f"Regime gate (hmm, SHADOW - not gating): state={shadow.state} "
+                    f"confidence={shadow.confidence:.0%} reason={shadow.reason}"
+                )
+            except Exception as e:
+                log.warning(f"HMM shadow regime gate failed (non-blocking): {e}")
+
         if not reg.can_trade:
             log.warning(f"REGIME GATE: STAND_DOWN — {reg.reason} — holding cash, no screening")
             return
