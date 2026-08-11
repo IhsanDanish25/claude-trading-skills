@@ -294,7 +294,7 @@ class BrokerClient:
         # STOP_LIMIT_BUFFER_PCT: stop-limit fills cap slippage at 1.5% below
         # the stop price on gap-down opens. Trade-off: stop-limit orders do
         # not participate in the open/close auction (Alpaca docs). Accepted.
-        stop_limit = max(round(stop * 0.985, 2), stop - 0.05)
+        stop_limit = max(round(stop * 0.985, 2), round(stop - 0.05, 2))
         tif = TimeInForce.DAY if qty != int(qty) else TimeInForce.GTC
 
         def _submit():
