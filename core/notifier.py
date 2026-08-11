@@ -41,6 +41,8 @@ body{margin:0;padding:0;background:#0E1117;font-family:-apple-system,sans-serif;
 .badge-sell{background:#742A2A;color:#FC8181}
 .badge-hold{background:#2A4365;color:#63B3ED}
 .badge-cash{background:#744210;color:#ECC94B}
+.badge-watch{background:#4A3728;color:#ECC94B}
+.badge-tighten{background:#4A3728;color:#ECC94B}
 .footer{text-align:center;color:#4A5568;font-size:0.75rem;padding-top:16px}
 """
 
@@ -108,6 +110,7 @@ def send_premarket_brief(
     slots: int,
     buy_list: list[dict],
     high_impact_events: list[dict],
+    watch_list: list[dict] | None = None,
 ) -> bool:
     bias_color = {"cash": "yellow", "defensive": "yellow",
                   "aggressive": "green", "moderate": "blue"}.get(bias.lower(), "blue")
@@ -116,13 +119,24 @@ def send_premarket_brief(
     candidates_html = ""
     if buy_list:
         rows = "".join(
-            f'<div class="row"><span class="label">{c["symbol"]}</span>'
+            f'<div class="row"><span class="label">'
+            f'<span class="badge badge-buy">BUY</span> {c["symbol"]}</span>'
             f'<span class="value green">score {c.get("score","?")} &bull; {c.get("reason","")[:60]}</span></div>'
             for c in buy_list[:6]
         )
         candidates_html = f'<div class="card"><h2>VCP Buy Candidates ({len(buy_list)})</h2>{rows}</div>'
     else:
         candidates_html = '<div class="card"><h2>VCP Buy Candidates</h2><p style="color:#A0AEC0">None found today</p></div>'
+
+    watch_html = ""
+    if watch_list:
+        rows = "".join(
+            f'<div class="row"><span class="label">'
+            f'<span class="badge badge-watch">WATCH</span> {c["symbol"]}</span>'
+            f'<span class="value">score {c.get("score","?")} &bull; {c.get("reason","")[:60]}</span></div>'
+            for c in watch_list[:6]
+        )
+        watch_html = f'<div class="card"><h2>Watch List ({len(watch_list)})</h2>{rows}</div>'
 
     events_html = ""
     if high_impact_events:
@@ -145,6 +159,7 @@ def send_premarket_brief(
       {_row("Rationale", rationale[:100])}
     </div>
     {candidates_html}
+    {watch_html}
     {events_html}
     """
     html = _html("Pre-Market Brief", date, body)
@@ -153,6 +168,7 @@ def send_premarket_brief(
         f"Regime: {regime} | Bias: {bias}\n"
         f"Portfolio: ${portfolio_value:,.2f} | Cash: ${cash:,.2f} | Slots: {slots}\n"
         f"Buy candidates: {len(buy_list)}\n"
+        f"Watch list: {len(watch_list or [])}\n"
         f"High-impact events: {len(high_impact_events)}\n"
         f"Rationale: {rationale}"
     )
@@ -213,11 +229,28 @@ def send_eod_summary(
     force_closed: list[str] | None = None,
     trades_today: list[dict] | None = None,
     skipped_routines: list[dict] | None = None,
+    positions: list[dict] | None = None,
 ) -> bool:
     pnl_color = "green" if unrealized_pnl >= 0 else "red"
     spy_color = "green" if spy_change_pct >= 0 else "red"
     pnl_sign  = "+" if unrealized_pnl >= 0 else ""
     spy_sign  = "+" if spy_change_pct >= 0 else ""
+
+    positions_html = ""
+    positions_plain = ""
+    if positions:
+        badge_class = {"HOLD": "hold", "SELL": "sell", "TIGHTEN_STOP": "tighten"}
+        rows = "".join(
+            f'<div class="row"><span class="label">'
+            f'<span class="badge badge-{badge_class.get(p.get("action","HOLD"), "hold")}">'
+            f'{p.get("action","HOLD")}</span> {p.get("symbol","?")}</span>'
+            f'<span class="value">{p.get("reason","")[:60]}</span></div>'
+            for p in positions
+        )
+        positions_html = f'<div class="card"><h2>Position Signals ({len(positions)})</h2>{rows}</div>'
+        positions_plain = "\nSignals: " + "; ".join(
+            f"{p.get('symbol','?')}={p.get('action','HOLD')}" for p in positions
+        )
 
     closed_html = ""
     if force_closed:
@@ -264,6 +297,7 @@ def send_eod_summary(
       {_row("Bias", bias.upper())}
       {_row("FTD detected", "YES ✓" if ftd_detected else "No")}
     </div>
+    {positions_html}
     {trades_html}
     {closed_html}
     {skipped_html}
@@ -275,6 +309,7 @@ def send_eod_summary(
         f"Unrealized P&L: {pnl_sign}${unrealized_pnl:,.2f}\n"
         f"SPY: {spy_sign}{spy_change_pct:.2f}% | Regime: {regime} | FTD: {ftd_detected}\n"
         f"Trades today: {trades_plain}"
+        f"{positions_plain}"
         f"{skipped_plain}"
     )
     emoji = "📈" if unrealized_pnl >= 0 else "📉"

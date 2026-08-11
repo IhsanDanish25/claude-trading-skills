@@ -9,6 +9,41 @@ from __future__ import annotations
 from core.notifier import send_eod_summary
 
 
+def test_eod_summary_includes_position_signals(monkeypatch):
+    sent = {}
+
+    def fake_send(subject, plain, html=None):
+        sent["plain"] = plain
+        sent["html"] = html
+        return True
+
+    monkeypatch.setattr("core.notifier.send", fake_send)
+
+    ok = send_eod_summary(
+        date="2026-08-11",
+        portfolio_value=269.21,
+        cash=269.21,
+        positions_held=1,
+        unrealized_pnl=0.0,
+        regime="neutral",
+        bias="moderate",
+        spy_change_pct=0.10,
+        ftd_detected=False,
+        positions=[
+            {"symbol": "NVDA", "action": "HOLD", "reason": "trending above entry, no exit signal"},
+            {"symbol": "TSLA", "action": "SELL", "reason": "broke below support"},
+            {"symbol": "AAPL", "action": "TIGHTEN_STOP", "reason": "locking in gains"},
+        ],
+    )
+
+    assert ok is True
+    assert "NVDA" in sent["html"] and "badge-hold" in sent["html"]
+    assert "TSLA" in sent["html"] and "badge-sell" in sent["html"]
+    assert "AAPL" in sent["html"] and "badge-tighten" in sent["html"]
+    assert "NVDA=HOLD" in sent["plain"]
+    assert "TSLA=SELL" in sent["plain"]
+
+
 def test_eod_summary_includes_trades_and_skipped_routines(monkeypatch):
     sent = {}
 

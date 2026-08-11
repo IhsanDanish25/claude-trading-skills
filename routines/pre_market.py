@@ -105,7 +105,9 @@ def run():
                       for s in sorted(top_vcps, key=lambda x: x.get("raw_score", x.get("score", 0)), reverse=True)]
 
         buy_list = [s for s in scored if s.get("action") == "BUY"]
+        watch_list = [s for s in scored if s.get("action") == "WATCH"]
         log.info(f"  BUY candidates: {len(buy_list)}")
+        log.info(f"  WATCH candidates: {len(watch_list)}")
 
         for s in buy_list[:5]:
             log.info(f"  ★ {s['symbol']:6} score={s['score']:3} | {s['reason']}")
@@ -178,6 +180,7 @@ def run():
         cash=cash,
         slots=slots_available,
         buy_list=buy_list if top_vcps else [],
+        watch_list=watch_list if top_vcps else [],
         high_impact_events=high_impact,
     )
 

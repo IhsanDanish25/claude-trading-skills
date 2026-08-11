@@ -210,6 +210,7 @@ def run():
     log.info(f"── Positions at close: {len(positions)}")
 
     force_close = []  # symbols force-closed below -3%; referenced in EOD summary
+    position_signals = []  # Claude's HOLD/SELL/TIGHTEN_STOP per position; referenced in EOD summary
 
     breadth = get_market_breadth()
     regime = analyze_market_regime(breadth)
@@ -283,6 +284,7 @@ def run():
         if pos_data:
             log.info(f"── Claude: EOD position review ({len(pos_data)} positions)")
             decisions = review_open_positions(pos_data, regime["regime"])
+            position_signals = decisions
             pos_by_symbol = {p["symbol"]: p for p in pos_data}
             for d in decisions:
                 sym = d.get("symbol", "")
@@ -396,6 +398,7 @@ def run():
         force_closed=force_close,
         trades_today=_todays_trades(today),
         skipped_routines=_todays_skipped_routines(today),
+        positions=position_signals,
     )
 
     # ── SPY base EOD status ────────────────────────────────────────────────
