@@ -9,7 +9,6 @@ as-wired-today rules with no look-ahead, and writes:
     backtests/baseline_<date>/baseline.json
     backtests/baseline_<date>/equity_curve.png
 """
-
 from __future__ import annotations
 
 import argparse
@@ -29,8 +28,8 @@ log = logging.getLogger("backtest")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── Tunables for this experiment ──────────────────────────────────────────────
-SLIPPAGE_BPS = 0  # default: no slippage. Each fill moves against us by BPS/10000.
-ATR_STOP_MULT = 1.5  # ATR-stop multiple: stop = entry - ATR_STOP_MULT * ATR(14)
+SLIPPAGE_BPS = 0      # default: no slippage. Each fill moves against us by BPS/10000.
+ATR_STOP_MULT = 1.5   # ATR-stop multiple: stop = entry - ATR_STOP_MULT * ATR(14)
 
 # Predefined scenario suite (run with --suite): (name, slippage_bps, stop_mode, regime_gated)
 # Scenarios A–D run the VCP composite engine (engine.run_simulation).
@@ -43,48 +42,27 @@ SUITE = [
     ("D_slip10_atr_regime", 10, "atr", True),
     # Earnings-momentum scenarios — routed to earnings_engine, not engine.py.
     # (stop_mode field unused for E-series; stop config is in E_CONFIGS below.)
-    ("E_earnings_momentum_regime", 10, "atr", True),
-    ("E2_earnings_wide_stop", 10, "atr", True),
-    ("E3_earnings_time_only", 10, "atr", True),
-    ("E4_earnings_portable_alpha", 10, "atr", True),
+    ("E_earnings_momentum_regime",  10, "atr", True),
+    ("E2_earnings_wide_stop",       10, "atr", True),
+    ("E3_earnings_time_only",       10, "atr", True),
+    ("E4_earnings_portable_alpha",  10, "atr", True),
 ]
 
 # Scenario E-series shared parameters.
-E_WINDOW_START = "2022-07-01"  # default; E4 overrides to 2023-01-01 (post-bear)
-E_WINDOW_END = "2026-06-27"
+E_WINDOW_START = "2022-07-01"   # default; E4 overrides to 2023-01-01 (post-bear)
+E_WINDOW_END   = "2026-06-27"
 E_HOLD_DAYS = 60
-E_MIN_SURPRISE_PCT = 5.0  # lowered from 10% — wider net for trade-count gate
+E_MIN_SURPRISE_PCT = 5.0   # lowered from 10% — wider net for trade-count gate
 E_MIN_PRICE = 10.0
 E_MIN_AVG_VOLUME = 500_000.0
 
 # Per-scenario stop configuration for the E-series.
 # trailing_stop=False + fixed_stop_pct → flat disaster-protection stop, never ratcheted.
 E_CONFIGS: dict[str, dict] = {
-    "E_earnings_momentum_regime": {
-        "atr_stop_mult": 1.5,
-        "trailing_stop": True,
-        "fixed_stop_pct": None,
-        "spy_overlay": False,
-    },
-    "E2_earnings_wide_stop": {
-        "atr_stop_mult": 3.0,
-        "trailing_stop": True,
-        "fixed_stop_pct": None,
-        "spy_overlay": False,
-    },
-    "E3_earnings_time_only": {
-        "atr_stop_mult": 1.5,
-        "trailing_stop": False,
-        "fixed_stop_pct": 0.15,
-        "spy_overlay": False,
-    },
-    "E4_earnings_portable_alpha": {
-        "atr_stop_mult": 1.5,
-        "trailing_stop": False,
-        "fixed_stop_pct": 0.15,
-        "spy_overlay": True,
-        "window_start": "2023-01-01",
-    },
+    "E_earnings_momentum_regime": {"atr_stop_mult": 1.5, "trailing_stop": True,  "fixed_stop_pct": None,  "spy_overlay": False},
+    "E2_earnings_wide_stop":      {"atr_stop_mult": 3.0, "trailing_stop": True,  "fixed_stop_pct": None,  "spy_overlay": False},
+    "E3_earnings_time_only":      {"atr_stop_mult": 1.5, "trailing_stop": False, "fixed_stop_pct": 0.15,  "spy_overlay": False},
+    "E4_earnings_portable_alpha": {"atr_stop_mult": 1.5, "trailing_stop": False, "fixed_stop_pct": 0.15,  "spy_overlay": True, "window_start": "2023-01-01"},
 }
 
 
@@ -93,7 +71,6 @@ def build_universe(store, years: float) -> list[str]:
     (full point-in-time coverage; no recent-IPO gaps, no survivorship from
     today's dynamic actives)."""
     from core.config import WATCHLIST
-
     cal = store.trading_calendar("SPY")
     if not cal:
         raise RuntimeError("No SPY bars cached — cannot establish calendar")
@@ -106,48 +83,22 @@ def build_universe(store, years: float) -> list[str]:
             universe.append(s)
         else:
             dropped.append((s, first.isoformat() if first else "no-data"))
-    log.info(
-        "Universe: %d/%d watchlist names with full history; dropped: %s",
-        len(universe),
-        len(WATCHLIST),
-        dropped,
-    )
+    log.info("Universe: %d/%d watchlist names with full history; dropped: %s",
+             len(universe), len(WATCHLIST), dropped)
     return universe
 
 
-def _run_one(
-    store,
-    universe,
-    cfg,
-    out_dir,
-    start_equity,
-    scenario,
-    slippage_bps,
-    stop_mode,
-    regime_gated=False,
-    regime_gate_mode="sma_adx",
-):
+def _run_one(store, universe, cfg, out_dir, start_equity, scenario, slippage_bps, stop_mode,
+             regime_gated=False, regime_gate_mode="sma_adx"):
     """Run one scenario, write its JSON+PNG, print its table, return the report."""
     from backtest_harness import engine, metrics
 
     gate_tag = f" | regime-gated ({regime_gate_mode})" if regime_gated else ""
-    log.info(
-        "── Scenario %s | slippage=%dbps | stop=%s%s ──",
-        scenario,
-        slippage_bps,
-        stop_mode,
-        gate_tag,
-    )
-    pf = engine.run_simulation(
-        store,
-        universe,
-        start_equity=start_equity,
-        slippage_bps=slippage_bps,
-        stop_mode=stop_mode,
-        atr_stop_mult=ATR_STOP_MULT,
-        regime_gated=regime_gated,
-        regime_gate_mode=regime_gate_mode,
-    )
+    log.info("── Scenario %s | slippage=%dbps | stop=%s%s ──", scenario, slippage_bps, stop_mode, gate_tag)
+    pf = engine.run_simulation(store, universe, start_equity=start_equity,
+                               slippage_bps=slippage_bps, stop_mode=stop_mode,
+                               atr_stop_mult=ATR_STOP_MULT, regime_gated=regime_gated,
+                               regime_gate_mode=regime_gate_mode)
     if not pf.equity_curve:
         log.error("Scenario %s produced no equity curve — skipping.", scenario)
         return None
@@ -159,14 +110,11 @@ def _run_one(
     spy = metrics.equity_stats(spy_curve, "SPY buy & hold") if spy_curve else {}
 
     png_path = os.path.join(out_dir, f"equity_curve_{scenario}.png")
-    metrics.plot_equity(
-        pf.equity_curve,
-        spy_curve,
-        png_path,
-        f"{scenario}: composite vs SPY  ({start_date} → {end_date})",
-    )
+    metrics.plot_equity(pf.equity_curve, spy_curve, png_path,
+                        f"{scenario}: composite vs SPY  ({start_date} → {end_date})")
 
-    stop_desc = "flat 2% (STOP_LOSS_PCT)" if stop_mode == "flat" else f"ATR(14) × {ATR_STOP_MULT}"
+    stop_desc = ("flat 2% (STOP_LOSS_PCT)" if stop_mode == "flat"
+                 else f"ATR(14) × {ATR_STOP_MULT}")
     report = {
         "generated": datetime.datetime.now().isoformat(timespec="seconds"),
         "scenario": scenario,
@@ -210,15 +158,8 @@ def _run_one(
     return report
 
 
-def _run_earnings_scenario(
-    cfg,
-    out_dir,
-    start_equity,
-    scenario,
-    slippage_bps,
-    regime_gated=True,
-    regime_gate_mode="sma_adx",
-):
+def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
+                           regime_gated=True, regime_gate_mode="sma_adx"):
     """E-series earnings-momentum scenarios — own engine, own universe, own window.
 
     Stop behaviour is looked up from E_CONFIGS by scenario name:
@@ -229,42 +170,26 @@ def _run_earnings_scenario(
     from backtest_harness import data, earnings_data, earnings_engine, metrics
 
     ecfg = E_CONFIGS.get(scenario, E_CONFIGS["E_earnings_momentum_regime"])
-    atr_stop_mult = ecfg["atr_stop_mult"]
-    trailing_stop = ecfg["trailing_stop"]
-    fixed_stop_pct = ecfg["fixed_stop_pct"]
-    spy_overlay = ecfg.get("spy_overlay", False)
+    atr_stop_mult    = ecfg["atr_stop_mult"]
+    trailing_stop    = ecfg["trailing_stop"]
+    fixed_stop_pct   = ecfg["fixed_stop_pct"]
+    spy_overlay      = ecfg.get("spy_overlay", False)
     min_surprise_pct = ecfg.get("min_surprise_pct", E_MIN_SURPRISE_PCT)
-    window_start = ecfg.get("window_start", E_WINDOW_START)
+    window_start     = ecfg.get("window_start", E_WINDOW_START)
 
     gate_tag = " | regime-gated" if regime_gated else ""
-    log.info(
-        "── Scenario %s | earnings-momentum | slippage=%dbps | hold=%dd | %s..%s%s ──",
-        scenario,
-        slippage_bps,
-        E_HOLD_DAYS,
-        window_start,
-        E_WINDOW_END,
-        gate_tag,
-    )
+    log.info("── Scenario %s | earnings-momentum | slippage=%dbps | hold=%dd | %s..%s%s ──",
+             scenario, slippage_bps, E_HOLD_DAYS, window_start, E_WINDOW_END, gate_tag)
 
     # 1. Historical EPS surprises over the (wide) E window — cached on disk.
     from core.earnings_screener import get_sp500_symbols
-
     universe_symbols = get_sp500_symbols()
     qualifying = earnings_data.get_historical_surprises(
-        universe_symbols,
-        window_start,
-        E_WINDOW_END,
-        min_surprise_pct=min_surprise_pct,
+        universe_symbols, window_start, E_WINDOW_END, min_surprise_pct=min_surprise_pct,
     )
     syms = sorted({s["symbol"] for s in qualifying})
-    log.info(
-        "Scenario %s: %d qualifying surprises (>=%.0f%%), %d unique symbols",
-        scenario,
-        len(qualifying),
-        min_surprise_pct,
-        len(syms),
-    )
+    log.info("Scenario %s: %d qualifying surprises (>=%.0f%%), %d unique symbols",
+             scenario, len(qualifying), min_surprise_pct, len(syms))
     if not syms:
         log.error("Scenario %s: no qualifying earnings surprises — skipping.", scenario)
         return None
@@ -282,21 +207,13 @@ def _run_earnings_scenario(
 
     # 3. Run the dedicated earnings-momentum simulation.
     pf = earnings_engine.run_earnings_simulation(
-        store,
-        qualifying,
-        start_equity=start_equity,
-        slippage_bps=slippage_bps,
-        atr_stop_mult=atr_stop_mult,
-        hold_days=E_HOLD_DAYS,
-        regime_gated=regime_gated,
+        store, qualifying, start_equity=start_equity, slippage_bps=slippage_bps,
+        atr_stop_mult=atr_stop_mult, hold_days=E_HOLD_DAYS, regime_gated=regime_gated,
         regime_gate_mode=regime_gate_mode,
-        window_start=window_start,
-        window_end=E_WINDOW_END,
-        min_surprise_pct=min_surprise_pct,
-        min_price=E_MIN_PRICE,
+        window_start=window_start, window_end=E_WINDOW_END,
+        min_surprise_pct=min_surprise_pct, min_price=E_MIN_PRICE,
         min_avg_volume=E_MIN_AVG_VOLUME,
-        trailing_stop=trailing_stop,
-        fixed_stop_pct=fixed_stop_pct,
+        trailing_stop=trailing_stop, fixed_stop_pct=fixed_stop_pct,
         spy_overlay=spy_overlay,
     )
     if not pf.equity_curve:
@@ -310,17 +227,11 @@ def _run_earnings_scenario(
     spy = metrics.equity_stats(spy_curve, "SPY buy & hold") if spy_curve else {}
 
     png_path = os.path.join(out_dir, f"equity_curve_{scenario}.png")
-    metrics.plot_equity(
-        pf.equity_curve,
-        spy_curve,
-        png_path,
-        f"{scenario}: earnings momentum vs SPY  ({start_date} → {end_date})",
-    )
+    metrics.plot_equity(pf.equity_curve, spy_curve, png_path,
+                        f"{scenario}: earnings momentum vs SPY  ({start_date} → {end_date})")
 
     if fixed_stop_pct is not None:
-        stop_desc = (
-            f"-{fixed_stop_pct * 100:.0f}% fixed stop + {E_HOLD_DAYS}d time stop (no trailing)"
-        )
+        stop_desc = f"-{fixed_stop_pct*100:.0f}% fixed stop + {E_HOLD_DAYS}d time stop (no trailing)"
         stop_mode_tag = "fixed_flat"
     elif trailing_stop:
         stop_desc = f"ATR(14) × {atr_stop_mult} trailing + {E_HOLD_DAYS}d time stop"
@@ -385,23 +296,12 @@ def main() -> int:
     ap.add_argument("--start-equity", type=float, default=100_000.0)
     ap.add_argument("--slippage-bps", type=float, default=SLIPPAGE_BPS)
     ap.add_argument("--stop-mode", choices=["flat", "atr"], default="flat")
-    ap.add_argument(
-        "--suite",
-        action="store_true",
-        help="run the predefined 3-scenario suite (control / slip10+atr / slip20+atr)",
-    )
-    ap.add_argument(
-        "--scenario",
-        type=str,
-        default=None,
-        help="run only the named scenario or prefix (e.g. E or E_earnings_momentum_regime)",
-    )
-    ap.add_argument(
-        "--regime-gate-mode",
-        choices=["sma_adx", "hmm"],
-        default="sma_adx",
-        help="which regime gate to backtest when a scenario is regime-gated (default: sma_adx)",
-    )
+    ap.add_argument("--suite", action="store_true",
+                    help="run the predefined 3-scenario suite (control / slip10+atr / slip20+atr)")
+    ap.add_argument("--scenario", type=str, default=None,
+                    help="run only the named scenario or prefix (e.g. E or E_earnings_momentum_regime)")
+    ap.add_argument("--regime-gate-mode", choices=["sma_adx", "hmm"], default="sma_adx",
+                    help="which regime gate to backtest when a scenario is regime-gated (default: sma_adx)")
     args = ap.parse_args()
 
     from backtest_harness import data
@@ -435,57 +335,24 @@ def main() -> int:
         if len(prefix) == 1:
             scenarios = [s for s in SUITE if s[0].upper().startswith(prefix)]
         else:
-            scenarios = [
-                s for s in SUITE if s[0].startswith(prefix + "_") or s[0].upper() == prefix
-            ]
+            scenarios = [s for s in SUITE if s[0].startswith(prefix + "_") or s[0].upper() == prefix]
         if not scenarios:
-            log.error(
-                "No scenario in SUITE matching %r — valid names: %s",
-                args.scenario,
-                [s[0] for s in SUITE],
-            )
+            log.error("No scenario in SUITE matching %r — valid names: %s",
+                      args.scenario, [s[0] for s in SUITE])
             return 1
     else:
         scenarios = [("single", int(args.slippage_bps), args.stop_mode, False)]
-    log.info(
-        "Simulating %d symbols over ~%.1fy | %d scenario(s)",
-        len(universe),
-        args.years,
-        len(scenarios),
-    )
+    log.info("Simulating %d symbols over ~%.1fy | %d scenario(s)", len(universe), args.years, len(scenarios))
     ok = False
     for name, slip, mode, gated in scenarios:
         if name.startswith("E"):
             # Earnings-momentum scenario (E, E2, E3): own engine, own universe, own window.
-            if (
-                _run_earnings_scenario(
-                    cfg,
-                    out_dir,
-                    args.start_equity,
-                    name,
-                    slip,
-                    regime_gated=gated,
-                    regime_gate_mode=args.regime_gate_mode,
-                )
-                is not None
-            ):
+            if _run_earnings_scenario(cfg, out_dir, args.start_equity, name, slip,
+                                      regime_gated=gated, regime_gate_mode=args.regime_gate_mode) is not None:
                 ok = True
             continue
-        if (
-            _run_one(
-                store,
-                universe,
-                cfg,
-                out_dir,
-                args.start_equity,
-                name,
-                slip,
-                mode,
-                regime_gated=gated,
-                regime_gate_mode=args.regime_gate_mode,
-            )
-            is not None
-        ):
+        if _run_one(store, universe, cfg, out_dir, args.start_equity, name, slip, mode,
+                    regime_gated=gated, regime_gate_mode=args.regime_gate_mode) is not None:
             ok = True
     return 0 if ok else 1
 
@@ -505,41 +372,29 @@ def _print_summary(scenario, slippage_bps, stop_desc, strat, spy, t, json_path, 
     print(line)
     print("  RETURNS                       STRATEGY        SPY B&H")
     sr, br = strat, (spy or {})
-    print(
-        f"  {'Total return':<28} {pct(sr.get('total_return_pct')):>12}   {pct(br.get('total_return_pct', 'n/a')):>12}"
-    )
-    print(f"  {'CAGR':<28} {pct(sr.get('cagr_pct')):>12}   {pct(br.get('cagr_pct', 'n/a')):>12}")
-    print(
-        f"  {'Max drawdown':<28} {pct(sr.get('max_drawdown_pct')):>12}   {pct(br.get('max_drawdown_pct', 'n/a')):>12}"
-    )
-    print(f"  {'Sharpe':<28} {str(sr.get('sharpe')):>12}   {str(br.get('sharpe', 'n/a')):>12}")
-    print(f"  {'Sortino':<28} {str(sr.get('sortino')):>12}   {str(br.get('sortino', 'n/a')):>12}")
+    print(f"  {'Total return':<28} {pct(sr.get('total_return_pct')):>12}   {pct(br.get('total_return_pct','n/a')):>12}")
+    print(f"  {'CAGR':<28} {pct(sr.get('cagr_pct')):>12}   {pct(br.get('cagr_pct','n/a')):>12}")
+    print(f"  {'Max drawdown':<28} {pct(sr.get('max_drawdown_pct')):>12}   {pct(br.get('max_drawdown_pct','n/a')):>12}")
+    print(f"  {'Sharpe':<28} {str(sr.get('sharpe')):>12}   {str(br.get('sharpe','n/a')):>12}")
+    print(f"  {'Sortino':<28} {str(sr.get('sortino')):>12}   {str(br.get('sortino','n/a')):>12}")
     print("  " + "-" * 60)
     print("  TRADE STATS")
-    print(
-        _row(
-            "Trades (incl. pyramids)",
-            f"{t.get('num_trades')}  (pyramid adds: {t.get('pyramid_trades', 0)})",
-        )
-    )
-    print(_row("Win rate", pct(t.get("win_rate_pct"))))
+    print(_row("Trades (incl. pyramids)", f"{t.get('num_trades')}  (pyramid adds: {t.get('pyramid_trades', 0)})"))
+    print(_row("Win rate", pct(t.get('win_rate_pct'))))
     print(_row("Avg win / avg loss", f"{pct(t.get('avg_win_pct'))} / {pct(t.get('avg_loss_pct'))}"))
-    print(_row("Win/loss ratio", t.get("win_loss_ratio")))
-    print(_row("Expectancy / trade", pct(t.get("expectancy_pct_per_trade"))))
-    print(_row("Avg holding days", t.get("avg_holding_days")))
+    print(_row("Win/loss ratio", t.get('win_loss_ratio')))
+    print(_row("Expectancy / trade", pct(t.get('expectancy_pct_per_trade'))))
+    print(_row("Avg holding days", t.get('avg_holding_days')))
     print(_row("Exits stop / target", f"{t.get('exits_stop')} / {t.get('exits_target')}"))
     print(_row("Total realized P&L", f"${t.get('total_pnl_usd', 0):,.2f}"))
     print("  " + "-" * 60)
-    print(
-        f"  Window: {sr.get('start_date')} -> {sr.get('end_date')} ({sr.get('trading_days')} trading days)"
-    )
+    print(f"  Window: {sr.get('start_date')} -> {sr.get('end_date')} ({sr.get('trading_days')} trading days)")
     print(_row("JSON", os.path.relpath(json_path, REPO)))
     print(_row("Equity PNG", os.path.relpath(png_path, REPO)))
     print(line + "\n")
 
 
 _IS_SPLIT_PCT = 0.60  # 60/40 chronological split
-
 
 def _compute_isoos(pf, start_equity):
     """60/40 chronological IS/OOS split, returning annualised CAGRs.
@@ -560,17 +415,17 @@ def _compute_isoos(pf, start_equity):
     if not ec or len(ec) < 5:
         return None, None
     split_i = max(1, int(len(ec) * _IS_SPLIT_PCT))
-    is_days = split_i
+    is_days  = split_i
     oos_days = len(ec) - split_i
     if is_days < 2 or oos_days < 2:
         return None, None
-    is_eq = ec[split_i]["equity"]
+    is_eq  = ec[split_i]["equity"]
     oos_eq = ec[-1]["equity"]
-    is_abs = is_eq / start_equity - 1
+    is_abs  = is_eq / start_equity - 1
     oos_abs = (oos_eq / is_eq - 1) if is_eq > 0 else None
     if oos_abs is None or oos_abs <= -1:
         return None, None
-    is_cagr = (1 + is_abs) ** (252 / is_days) - 1
+    is_cagr  = (1 + is_abs)  ** (252 / is_days)  - 1
     oos_cagr = (1 + oos_abs) ** (252 / oos_days) - 1
     return is_cagr, oos_cagr
 
@@ -585,15 +440,11 @@ def _run_validation_gates(pf, spy_curve, is_return=None, oos_return=None):
     """Bolt validation_gates onto the harness output. Harness logic is unchanged;
     this only reads pf.equity_curve and spy_curve already produced by the run."""
     from validation_gates import run_gates
-
     strat_rets = _curve_to_daily_returns(pf.equity_curve)
-    spy_rets = _curve_to_daily_returns(spy_curve)
+    spy_rets   = _curve_to_daily_returns(spy_curve)
     if len(strat_rets) != len(spy_rets) or len(strat_rets) < 2:
-        log.warning(
-            "Validation gates skipped: curve length mismatch strat=%d spy=%d",
-            len(strat_rets),
-            len(spy_rets),
-        )
+        log.warning("Validation gates skipped: curve length mismatch strat=%d spy=%d",
+                    len(strat_rets), len(spy_rets))
         return
     rep = run_gates(
         strat_daily_returns=strat_rets,

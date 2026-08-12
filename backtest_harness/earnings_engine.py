@@ -31,7 +31,6 @@ explicitly if a caller genuinely wants to test different sizing.
 Lot/Portfolio/_atr14 are reused from engine.py so trade records stay
 schema-compatible with metrics.py and validation_gates.
 """
-
 from __future__ import annotations
 
 import bisect
@@ -52,17 +51,17 @@ BACKTEST_MAX_POSITION_PCT = 0.05
 BACKTEST_MAX_OPEN_POSITIONS = 10
 
 
-def _bars_asof(store: data.BarStore, symbol: str, as_of: datetime.date) -> list[dict]:
+def _bars_asof(store: "data.BarStore", symbol: str, as_of: datetime.date) -> list[dict]:
     iso = as_of.isoformat()
     return [b for b in store.series.get(symbol, []) if b["date"] <= iso]
 
 
-def _price_asof(store: data.BarStore, symbol: str, as_of: datetime.date) -> float:
+def _price_asof(store: "data.BarStore", symbol: str, as_of: datetime.date) -> float:
     bars = _bars_asof(store, symbol, as_of)
     return bars[-1]["close"] if bars else 0.0
 
 
-def _avg_vol_asof(store: data.BarStore, symbol: str, as_of: datetime.date, n: int = 20) -> float:
+def _avg_vol_asof(store: "data.BarStore", symbol: str, as_of: datetime.date, n: int = 20) -> float:
     bars = _bars_asof(store, symbol, as_of)
     vols = [b["volume"] for b in bars[-n:] if b.get("volume")]
     return sum(vols) / len(vols) if vols else 0.0
@@ -79,7 +78,7 @@ def _initial_stop(basis: float, atr: float | None, atr_stop_mult: float) -> floa
 
 
 def run_earnings_simulation(
-    store: data.BarStore,
+    store: "data.BarStore",
     surprises: list[dict],
     start_equity: float = 100_000.0,
     warmup: int = 70,
@@ -124,8 +123,8 @@ def run_earnings_simulation(
     last_px: dict[str, float] = {}
     slip = slippage_bps / 10_000.0
     spy_shares: float = 0.0  # idle cash invested in SPY (E4 portable-alpha overlay)
-    buy_fill = lambda px: px * (1 + slip)  # noqa: E731
-    sell_fill = lambda px: px * (1 - slip)  # noqa: E731
+    buy_fill = lambda px: px * (1 + slip)    # noqa: E731
+    sell_fill = lambda px: px * (1 - slip)   # noqa: E731
     MAXP, MAX_OPEN = max_position_pct, max_open_positions
 
     start_i = max(warmup, bisect.bisect_left(cal, ws))
@@ -152,7 +151,6 @@ def run_earnings_simulation(
             spy_bars = _bars_asof(store, "SPY", as_of)
             if len(spy_bars) >= 50:
                 from backtest_harness.regime_gate_dispatch import classify_spy_regime
-
                 _reg = classify_spy_regime(spy_bars, mode=regime_gate_mode)
                 allow_entries = _reg.can_trade
 
@@ -216,21 +214,19 @@ def run_earnings_simulation(
                 continue
             exit_price = sell_fill(level)
             pf.cash += l.qty * exit_price
-            pf.trades.append(
-                {
-                    "symbol": l.symbol,
-                    "entry_date": l.entry_date.isoformat(),
-                    "exit_date": T.isoformat(),
-                    "entry_price": round(l.entry_price, 4),
-                    "exit_price": round(exit_price, 4),
-                    "qty": l.qty,
-                    "return_pct": round((exit_price / l.entry_price - 1) * 100, 4),
-                    "pnl_usd": round((exit_price - l.entry_price) * l.qty, 2),
-                    "holding_days": (T - l.entry_date).days,
-                    "exit_reason": exit_reason,
-                    "is_pyramid": False,
-                }
-            )
+            pf.trades.append({
+                "symbol": l.symbol,
+                "entry_date": l.entry_date.isoformat(),
+                "exit_date": T.isoformat(),
+                "entry_price": round(l.entry_price, 4),
+                "exit_price": round(exit_price, 4),
+                "qty": l.qty,
+                "return_pct": round((exit_price / l.entry_price - 1) * 100, 4),
+                "pnl_usd": round((exit_price - l.entry_price) * l.qty, 2),
+                "holding_days": (T - l.entry_date).days,
+                "exit_reason": exit_reason,
+                "is_pyramid": False,
+            })
         pf.lots = survivors
 
         # ── ratchet the ATR trailing stop up on the T close (never down) ──────
