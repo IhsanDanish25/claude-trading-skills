@@ -16,9 +16,14 @@ Reads two kinds of data:
 Adapted from regime-trader's monitoring/dashboard.py, which assumed a single
 live_state.json written by a main.py entrypoint this bot doesn't have —
 this version reads the state files this bot actually writes instead.
+
+Requires DASHBOARD_PASSWORD to be set (any non-empty value) — the whole app
+is gated behind it (see check_password()) since it's reachable on a public
+Railway domain and shows live account data with no other authentication.
 """
 
 import glob
+import hmac
 import json
 import os
 import sys
@@ -37,6 +42,39 @@ import core.config as config
 st.set_page_config(page_title="trading-bot monitor", layout="wide")
 
 REFRESH_SECONDS = int(os.environ.get("DASHBOARD_REFRESH_SECONDS", "30"))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Auth — Streamlit has no built-in login, and this is exposed on a public
+# Railway domain for mobile access. DASHBOARD_PASSWORD gates the whole app so
+# a leaked/guessed URL doesn't hand a stranger live portfolio value and
+# positions. Deliberately fails closed: an unset password refuses to serve
+# rather than defaulting open.
+# ──────────────────────────────────────────────────────────────────────────
+def _password_matches(entered: str, expected: str) -> bool:
+    """Constant-time comparison so response timing can't leak the password."""
+    return hmac.compare_digest(entered, expected)
+
+
+def check_password() -> bool:
+    expected = os.environ.get("DASHBOARD_PASSWORD", "")
+    if not expected:
+        st.error("DASHBOARD_PASSWORD is not set — refusing to serve the dashboard unauthenticated.")
+        st.stop()
+
+    if st.session_state.get("password_correct"):
+        return True
+
+    def _on_submit():
+        entered = st.session_state.get("password_input", "")
+        st.session_state["password_correct"] = _password_matches(entered, expected)
+        if "password_input" in st.session_state:
+            del st.session_state["password_input"]
+
+    st.text_input("Password", type="password", on_change=_on_submit, key="password_input")
+    if st.session_state.get("password_correct") is False:
+        st.error("Incorrect password")
+    return False
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -229,6 +267,9 @@ def render_trade_log(trade_df: pd.DataFrame):
 
 
 def render_dashboard():
+    if not check_password():
+        return
+
     st.title("trading-bot — live monitor")
 
     account, positions, error = load_account()
