@@ -2482,10 +2482,12 @@ def run():
         # REGIME_GATE_MODE=hmm opts into the HMM-based gate (regime_gate_hmm.py);
         # default "sma_adx" (or unset) keeps today's proven ADX/SMA gate as-is.
         gate_mode = os.environ.get("REGIME_GATE_MODE", "sma_adx").strip().lower()
+        hmm_reg = None
         if gate_mode == "hmm":
             from regime_gate_hmm import classify as classify_hmm
 
             reg = classify_hmm(highs, lows, closes)
+            hmm_reg = reg
         else:
             reg = classify(highs, lows, closes)
         log.info(
@@ -2499,13 +2501,28 @@ def run():
             try:
                 from regime_gate_hmm import classify as classify_hmm_shadow
 
-                shadow = classify_hmm_shadow(highs, lows, closes)
+                hmm_reg = classify_hmm_shadow(highs, lows, closes)
                 log.info(
-                    f"Regime gate (hmm, SHADOW - not gating): state={shadow.state} "
-                    f"confidence={shadow.confidence:.0%} reason={shadow.reason}"
+                    f"Regime gate (hmm, SHADOW - not gating): state={hmm_reg.state} "
+                    f"confidence={hmm_reg.confidence:.0%} reason={hmm_reg.reason}"
                 )
             except Exception as e:
                 log.warning(f"HMM shadow regime gate failed (non-blocking): {e}")
+
+        # Advisory-only: what a regime-based exposure scaler would suggest, purely
+        # for observation - never applied to position sizing or the gate decision.
+        if hmm_reg is not None:
+            try:
+                from regime_exposure import suggest_exposure
+
+                suggestion = suggest_exposure(hmm_reg)
+                log.info(
+                    f"Regime exposure suggestion (ADVISORY, not applied): bucket={suggestion.bucket} "
+                    f"target_exposure={suggestion.target_exposure_pct:.0%} max_leverage={suggestion.max_leverage}x "
+                    f"trailing_stop={suggestion.trailing_stop_pct} reason={suggestion.reason}"
+                )
+            except Exception as e:
+                log.warning(f"Regime exposure suggestion failed (non-blocking): {e}")
 
         if not reg.can_trade:
             log.warning(f"REGIME GATE: STAND_DOWN — {reg.reason} — holding cash, no screening")

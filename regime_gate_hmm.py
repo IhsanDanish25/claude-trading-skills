@@ -62,6 +62,7 @@ class Regime:
     reason: str
     confidence: float = 0.0
     n_states: int = 0
+    state_idx: int = -1  # raw HMM state index (0=coldest/lowest-return); -1 on any fallback path
 
     @property
     def can_trade(self) -> bool:
@@ -286,6 +287,7 @@ def classify(
             f"{MIN_CONFIDENCE:.0%} floor -> neutral (would have been {gate})",
             confidence=today_confidence,
             n_states=n_states,
+            state_idx=today_state_idx,
         )
 
     return Regime(
@@ -298,4 +300,5 @@ def classify(
         f"confidence {today_confidence:.0%}",
         confidence=today_confidence,
         n_states=n_states,
+        state_idx=today_state_idx,
     )

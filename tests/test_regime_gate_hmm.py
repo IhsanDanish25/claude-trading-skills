@@ -66,6 +66,17 @@ def test_classify_returns_valid_regime_shape():
     assert 0.0 <= regime.confidence <= 1.0
     assert regime.n_states == 3
     assert regime.can_trade == (regime.state != "STAND_DOWN")
+    assert 0 <= regime.state_idx < regime.n_states
+
+
+def test_state_idx_matches_state_gate():
+    """state_idx should always be internally consistent with the reported gate."""
+    highs, lows, closes = _bars()
+    regime = rgh.classify(highs, lows, closes, **_fast_kwargs)
+    if regime.state_idx == 0:
+        assert regime.state in ("STAND_DOWN", "NEUTRAL")  # NEUTRAL if confidence-downgraded
+    if regime.state_idx == regime.n_states - 1:
+        assert regime.state in ("GO", "NEUTRAL")
 
 
 def test_low_confidence_downgrades_to_neutral(monkeypatch):
