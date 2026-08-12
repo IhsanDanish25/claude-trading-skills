@@ -174,6 +174,22 @@ def test_volume_zscore_is_causal_and_windowed():
     assert np.isfinite(z[19:]).all()
 
 
+def test_inference_failure_after_model_selection_falls_back_to_neutral(monkeypatch):
+    """If the selected model passes fit/score but the forward-algorithm step
+    itself raises (e.g. a numerical edge case scipy can't handle), classify()
+    must fall back to NEUTRAL rather than propagate the exception."""
+    highs, lows, closes = _bars()
+
+    def _boom(*args, **kwargs):
+        raise ValueError("simulated numerical failure")
+
+    monkeypatch.setattr(rgh, "_forward_log_alpha", _boom)
+    regime = rgh.classify(highs, lows, closes, **_fast_kwargs)
+    assert regime.state == "NEUTRAL"
+    assert regime.can_trade is True
+    assert "HMM inference failed" in regime.reason
+
+
 def test_classify_with_volumes_returns_valid_regime():
     highs, lows, closes = _bars()
     volumes = _volumes(n=len(closes))

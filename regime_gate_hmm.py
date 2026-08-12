@@ -287,16 +287,24 @@ def classify(
             closes, "HMM fit failed for every candidate state count -> neutral"
         )
 
-    _reorder_states_by_return(model)
-    n_states = model.n_components
+    try:
+        _reorder_states_by_return(model)
+        n_states = model.n_components
 
-    log_alpha = _forward_log_alpha(model, features)
-    row_max = log_alpha.max(axis=1, keepdims=True)
-    filtered_proba = np.exp(log_alpha - row_max)
-    filtered_proba /= filtered_proba.sum(axis=1, keepdims=True)
+        log_alpha = _forward_log_alpha(model, features)
+        row_max = log_alpha.max(axis=1, keepdims=True)
+        filtered_proba = np.exp(log_alpha - row_max)
+        filtered_proba /= filtered_proba.sum(axis=1, keepdims=True)
 
-    raw_states = list(np.argmax(filtered_proba, axis=1))
-    confirmed_states = _apply_stability_filter(raw_states, CONFIRMATION_BARS)
+        raw_states = list(np.argmax(filtered_proba, axis=1))
+        confirmed_states = _apply_stability_filter(raw_states, CONFIRMATION_BARS)
+    except Exception as exc:
+        # The selected model passed hmmlearn's own fit/score validation but the
+        # forward-algorithm inference step hit a numerical edge case anyway
+        # (e.g. a near-singular covariance) - fall back rather than raise,
+        # consistent with every other failure path in this function.
+        logger.warning("HMM inference failed after model selection: %s -> neutral", exc)
+        return _neutral_fallback(closes, f"HMM inference failed ({exc}) -> neutral")
 
     today_confidence = float(filtered_proba[-1].max())
     today_state_idx = confirmed_states[-1]

@@ -18,9 +18,11 @@ Fidelity contract:
 No look-ahead: every decision for trading day T is computed from data through
 T-1 (AS_OF) and filled at T's open.
 """
+
 from __future__ import annotations
 
 import os
+
 # Disable FMP GROUP B sub-scores BEFORE composite imports (USE_FMP is read at import).
 os.environ.setdefault("COMPOSITE_USE_FMP", "false")
 
@@ -29,10 +31,9 @@ import logging
 from dataclasses import dataclass, field
 
 import core.screener as screener
-from core import config, composite
-from core.edge import compute_trail_stop, should_pyramid
-
 from backtest_harness import data
+from core import composite, config
+from core.edge import compute_trail_stop, should_pyramid
 
 log = logging.getLogger("backtest.engine")
 
@@ -44,26 +45,35 @@ screener._fetch_bars = data.fake_fetch
 MAX_BUYS = 3  # routines/market_open.py hardcodes this per-run cap
 
 
-def _atr14(store: "data.BarStore", symbol: str, as_of: datetime.date, n: int = 14) -> float | None:
+def _atr14(store: data.BarStore, symbol: str, as_of: datetime.date, n: int = 14) -> float | None:
     """ATR(14) from daily bars dated <= as_of (point-in-time). Simple average of
     the last `n` true ranges. Returns None if fewer than n+1 bars available."""
-    bars = [b for b in store.series.get(symbol, [])
-            if datetime.date.fromisoformat(b["date"]) <= as_of]
+    bars = [
+        b for b in store.series.get(symbol, []) if datetime.date.fromisoformat(b["date"]) <= as_of
+    ]
     if len(bars) < n + 1:
         return None
-    window = bars[-(n + 1):]
+    window = bars[-(n + 1) :]
     trs = []
     for prev, cur in zip(window[:-1], window[1:]):
-        tr = max(cur["high"] - cur["low"],
-                 abs(cur["high"] - prev["close"]),
-                 abs(cur["low"] - prev["close"]))
+        tr = max(
+            cur["high"] - cur["low"],
+            abs(cur["high"] - prev["close"]),
+            abs(cur["low"] - prev["close"]),
+        )
         trs.append(tr)
     atr = sum(trs) / len(trs)
     return atr if atr > 0 else None
 
 
-def _initial_stop(basis: float, store: "data.BarStore", symbol: str, as_of: datetime.date,
-                  stop_mode: str, atr_stop_mult: float) -> float:
+def _initial_stop(
+    basis: float,
+    store: data.BarStore,
+    symbol: str,
+    as_of: datetime.date,
+    stop_mode: str,
+    atr_stop_mult: float,
+) -> float:
     """Initial protective stop. 'flat' = basis*(1-STOP_LOSS_PCT) (live behavior);
     'atr' = basis - atr_stop_mult*ATR(14). Falls back to flat if ATR is
     unavailable or would push the stop <= 0."""
@@ -99,7 +109,9 @@ class Portfolio:
         return {l.symbol for l in self.lots}
 
 
-def _select_ranked_candidates(universe: list[str], held: set[str], bought_today: set[str]) -> list[dict]:
+def _select_ranked_candidates(
+    universe: list[str], held: set[str], bought_today: set[str]
+) -> list[dict]:
     """Exact replica of market_open.py's filter + composite-ranking block."""
     candidates = screener.screen(universe)
     passed = []
@@ -147,9 +159,17 @@ def _open_px(store: data.BarStore, sym: str, d: datetime.date, last_px: dict) ->
     return bar["open"] if bar else last_px.get(sym, 0.0)
 
 
-def run_simulation(store: data.BarStore, universe: list[str], start_equity: float = 100_000.0,
-                   warmup: int = 70, slippage_bps: float = 0.0, stop_mode: str = "flat",
-                   atr_stop_mult: float = 1.5, regime_gated: bool = False) -> Portfolio:
+def run_simulation(
+    store: data.BarStore,
+    universe: list[str],
+    start_equity: float = 100_000.0,
+    warmup: int = 70,
+    slippage_bps: float = 0.0,
+    stop_mode: str = "flat",
+    atr_stop_mult: float = 1.5,
+    regime_gated: bool = False,
+    regime_gate_mode: str = "sma_adx",
+) -> Portfolio:
     cal = store.trading_calendar("SPY")
     if len(cal) <= warmup + 1:
         raise RuntimeError(f"Not enough SPY history ({len(cal)} bars) for warmup={warmup}")
@@ -161,8 +181,8 @@ def run_simulation(store: data.BarStore, universe: list[str], start_equity: floa
 
     # Slippage moves every fill against us: buys fill higher, sells/exits lower.
     slip = slippage_bps / 10_000.0
-    buy_fill = lambda px: px * (1 + slip)    # noqa: E731
-    sell_fill = lambda px: px * (1 - slip)   # noqa: E731
+    buy_fill = lambda px: px * (1 + slip)  # noqa: E731
+    sell_fill = lambda px: px * (1 - slip)  # noqa: E731
 
     for i in range(warmup, len(cal)):
         T = cal[i]
@@ -181,8 +201,10 @@ def run_simulation(store: data.BarStore, universe: list[str], start_equity: floa
         pv_open = pf.cash
         for l in pf.lots:
             pv_open += l.qty * _open_px(store, l.symbol, T, last_px)
-        cb_blocked = (day_start_equity > 0 and
-                      (pv_open - day_start_equity) / day_start_equity <= -config.CIRCUIT_BREAKER_PCT)
+        cb_blocked = (
+            day_start_equity > 0
+            and (pv_open - day_start_equity) / day_start_equity <= -config.CIRCUIT_BREAKER_PCT
+        )
 
         # ── b. ENTRIES (decided from as_of, filled at T open) ─────────────────
         entered_today: set[str] = set()
@@ -191,15 +213,13 @@ def run_simulation(store: data.BarStore, universe: list[str], start_equity: floa
             slots = min(MAX_BUYS, MAX_OPEN - len(held))
             if slots > 0:
                 if regime_gated:
-                    spy_bars = [b for b in store.series.get("SPY", [])
-                                if b["date"] <= as_of.isoformat()]
+                    spy_bars = [
+                        b for b in store.series.get("SPY", []) if b["date"] <= as_of.isoformat()
+                    ]
                     if len(spy_bars) >= 50:
-                        from regime_gate import classify as _regime_classify
-                        _reg = _regime_classify(
-                            [b["high"] for b in spy_bars],
-                            [b["low"]  for b in spy_bars],
-                            [b["close"] for b in spy_bars],
-                        )
+                        from backtest_harness.regime_gate_dispatch import classify_spy_regime
+
+                        _reg = classify_spy_regime(spy_bars, mode=regime_gate_mode)
                         if not _reg.can_trade:
                             slots = 0  # STAND_DOWN: hold existing, no new entries
                 if slots > 0:
@@ -214,7 +234,7 @@ def run_simulation(store: data.BarStore, universe: list[str], start_equity: floa
                         qty = int((pv_open * MAXP) / op)  # size on observable open
                         if qty < 1:
                             continue
-                        basis = buy_fill(op)             # slipped fill price = cost basis
+                        basis = buy_fill(op)  # slipped fill price = cost basis
                         stop = _initial_stop(basis, store, sym, as_of, stop_mode, atr_stop_mult)
                         pf.lots.append(Lot(sym, T, basis, qty, stop, round(basis * (1 + TP), 2)))
                         pf.cash -= qty * basis
@@ -238,19 +258,21 @@ def run_simulation(store: data.BarStore, universe: list[str], start_equity: floa
                 continue
             exit_price = sell_fill(level)  # exits fill against us by slippage
             pf.cash += l.qty * exit_price
-            pf.trades.append({
-                "symbol": l.symbol,
-                "entry_date": l.entry_date.isoformat(),
-                "exit_date": T.isoformat(),
-                "entry_price": round(l.entry_price, 4),
-                "exit_price": round(exit_price, 4),
-                "qty": l.qty,
-                "return_pct": round((exit_price / l.entry_price - 1) * 100, 4),
-                "pnl_usd": round((exit_price - l.entry_price) * l.qty, 2),
-                "holding_days": (T - l.entry_date).days,
-                "exit_reason": exit_reason,
-                "is_pyramid": l.is_pyramid,
-            })
+            pf.trades.append(
+                {
+                    "symbol": l.symbol,
+                    "entry_date": l.entry_date.isoformat(),
+                    "exit_date": T.isoformat(),
+                    "entry_price": round(l.entry_price, 4),
+                    "exit_price": round(exit_price, 4),
+                    "qty": l.qty,
+                    "return_pct": round((exit_price / l.entry_price - 1) * 100, 4),
+                    "pnl_usd": round((exit_price - l.entry_price) * l.qty, 2),
+                    "holding_days": (T - l.entry_date).days,
+                    "exit_reason": exit_reason,
+                    "is_pyramid": l.is_pyramid,
+                }
+            )
         pf.lots = survivors
 
         # ── d. management at T close: trailing ratchet + one pyramid add ──────
@@ -262,21 +284,33 @@ def run_simulation(store: data.BarStore, universe: list[str], start_equity: floa
             close = bar["close"]
             if close > l.entry_price:
                 l.stop = compute_trail_stop(close, l.entry_price, l.stop)  # real edge fn
-            if (not l.is_pyramid and
-                    should_pyramid({"pnl_pct": (close / l.entry_price - 1) * 100,
-                                    "pyramided": l.pyramided})):
+            if not l.is_pyramid and should_pyramid(
+                {"pnl_pct": (close / l.entry_price - 1) * 100, "pyramided": l.pyramided}
+            ):
                 add_amt = pv_close * MAXP * 0.5
-                add_qty = int(add_amt / close)        # size on observable close
-                add_basis = buy_fill(close)           # slipped fill = cost basis
+                add_qty = int(add_amt / close)  # size on observable close
+                add_basis = buy_fill(close)  # slipped fill = cost basis
                 if add_qty >= 1 and pf.cash >= add_qty * add_basis:
-                    add_stop = _initial_stop(add_basis, store, l.symbol, T, stop_mode, atr_stop_mult)
-                    pf.lots.append(Lot(l.symbol, T, add_basis, add_qty, add_stop,
-                                       round(add_basis * (1 + TP), 2), is_pyramid=True))
+                    add_stop = _initial_stop(
+                        add_basis, store, l.symbol, T, stop_mode, atr_stop_mult
+                    )
+                    pf.lots.append(
+                        Lot(
+                            l.symbol,
+                            T,
+                            add_basis,
+                            add_qty,
+                            add_stop,
+                            round(add_basis * (1 + TP), 2),
+                            is_pyramid=True,
+                        )
+                    )
                     pf.cash -= add_qty * add_basis
                     l.pyramided = True
 
         # ── e. mark equity at T close ─────────────────────────────────────────
-        pf.equity_curve.append({"date": T.isoformat(),
-                                "equity": round(_equity(pf, store, T, last_px), 2)})
+        pf.equity_curve.append(
+            {"date": T.isoformat(), "equity": round(_equity(pf, store, T, last_px), 2)}
+        )
 
     return pf
