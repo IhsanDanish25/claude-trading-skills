@@ -149,7 +149,8 @@ def _open_px(store: data.BarStore, sym: str, d: datetime.date, last_px: dict) ->
 
 def run_simulation(store: data.BarStore, universe: list[str], start_equity: float = 100_000.0,
                    warmup: int = 70, slippage_bps: float = 0.0, stop_mode: str = "flat",
-                   atr_stop_mult: float = 1.5, regime_gated: bool = False) -> Portfolio:
+                   atr_stop_mult: float = 1.5, regime_gated: bool = False,
+                   regime_gate_mode: str = "sma_adx") -> Portfolio:
     cal = store.trading_calendar("SPY")
     if len(cal) <= warmup + 1:
         raise RuntimeError(f"Not enough SPY history ({len(cal)} bars) for warmup={warmup}")
@@ -194,12 +195,8 @@ def run_simulation(store: data.BarStore, universe: list[str], start_equity: floa
                     spy_bars = [b for b in store.series.get("SPY", [])
                                 if b["date"] <= as_of.isoformat()]
                     if len(spy_bars) >= 50:
-                        from regime_gate import classify as _regime_classify
-                        _reg = _regime_classify(
-                            [b["high"] for b in spy_bars],
-                            [b["low"]  for b in spy_bars],
-                            [b["close"] for b in spy_bars],
-                        )
+                        from backtest_harness.regime_gate_dispatch import classify_spy_regime
+                        _reg = classify_spy_regime(spy_bars, mode=regime_gate_mode)
                         if not _reg.can_trade:
                             slots = 0  # STAND_DOWN: hold existing, no new entries
                 if slots > 0:
