@@ -15,8 +15,8 @@ from alpaca.trading.requests import (
     LimitOrderRequest,
     MarketOrderRequest,
     ReplaceOrderRequest,
+    StopLimitOrderRequest,
     StopLossRequest,
-    StopOrderRequest,
     TakeProfitRequest,
 )
 
@@ -278,8 +278,7 @@ class BrokerClient:
         reserves the shares and the second is rejected).
 
         OCO is atomic, so both legs attach together or neither does. Returns
-        (stop_attached, target_attached) — both the same bool — to preserve the
-        caller contract.
+        (stop_attached, target_attached).
 
         Submission is wrapped in safe_attach_oco, which retries once a stale
         sell order for this symbol is cancelled if Alpaca rejects the order
@@ -290,12 +289,36 @@ class BrokerClient:
         buy's OCO/stop must use TimeInForce.DAY instead. That means the
         exit expires at the day's close; callers that run a position-repair
         pass (midday_review, market_open) are responsible for re-attaching
-        it on days it's found missing."""
+        it on days it's found missing.
+
+        Alpaca separately rejects ANY non-SIMPLE order_class (OCO included)
+        on a fractional qty outright (same error code 42210000, message
+        "fractional orders must be simple orders" — a second, distinct
+        restriction from the DAY-tif one above). A fractional position
+        therefore can't get an atomic stop+target pair at all: submitting
+        them as two independent SIMPLE sells would double-reserve the
+        shares (the first order's shares aren't available to the second).
+        So for fractional qty we attach ONLY the stop-loss as a SIMPLE
+        order and skip the take-profit target entirely — protecting the
+        downside is the priority, and giving up an automated take-profit
+        exit (still handled by the position-review routines' own logic)
+        beats the previous behavior, where the doomed OCO attempt failed
+        outright, reported the position as fully unprotected, and callers'
+        "flatten if stop not attached" guard immediately sold it back out -
+        a same-second buy-then-sell that paid the spread twice for nothing."""
+        is_fractional = qty != int(qty)
+        if is_fractional and target is not None:
+            log.info(
+                f"  ↳ {symbol} qty {qty} is fractional — Alpaca disallows OCO for fractional "
+                f"orders, attaching stop-only (no take-profit target) instead"
+            )
+            target = None
+
         # STOP_LIMIT_BUFFER_PCT: stop-limit fills cap slippage at 1.5% below
         # the stop price on gap-down opens. Trade-off: stop-limit orders do
         # not participate in the open/close auction (Alpaca docs). Accepted.
         stop_limit = max(round(stop * 0.985, 2), round(stop - 0.05, 2))
-        tif = TimeInForce.DAY if qty != int(qty) else TimeInForce.GTC
+        tif = TimeInForce.DAY if is_fractional else TimeInForce.GTC
 
         def _submit():
             if target is not None:
@@ -315,7 +338,7 @@ class BrokerClient:
                 )
             else:
                 order = self.trade.submit_order(
-                    StopOrderRequest(
+                    StopLimitOrderRequest(
                         symbol=symbol,
                         qty=qty,
                         side=OrderSide.SELL,
