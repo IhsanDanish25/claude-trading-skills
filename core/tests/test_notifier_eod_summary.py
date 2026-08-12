@@ -83,6 +83,43 @@ def test_eod_summary_includes_trades_and_skipped_routines(monkeypatch):
     assert "SKIPPED" in sent["plain"]
 
 
+def test_eod_summary_renders_blocked_orders_as_explicit_rows_not_garbled_trades(monkeypatch):
+    """Regression: blocked orders (spread gate, etc.) used to be fed straight
+    into trades_today and rendered by the "Trades Today" formatter, which
+    assumes every row has side/qty/price — producing garbled "? sh @ $0.00"
+    rows (observed live: MSFT/JPM/GE/C spread-gate blocks, 2026-08-12
+    market_open). Blocked attempts must render as their own labeled rows with
+    the real symbol and reason, not fabricated trade fields."""
+    sent = {}
+    monkeypatch.setattr("core.notifier.send", lambda subject, plain, html=None: sent.update(
+        subject=subject, plain=plain, html=html) or True)
+
+    ok = send_eod_summary(
+        date="2026-08-12",
+        portfolio_value=267.0,
+        cash=267.0,
+        positions_held=0,
+        unrealized_pnl=-1.15,
+        regime="neutral",
+        bias="moderate",
+        spy_change_pct=0.0,
+        ftd_detected=False,
+        blocked_today=[
+            {"ts": "2026-08-12T09:40:01", "event": "order_skipped", "symbol": "MSFT",
+             "strategy": "earnmom", "gate": "broker_buy", "reason": "spread_too_wide"},
+            {"ts": "2026-08-12T09:40:02", "event": "order_skipped", "symbol": "JPM",
+             "strategy": "earnmom", "gate": "broker_buy", "reason": "spread_too_wide"},
+        ],
+    )
+
+    assert ok is True
+    assert "?" not in sent["html"].split("Blocked Orders")[1].split("</div>")[0]
+    assert "MSFT" in sent["html"] and "spread_too_wide" in sent["html"]
+    assert "JPM" in sent["html"]
+    assert "$0.00" not in sent["html"]
+    assert "Blocked" in sent["plain"] and "MSFT" in sent["plain"]
+
+
 def test_eod_summary_no_trades_no_skips_still_works(monkeypatch):
     monkeypatch.setattr("core.notifier.send", lambda *a, **k: True)
 

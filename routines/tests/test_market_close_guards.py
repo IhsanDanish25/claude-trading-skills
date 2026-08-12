@@ -87,6 +87,40 @@ class TestTodaysTradesAndSkippedRoutines:
         monkeypatch.setattr(market_close, "TRADE_LOG_PATH", str(tmp_path / "nope.jsonl"))
         assert market_close._todays_trades("2026-08-05") == []
 
+    def test_todays_trades_excludes_blocked_orders(self, monkeypatch, tmp_path):
+        """Regression: order_skipped entries (spread-gate blocks etc.) have no
+        side/qty/price and used to leak into _todays_trades, rendering as
+        garbled "? sh @ $0.00" rows in the EOD email (2026-08-12 MSFT/JPM/GE/C
+        spread-gate incident). Only real fills belong here."""
+        log_path = tmp_path / "trade_log.jsonl"
+        log_path.write_text(
+            '{"ts": "2026-08-12T09:40:00", "symbol": "AMZN", "side": "buy", "qty": 0.039274, "price": 272.19, "strategy": "earnmom"}\n'
+            '{"ts": "2026-08-12T09:40:01", "event": "order_skipped", "symbol": "MSFT", "strategy": "earnmom", "gate": "broker_buy", "reason": "spread_too_wide"}\n'
+        )
+        monkeypatch.setattr(market_close, "TRADE_LOG_PATH", str(log_path))
+
+        trades = market_close._todays_trades("2026-08-12")
+        assert len(trades) == 1
+        assert trades[0]["symbol"] == "AMZN"
+
+    def test_todays_blocked_filters_by_date_and_event(self, monkeypatch, tmp_path):
+        log_path = tmp_path / "trade_log.jsonl"
+        log_path.write_text(
+            '{"ts": "2026-08-12T09:40:00", "symbol": "AMZN", "side": "buy", "qty": 0.039274, "price": 272.19, "strategy": "earnmom"}\n'
+            '{"ts": "2026-08-12T09:40:01", "event": "order_skipped", "symbol": "MSFT", "strategy": "earnmom", "gate": "broker_buy", "reason": "spread_too_wide"}\n'
+            '{"ts": "2026-08-12T09:40:02", "event": "order_skipped", "symbol": "JPM", "strategy": "earnmom", "gate": "broker_buy", "reason": "spread_too_wide"}\n'
+            '{"ts": "2026-08-11T09:40:02", "event": "order_skipped", "symbol": "GE", "strategy": "earnmom", "gate": "broker_buy", "reason": "spread_too_wide"}\n'
+        )
+        monkeypatch.setattr(market_close, "TRADE_LOG_PATH", str(log_path))
+
+        blocked = market_close._todays_blocked("2026-08-12")
+        assert [b["symbol"] for b in blocked] == ["MSFT", "JPM"]
+        assert blocked[0]["reason"] == "spread_too_wide"
+
+    def test_todays_blocked_missing_file_returns_empty(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(market_close, "TRADE_LOG_PATH", str(tmp_path / "nope.jsonl"))
+        assert market_close._todays_blocked("2026-08-05") == []
+
     def test_todays_skipped_routines_matches_date(self, monkeypatch, tmp_path):
         import json
         skip_path = tmp_path / "skipped_routines.json"
