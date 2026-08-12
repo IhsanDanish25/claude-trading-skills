@@ -44,6 +44,7 @@ MIN_STATES = 3
 MAX_STATES = 5
 MIN_TRAIN_SAMPLES = 150  # below this, fall back to NEUTRAL rather than fitting on too little data
 REALIZED_VOL_WINDOW = 10
+VOLUME_ZSCORE_WINDOW = 20  # only used when `volumes` is passed in to classify()
 CONFIRMATION_BARS = 3  # bars a new state must persist before the active regime switches
 MIN_CONFIDENCE = 0.60  # below this, downgrade the day's call to NEUTRAL regardless of state
 
@@ -82,9 +83,28 @@ def _neutral_fallback(closes: list[float], reason: str) -> Regime:
     return Regime("NEUTRAL", trend, 0.0, sma50, sma200, reason, confidence=0.0, n_states=0)
 
 
-def _build_features(closes: list[float]) -> tuple[np.ndarray, list[float]]:
+def _volume_zscore(volumes: list[float], window: int = VOLUME_ZSCORE_WINDOW) -> np.ndarray:
+    """Rolling z-score of volume, causal (each row uses only volumes up to
+    and including that day). NaN until the window is full; 0.0 on a
+    zero-variance window rather than dividing by zero."""
+    volumes_arr = np.asarray(volumes, dtype=float)
+    n = len(volumes_arr)
+    z = np.full(n, np.nan)
+    for i in range(window - 1, n):
+        w = volumes_arr[i - window + 1 : i + 1]
+        mean, std = w.mean(), w.std(ddof=1)
+        z[i] = (volumes_arr[i] - mean) / std if std > 0 else 0.0
+    return z
+
+
+def _build_features(
+    closes: list[float], volumes: list[float] | None = None
+) -> tuple[np.ndarray, list[float]]:
     """log-return + REALIZED_VOL_WINDOW-day annualized realized vol, causal
-    (each row uses only closes up to and including that day)."""
+    (each row uses only closes up to and including that day). When `volumes`
+    is given (same length as `closes`), a third feature - VOLUME_ZSCORE_WINDOW
+    -day rolling volume z-score, equally causal - is appended.
+    """
     closes_arr = np.asarray(closes, dtype=float)
     log_returns = np.diff(
         np.log(closes_arr)
@@ -97,7 +117,15 @@ def _build_features(closes: list[float]) -> tuple[np.ndarray, list[float]]:
         vol[i] = window.std(ddof=1) * math.sqrt(252)
 
     valid = ~np.isnan(vol)
-    features = np.column_stack([log_returns[valid], vol[valid]])
+    feature_cols = [log_returns, vol]
+
+    if volumes is not None and len(volumes) == len(closes):
+        # volumes[i + 1] aligns with log_returns[i] (both are computed relative to closes[i + 1])
+        volume_z = _volume_zscore(volumes)[1:]
+        valid = valid & ~np.isnan(volume_z)
+        feature_cols.append(volume_z)
+
+    features = np.column_stack([col[valid] for col in feature_cols])
     # features[i] corresponds to closes[i + 1 + first_valid_offset]; return the aligned close price list too
     valid_closes = [closes[i + 1] for i in range(n) if valid[i]]
     return features, valid_closes
@@ -235,8 +263,10 @@ def classify(
     random_state: int = 42,
 ) -> Regime:
     """Drop-in for regime_gate.classify(highs, lows, closes) - same arg order
-    (oldest -> newest), same Regime.can_trade contract. `volumes` is accepted
-    for API symmetry but not currently used as a feature.
+    (oldest -> newest), same Regime.can_trade contract. When `volumes` (same
+    length as `closes`) is passed, a rolling volume z-score feature is added
+    alongside log-return and realized vol; omitted or mismatched-length
+    `volumes` falls back to the original 2-feature model.
     """
     if not _HMMLEARN_AVAILABLE:
         return _neutral_fallback(closes, "hmmlearn not installed -> neutral (see requirements.txt)")
@@ -247,7 +277,7 @@ def classify(
             f"insufficient history ({len(closes)} bars, need {MIN_TRAIN_SAMPLES}) -> neutral",
         )
 
-    features, aligned_closes = _build_features(closes)
+    features, aligned_closes = _build_features(closes, volumes=volumes)
     if len(features) < MIN_TRAIN_SAMPLES:
         return _neutral_fallback(closes, "insufficient post-warm-up history for HMM -> neutral")
 

@@ -2478,6 +2478,11 @@ def run():
         highs = [b["high"] for b in spy_bars]
         lows = [b["low"] for b in spy_bars]
         closes = [b["close"] for b in spy_bars]
+        volumes = [b.get("volume") for b in spy_bars]
+        if any(v is None for v in volumes):
+            volumes = (
+                None  # missing volume on any bar -> HMM gate falls back to its 2-feature model
+            )
 
         # REGIME_GATE_MODE=hmm opts into the HMM-based gate (regime_gate_hmm.py);
         # default "sma_adx" (or unset) keeps today's proven ADX/SMA gate as-is.
@@ -2486,7 +2491,7 @@ def run():
         if gate_mode == "hmm":
             from regime_gate_hmm import classify as classify_hmm
 
-            reg = classify_hmm(highs, lows, closes)
+            reg = classify_hmm(highs, lows, closes, volumes=volumes)
             hmm_reg = reg
         else:
             reg = classify(highs, lows, closes)
@@ -2501,7 +2506,7 @@ def run():
             try:
                 from regime_gate_hmm import classify as classify_hmm_shadow
 
-                hmm_reg = classify_hmm_shadow(highs, lows, closes)
+                hmm_reg = classify_hmm_shadow(highs, lows, closes, volumes=volumes)
                 log.info(
                     f"Regime gate (hmm, SHADOW - not gating): state={hmm_reg.state} "
                     f"confidence={hmm_reg.confidence:.0%} reason={hmm_reg.reason}"

@@ -42,6 +42,11 @@ def _bars(
     return highs, lows, closes
 
 
+def _volumes(n=300, seed=11):
+    rng = np.random.default_rng(seed)
+    return list(rng.lognormal(mean=15, sigma=0.3, size=n))
+
+
 def test_insufficient_history_falls_back_to_neutral():
     highs, lows, closes = _bars(n=50)
     regime = rgh.classify(highs, lows, closes)
@@ -134,3 +139,61 @@ def test_build_features_shapes_and_alignment():
     assert features.shape[1] == 2  # log_return, realized_vol
     assert len(features) == len(aligned_closes)
     assert np.isfinite(features).all()
+
+
+# ---------------------------------------------------------------------------
+# Volume feature (opt-in via the `volumes` argument)
+# ---------------------------------------------------------------------------
+
+
+def test_build_features_without_volumes_stays_two_dimensional():
+    _, _, closes = _bars(n=100)
+    features, _ = rgh._build_features(closes, volumes=None)
+    assert features.shape[1] == 2
+
+
+def test_build_features_with_volumes_adds_third_column():
+    _, _, closes = _bars(n=100)
+    volumes = _volumes(n=100)
+    features, aligned_closes = rgh._build_features(closes, volumes=volumes)
+    assert features.shape[1] == 3
+    assert len(features) == len(aligned_closes)
+    assert np.isfinite(features).all()
+
+
+def test_build_features_mismatched_volume_length_falls_back_gracefully():
+    _, _, closes = _bars(n=100)
+    features, _ = rgh._build_features(closes, volumes=_volumes(n=50))  # wrong length
+    assert features.shape[1] == 2  # silently ignored, not an error
+
+
+def test_volume_zscore_is_causal_and_windowed():
+    volumes = _volumes(n=50)
+    z = rgh._volume_zscore(volumes, window=20)
+    assert np.isnan(z[:19]).all()  # not enough history yet
+    assert np.isfinite(z[19:]).all()
+
+
+def test_classify_with_volumes_returns_valid_regime():
+    highs, lows, closes = _bars()
+    volumes = _volumes(n=len(closes))
+    regime = rgh.classify(highs, lows, closes, volumes=volumes, **_fast_kwargs)
+    assert regime.state in ("GO", "NEUTRAL", "STAND_DOWN")
+    assert 0 <= regime.state_idx < regime.n_states
+
+
+def test_features_with_volumes_are_causal_no_lookahead():
+    """Same no-lookahead guarantee as test_features_are_causal_no_lookahead,
+    but with the volume feature included."""
+    highs, lows, closes = _bars(n=300)
+    volumes = _volumes(n=300)
+    features, _ = rgh._build_features(closes, volumes=volumes)
+
+    model = rgh._fit_best_model(features, **{**_fast_kwargs, "random_state": 42})
+    rgh._reorder_states_by_return(model)
+
+    full_log_alpha = rgh._forward_log_alpha(model, features)
+    cut = len(features) // 2
+    truncated_log_alpha = rgh._forward_log_alpha(model, features[: cut + 1])
+
+    np.testing.assert_allclose(full_log_alpha[: cut + 1], truncated_log_alpha, atol=1e-6)
