@@ -76,10 +76,11 @@ def safe_attach_oco(broker, symbol: str, qty: int, stop: float, target: float,
             if not _is_insufficient_qty_error(e) or attempt >= max_retries:
                 raise
             attempt += 1
+            target_str = f"{target:.2f}" if target is not None else "None"
             log.warning(
-                "safe_oco_attach: %s attach failed (attempt %d/%d, stop=%.2f target=%.2f) — "
+                "safe_oco_attach: %s attach failed (attempt %d/%d, stop=%.2f target=%s) — "
                 "%s — cancelling stale sell orders and retrying",
-                symbol, attempt, max_retries, stop, target, e,
+                symbol, attempt, max_retries, stop, target_str, e,
             )
             cancel_open_sell_orders(broker, symbol)
             if retry_delay:

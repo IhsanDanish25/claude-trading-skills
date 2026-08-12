@@ -40,7 +40,12 @@ SKIPPED_ROUTINES_FILE = os.path.join(config.STATE_DIR, "skipped_routines.json")
 
 
 def _todays_trades(today: str) -> list[dict]:
-    """Read state/trade_log.jsonl entries stamped today, for the EOD summary."""
+    """Read state/trade_log.jsonl entries stamped today, for the EOD summary.
+
+    Only real fills (side == buy/sell) — order_skipped/blocked entries have no
+    qty/price and used to leak into this list, rendering as garbled "? sh @
+    $0.00" rows in the EOD email (see 2026-08-12 MSFT/JPM/GE/C spread-gate
+    incident). Blocked attempts are returned separately by _todays_blocked."""
     trades = []
     try:
         with open(TRADE_LOG_PATH) as f:
@@ -49,11 +54,36 @@ def _todays_trades(today: str) -> list[dict]:
                     entry = json.loads(line)
                 except ValueError:
                     continue
-                if str(entry.get("ts", "")).startswith(today):
+                if not str(entry.get("ts", "")).startswith(today):
+                    continue
+                if entry.get("side") in ("buy", "sell"):
                     trades.append(entry)
     except FileNotFoundError:
         pass
     return trades
+
+
+def _todays_blocked(today: str) -> list[dict]:
+    """Read state/trade_log.jsonl entries stamped today with event=="order_skipped" —
+    orders blocked before ever reaching Alpaca (spread gate, buying-power clamp,
+    stop-attach failure, etc). Kept separate from _todays_trades so the EOD email
+    can render them as their own explicit BLOCKED rows with the real symbol/reason,
+    instead of fabricated $0.00/qty=0 trade rows."""
+    blocked = []
+    try:
+        with open(TRADE_LOG_PATH) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if not str(entry.get("ts", "")).startswith(today):
+                    continue
+                if entry.get("event") == "order_skipped":
+                    blocked.append(entry)
+    except FileNotFoundError:
+        pass
+    return blocked
 
 
 def _todays_skipped_routines(today: str) -> list[dict]:
@@ -397,6 +427,7 @@ def run():
         ftd_detected=ftd_result.get("ftd_detected", False),
         force_closed=force_close,
         trades_today=_todays_trades(today),
+        blocked_today=_todays_blocked(today),
         skipped_routines=_todays_skipped_routines(today),
         positions=position_signals,
     )
