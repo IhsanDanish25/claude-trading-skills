@@ -51,6 +51,7 @@ A comprehensive catalog of all 55 Claude Trading Skills organized by category. B
 | **PEAD Screener** | Screens for Post-Earnings Announcement Drift patterns using weekly candle analysis. Stage-based monitoring: MONITORING, SIGNAL_READY, BREAKOUT, EXPIRED | <span class="badge badge-api">FMP Required</span> |
 | **FTD Detector** | Detects Follow-Through Day signals for market bottom confirmation using William O'Neil's methodology. Dual-index tracking with quality scoring (0-100) | <span class="badge badge-api">FMP Required</span> |
 | **Institutional Flow Tracker** | Tracks institutional ownership changes using 13F SEC filings. Tier-based quality framework weights superinvestors (Berkshire, Baupost) higher than index funds | <span class="badge badge-api">FMP Required</span> |
+| **[Buffett Value]({{ '/en/skills/buffett-value/' | relative_url }})** | Warren Buffett-style value investing: business quality (ROE, ROIC, debt), consistency (EPS growth, dividend history), and margin-of-safety valuation via Graham number. Candlestick entry timing gate; exits only on profit target, fundamentals deterioration, or a better opportunity -- no fixed holding period or stop-loss | <span class="badge badge-free">No API</span> |
 
 ---
 
@@ -266,5 +267,6 @@ A comprehensive catalog of all 55 Claude Trading Skills organized by category. B
 | Sector Rotation Detector | -- | -- | -- |
 | Short Squeeze Scanner | -- | -- | -- |
 | Technical Indicator Suite | -- | -- | -- |
+| Buffett Value | -- | -- | -- |
 
 "--" means not required. "Optional" means functionality is enhanced but the skill works without it.
