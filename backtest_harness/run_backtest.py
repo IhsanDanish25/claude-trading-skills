@@ -89,15 +89,16 @@ def build_universe(store, years: float) -> list[str]:
 
 
 def _run_one(store, universe, cfg, out_dir, start_equity, scenario, slippage_bps, stop_mode,
-             regime_gated=False):
+             regime_gated=False, regime_gate_mode="sma_adx"):
     """Run one scenario, write its JSON+PNG, print its table, return the report."""
     from backtest_harness import engine, metrics
 
-    gate_tag = " | regime-gated" if regime_gated else ""
+    gate_tag = f" | regime-gated ({regime_gate_mode})" if regime_gated else ""
     log.info("── Scenario %s | slippage=%dbps | stop=%s%s ──", scenario, slippage_bps, stop_mode, gate_tag)
     pf = engine.run_simulation(store, universe, start_equity=start_equity,
                                slippage_bps=slippage_bps, stop_mode=stop_mode,
-                               atr_stop_mult=ATR_STOP_MULT, regime_gated=regime_gated)
+                               atr_stop_mult=ATR_STOP_MULT, regime_gated=regime_gated,
+                               regime_gate_mode=regime_gate_mode)
     if not pf.equity_curve:
         log.error("Scenario %s produced no equity curve — skipping.", scenario)
         return None
@@ -158,7 +159,7 @@ def _run_one(store, universe, cfg, out_dir, start_equity, scenario, slippage_bps
 
 
 def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
-                           regime_gated=True):
+                           regime_gated=True, regime_gate_mode="sma_adx"):
     """E-series earnings-momentum scenarios — own engine, own universe, own window.
 
     Stop behaviour is looked up from E_CONFIGS by scenario name:
@@ -208,6 +209,7 @@ def _run_earnings_scenario(cfg, out_dir, start_equity, scenario, slippage_bps,
     pf = earnings_engine.run_earnings_simulation(
         store, qualifying, start_equity=start_equity, slippage_bps=slippage_bps,
         atr_stop_mult=atr_stop_mult, hold_days=E_HOLD_DAYS, regime_gated=regime_gated,
+        regime_gate_mode=regime_gate_mode,
         window_start=window_start, window_end=E_WINDOW_END,
         min_surprise_pct=min_surprise_pct, min_price=E_MIN_PRICE,
         min_avg_volume=E_MIN_AVG_VOLUME,
@@ -298,6 +300,8 @@ def main() -> int:
                     help="run the predefined 3-scenario suite (control / slip10+atr / slip20+atr)")
     ap.add_argument("--scenario", type=str, default=None,
                     help="run only the named scenario or prefix (e.g. E or E_earnings_momentum_regime)")
+    ap.add_argument("--regime-gate-mode", choices=["sma_adx", "hmm"], default="sma_adx",
+                    help="which regime gate to backtest when a scenario is regime-gated (default: sma_adx)")
     args = ap.parse_args()
 
     from backtest_harness import data
@@ -344,11 +348,11 @@ def main() -> int:
         if name.startswith("E"):
             # Earnings-momentum scenario (E, E2, E3): own engine, own universe, own window.
             if _run_earnings_scenario(cfg, out_dir, args.start_equity, name, slip,
-                                      regime_gated=gated) is not None:
+                                      regime_gated=gated, regime_gate_mode=args.regime_gate_mode) is not None:
                 ok = True
             continue
         if _run_one(store, universe, cfg, out_dir, args.start_equity, name, slip, mode,
-                    regime_gated=gated) is not None:
+                    regime_gated=gated, regime_gate_mode=args.regime_gate_mode) is not None:
             ok = True
     return 0 if ok else 1
 

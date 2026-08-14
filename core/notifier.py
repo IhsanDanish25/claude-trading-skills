@@ -228,6 +228,7 @@ def send_eod_summary(
     ftd_detected: bool,
     force_closed: list[str] | None = None,
     trades_today: list[dict] | None = None,
+    blocked_today: list[dict] | None = None,
     skipped_routines: list[dict] | None = None,
     positions: list[dict] | None = None,
 ) -> bool:
@@ -271,6 +272,21 @@ def send_eod_summary(
             for t in trades_today
         )
 
+    blocked_html = ""
+    blocked_plain = ""
+    if blocked_today:
+        rows = "".join(
+            f'<div class="row"><span class="label">{b.get("symbol", "?")}</span>'
+            f'<span class="value yellow">BLOCKED [{b.get("strategy", "?")}] '
+            f'{b.get("gate", "")}: {b.get("reason", "")}</span></div>'
+            for b in blocked_today
+        )
+        blocked_html = f'<div class="card"><h2>Blocked Orders ({len(blocked_today)})</h2>{rows}</div>'
+        blocked_plain = "\nBlocked: " + "; ".join(
+            f"{b.get('symbol', '?')} [{b.get('strategy', '?')}] {b.get('gate', '')}: {b.get('reason', '')}"
+            for b in blocked_today
+        )
+
     skipped_html = ""
     skipped_plain = ""
     if skipped_routines:
@@ -299,6 +315,7 @@ def send_eod_summary(
     </div>
     {positions_html}
     {trades_html}
+    {blocked_html}
     {closed_html}
     {skipped_html}
     """
@@ -309,6 +326,7 @@ def send_eod_summary(
         f"Unrealized P&L: {pnl_sign}${unrealized_pnl:,.2f}\n"
         f"SPY: {spy_sign}{spy_change_pct:.2f}% | Regime: {regime} | FTD: {ftd_detected}\n"
         f"Trades today: {trades_plain}"
+        f"{blocked_plain}"
         f"{positions_plain}"
         f"{skipped_plain}"
     )

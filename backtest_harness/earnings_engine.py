@@ -86,6 +86,7 @@ def run_earnings_simulation(
     atr_stop_mult: float = 1.5,
     hold_days: int = 60,
     regime_gated: bool = True,
+    regime_gate_mode: str = "sma_adx",
     window_start: str | None = None,
     window_end: str | None = None,
     min_surprise_pct: float = 10.0,
@@ -149,12 +150,8 @@ def run_earnings_simulation(
         if regime_gated:
             spy_bars = _bars_asof(store, "SPY", as_of)
             if len(spy_bars) >= 50:
-                from regime_gate import classify as _regime_classify
-                _reg = _regime_classify(
-                    [b["high"] for b in spy_bars],
-                    [b["low"] for b in spy_bars],
-                    [b["close"] for b in spy_bars],
-                )
+                from backtest_harness.regime_gate_dispatch import classify_spy_regime
+                _reg = classify_spy_regime(spy_bars, mode=regime_gate_mode)
                 allow_entries = _reg.can_trade
 
         # ── ENTRIES: day-after-earnings, filled at T open ─────────────────────

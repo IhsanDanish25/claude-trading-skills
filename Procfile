@@ -1,2 +1,2 @@
-web: streamlit run examples/daily-market-dashboard/app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
+web: streamlit run monitoring/dashboard.py
 worker: python3 worker.py

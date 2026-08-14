@@ -42,8 +42,9 @@ def _fetch_symbol_sector(symbol: str, api_key: str) -> str | None:
     """Look up GICS sector via yfinance info. Cached in-process."""
     try:
         import yfinance as yf
+
         ticker = yf.Ticker(symbol)
-        sector = ticker.info.get('sector')
+        sector = ticker.info.get("sector")
         if sector:
             return sector.strip()
     except Exception:
@@ -2477,10 +2478,57 @@ def run():
         highs = [b["high"] for b in spy_bars]
         lows = [b["low"] for b in spy_bars]
         closes = [b["close"] for b in spy_bars]
-        reg = classify(highs, lows, closes)
+        volumes = [b.get("volume") for b in spy_bars]
+        if any(v is None for v in volumes):
+            volumes = (
+                None  # missing volume on any bar -> HMM gate falls back to its 2-feature model
+            )
+
+        # REGIME_GATE_MODE=hmm opts into the HMM-based gate (regime_gate_hmm.py);
+        # default "sma_adx" (or unset) keeps today's proven ADX/SMA gate as-is.
+        gate_mode = os.environ.get("REGIME_GATE_MODE", "sma_adx").strip().lower()
+        hmm_reg = None
+        if gate_mode == "hmm":
+            from regime_gate_hmm import classify as classify_hmm
+
+            reg = classify_hmm(highs, lows, closes, volumes=volumes)
+            hmm_reg = reg
+        else:
+            reg = classify(highs, lows, closes)
         log.info(
-            f"Regime gate: state={reg.state} trend={reg.trend} adx={reg.adx:.1f} sma50={reg.sma50:.2f} sma200={reg.sma200:.2f} reason={reg.reason}"
+            f"Regime gate ({gate_mode}): state={reg.state} trend={reg.trend} adx={reg.adx:.1f} sma50={reg.sma50:.2f} sma200={reg.sma200:.2f} reason={reg.reason}"
         )
+
+        # Side-by-side shadow read: always log what the HMM gate would say,
+        # without ever letting it gate unless REGIME_GATE_MODE=hmm above -
+        # lets it be observed for real before ever being trusted to decide.
+        if gate_mode != "hmm":
+            try:
+                from regime_gate_hmm import classify as classify_hmm_shadow
+
+                hmm_reg = classify_hmm_shadow(highs, lows, closes, volumes=volumes)
+                log.info(
+                    f"Regime gate (hmm, SHADOW - not gating): state={hmm_reg.state} "
+                    f"confidence={hmm_reg.confidence:.0%} reason={hmm_reg.reason}"
+                )
+            except Exception as e:
+                log.warning(f"HMM shadow regime gate failed (non-blocking): {e}")
+
+        # Advisory-only: what a regime-based exposure scaler would suggest, purely
+        # for observation - never applied to position sizing or the gate decision.
+        if hmm_reg is not None:
+            try:
+                from regime_exposure import suggest_exposure
+
+                suggestion = suggest_exposure(hmm_reg)
+                log.info(
+                    f"Regime exposure suggestion (ADVISORY, not applied): bucket={suggestion.bucket} "
+                    f"target_exposure={suggestion.target_exposure_pct:.0%} max_leverage={suggestion.max_leverage}x "
+                    f"trailing_stop={suggestion.trailing_stop_pct} reason={suggestion.reason}"
+                )
+            except Exception as e:
+                log.warning(f"Regime exposure suggestion failed (non-blocking): {e}")
+
         if not reg.can_trade:
             log.warning(f"REGIME GATE: STAND_DOWN — {reg.reason} — holding cash, no screening")
             return

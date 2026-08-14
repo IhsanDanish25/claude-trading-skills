@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy all code
+COPY . .
+
+# Make modules importable
+RUN touch routines/__init__.py core/__init__.py
+
+# Monitoring dashboard: hardcoded port, no shell/env-var ambiguity for
+# Railway's proxy to get out of sync with - see Procfile/get-service-config
+# history for why this needed to stop depending on Railpack's port detection.
+EXPOSE 8501
+CMD ["streamlit", "run", "monitoring/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]

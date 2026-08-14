@@ -94,6 +94,27 @@ def test_non_retryable_error_propagates_without_cancelling():
     assert broker.trade.cancelled_ids == []
 
 
+def test_retry_log_does_not_crash_when_target_is_none():
+    """Regression: the retry-path log line used %.2f on `target` unconditionally,
+    which raises TypeError when target=None (the stop-only attach path -
+    e.g. a fractional position, or an explicit stop-only repair call).
+    Retrying that call must not itself crash with a formatting error."""
+    broker = _FakeBroker(open_orders=[_order("stale-1", "AAPL")])
+    attempts = []
+    submitted_order = SimpleNamespace(id="new-order-3")
+
+    def submit():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise Exception('{"code":40310000,"message":"insufficient qty available for order"}')
+        return submitted_order
+
+    result = safe_attach_oco(broker, "AAPL", 0.0768, 320.0, None, submit, retry_delay=0)
+
+    assert result is submitted_order
+    assert len(attempts) == 2
+
+
 def test_persistent_insufficient_qty_raises_after_exhausting_retries():
     broker = _FakeBroker(open_orders=[_order("stale-1", "AAPL")])
     attempts = []
