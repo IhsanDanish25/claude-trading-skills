@@ -301,6 +301,15 @@ EARNMOM_MIN_DRIFT_PCT = float(os.environ.get("EARNMOM_MIN_DRIFT_PCT", "2.0"))
 # stock must be up at least this much since earnings beat
 EARNMOM_LIMIT = int(os.environ.get("EARNMOM_LIMIT", "5"))
 
+# ── MA Pullback params (20/200 SMA trend & pullback) ────────
+# MA Pullback strategy: price above SMA200, rising SMA20, price crossing above SMA20
+MAPULLBACK_STOP_PCT = float(os.environ.get("MAPULLBACK_STOP_PCT", "0.02"))  # 2% hard stop
+MAPULLBACK_SIZE_PCT = float(os.environ.get("MAPULLBACK_SIZE_PCT", "0.05"))  # 5% position size (same as others)
+MAPULLBACK_MIN_PRICE = float(os.environ.get("MAPULLBACK_MIN_PRICE", "10.0"))
+MAPULLBACK_MAX_PRICE = float(os.environ.get("MAPULLBACK_MAX_PRICE", "25.0"))
+MAPULLBACK_MIN_AVG_VOLUME = float(os.environ.get("MAPULLBACK_MIN_AVG_VOLUME", "500000"))
+MAPULLBACK_LIMIT = int(os.environ.get("MAPULLBACK_LIMIT", "5"))
+
 # ── Time-series confirming filter (directional forecast) ────────────────────
 # NOT a standalone strategy — a confirming filter layered on existing
 # strategies (see core/timeseries_signal.py). An existing strategy's entry
@@ -474,7 +483,6 @@ SP80_UNIVERSE = [
     "CCI",
     "EQIX",
     "LIN",
-    "REIT",
     # Communication
     "DIS",
     "CMCSA",

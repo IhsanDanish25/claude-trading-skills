@@ -913,6 +913,232 @@ class BrokerClient:
         log.info(f"SELL {symbol} x{qty}")
         return {"order": order, "qty": qty}
 
+    def buy_simple(
+        self,
+        symbol: str,
+        dollar_amount: float,
+        strategy: str | None = None,
+    ) -> dict:
+        """
+        Simple market BUY with NO protective stop/target attached.
+
+        For strategies whose exit logic is fundamentals/profit-target driven
+        rather than price-distance driven (Buffett Value is the first: no
+        hard percentage stop-loss by design, see
+        skills/buffett-value/scripts/sell.py) — buy() is unsuitable because
+        its risk-parity sizing formula and unconditional attach_stop_target()
+        call both assume a stop distance exists.
+
+        Applies the same guardrails as buy() (spread gate, MAX_OPEN_POSITIONS,
+        per-position cap, buying-power clamp) but sizes purely off
+        dollar_amount / ref_price — no risk-parity math, since there is no
+        stop distance to size against. Whole shares only (no fractional
+        fallback): acceptable for a low-frequency, concentrated strategy
+        screening large-cap names.
+
+        Returns {qty, price, blocked?}. Never attaches a stop or target.
+        """
+        spread_check = self.check_spread(symbol)
+        if not spread_check.get("ok"):
+            log.warning(
+                "BUY_SIMPLE %s BLOCKED — spread gate: %s (spread=%s)",
+                symbol,
+                spread_check.get("reason"),
+                spread_check.get("spread_pct"),
+            )
+            return {
+                "blocked": True,
+                "reason": spread_check.get("reason", "spread_check_failed"),
+                "spread_pct": spread_check.get("spread_pct"),
+            }
+
+        ref_price = self.get_price(symbol)
+        equity = self.portfolio_value()
+        max_position_dollars = equity * MAX_POSITION_SIZE_PCT
+
+        existing_pos = self.get_position(symbol)
+        if existing_pos is None and self.position_count() >= MAX_OPEN_POSITIONS:
+            log.warning(
+                "BUY_SIMPLE %s BLOCKED — already at %d/%d open positions",
+                symbol,
+                self.position_count(),
+                MAX_OPEN_POSITIONS,
+            )
+            return {"blocked": True, "reason": "max_open_positions"}
+
+        existing_value = 0.0
+        if existing_pos is not None:
+            existing_value = abs(float(existing_pos.market_value or 0))
+        remaining_cap = max(0.0, max_position_dollars - existing_value)
+
+        if remaining_cap <= 0:
+            log.warning(
+                "BUY_SIMPLE %s BLOCKED — existing position $%.0f already at/above %.1f%% cap ($%.0f)",
+                symbol,
+                existing_value,
+                MAX_POSITION_SIZE_PCT * 100,
+                max_position_dollars,
+            )
+            return {"blocked": True, "reason": "position_size_cap"}
+
+        MIN_ORDER_PRICE = 1.00
+        if ref_price < MIN_ORDER_PRICE:
+            log.warning(
+                "BUY_SIMPLE %s BLOCKED — ref_price $%.4f below $%.2f minimum",
+                symbol,
+                ref_price,
+                MIN_ORDER_PRICE,
+            )
+            return {"blocked": True, "reason": "min_price"}
+
+        notional_cap = min(dollar_amount, remaining_cap)
+        qty = max(0, int(notional_cap / ref_price))
+
+        if qty < 1:
+            log.warning("BUY_SIMPLE %s BLOCKED — sizing produced 0 shares", symbol)
+            return {"blocked": True, "reason": "position_size_cap"}
+
+        available_cash = self.buying_power()
+        order_value = qty * ref_price
+        if order_value > available_cash:
+            qty = max(0, int(available_cash / ref_price))
+            if qty < 1:
+                log.warning(
+                    "BUY_SIMPLE %s BLOCKED — cannot afford 1 whole share @ $%.2f "
+                    "(buying power $%.2f)",
+                    symbol,
+                    ref_price,
+                    available_cash,
+                )
+                return {"blocked": True, "reason": "insufficient_cash"}
+
+        if DRY_RUN:
+            notional = round(qty * ref_price, 2)
+            log.info(
+                "[DRY_RUN] Would BUY_SIMPLE %s qty=%s ($%.2f notional) @ ~$%.2f -- no order submitted",
+                symbol, qty, notional, ref_price,
+            )
+            trade_logger.log_event(
+                "dry_run_order", strategy or "unknown", symbol,
+                side="buy", qty=qty, notional=notional, ref_price=ref_price,
+                spread_pct=spread_check.get("spread_pct"),
+            )
+            if strategy is not None:
+                cost_tracker.record_fill(
+                    strategy=strategy, symbol=symbol, side="buy",
+                    signal_price=ref_price, fill_price=ref_price, qty=qty,
+                    spread_pct=spread_check.get("spread_pct"),
+                )
+            return {"order": None, "qty": qty, "price": ref_price, "dry_run": True}
+
+        order = self.trade.submit_order(
+            MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+            )
+        )
+        log.info(f"BUY_SIMPLE {symbol} x{qty} (market, no stop) submitted [{str(order.id)[:8]}]")
+
+        market_open = self.is_market_open()
+        fill_price = None
+        filled_qty = qty
+        for i in range(10):
+            if not market_open and i > 0:
+                log.warning("Market closed — aborting fill poll for %s", symbol)
+                break
+            try:
+                o = self.trade.get_order_by_id(order.id)
+            except Exception as e:
+                log.warning("poll order %s failed: %s", symbol, e)
+                break
+            if o.filled_avg_price:
+                fill_price = float(o.filled_avg_price)
+                if o.filled_qty:
+                    filled_qty = int(float(o.filled_qty))
+                break
+            time.sleep(0.5)
+
+        basis = fill_price if fill_price else ref_price
+        # Matches buy()'s guard (core/broker.py ~line 780): only log a real
+        # fill to cost_tracker, not a synthetic zero-slippage entry for an
+        # order that never confirmed filled within the poll window.
+        if strategy is not None and fill_price is not None:
+            cost_tracker.record_fill(
+                strategy=strategy, symbol=symbol, side="buy",
+                signal_price=ref_price, fill_price=basis, qty=filled_qty,
+                spread_pct=spread_check.get("spread_pct"),
+            )
+        log.info(f"BUY_SIMPLE {symbol} x{filled_qty} @ ${basis:.2f} -- no stop attached")
+        return {"order": order, "qty": filled_qty, "price": basis}
+
+    def sell_limit(self, symbol: str, qty: float, limit_price: float) -> dict:
+        """
+        Simple (non-bracket) limit SELL — never OCO. For strategies without a
+        stop leg to pair against (Buffett Value's exits are single-leg:
+        profit target / thesis break / better opportunity — see
+        skills/buffett-value/scripts/sell.py:build_sell_order).
+
+        Polls briefly for a fill (mirrors buy()/buy_simple()) since the
+        limit price is typically set just inside the current quote and so
+        fills almost immediately when marketable. Callers MUST check the
+        returned "filled" flag before treating this as a completed exit —
+        an unconfirmed order is still resting at the broker (or already
+        expired, since it's a DAY order) and the caller should NOT log
+        success, alert, or stop tracking the position.
+        """
+        if DRY_RUN:
+            log.info(
+                "[DRY_RUN] Would SELL_LIMIT %s x%s @ $%.2f -- no order submitted",
+                symbol, qty, limit_price,
+            )
+            return {
+                "order": None, "qty": qty, "limit_price": limit_price, "dry_run": True,
+                "filled": True, "filled_qty": qty, "filled_avg_price": limit_price,
+            }
+
+        req = LimitOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.SIMPLE,
+            limit_price=limit_price,
+        )
+        order = self.trade.submit_order(req)
+        log.info(f"SELL_LIMIT {symbol} x{qty} @ ${limit_price:.2f} (simple, no bracket) submitted [{str(order.id)[:8]}]")
+
+        filled_qty = None
+        filled_avg_price = None
+        for i in range(10):
+            try:
+                o = self.trade.get_order_by_id(order.id)
+            except Exception as e:
+                log.warning("poll order %s failed: %s", symbol, e)
+                break
+            if o.filled_avg_price:
+                filled_avg_price = float(o.filled_avg_price)
+                if o.filled_qty:
+                    filled_qty = float(o.filled_qty)
+                break
+            time.sleep(0.5)
+
+        filled = filled_avg_price is not None
+        if filled:
+            log.info(f"SELL_LIMIT {symbol} x{filled_qty} @ ${filled_avg_price:.2f} CONFIRMED FILLED")
+        else:
+            log.warning(f"SELL_LIMIT {symbol} not confirmed filled within 5s -- still resting at ${limit_price:.2f}")
+
+        return {
+            "order": order,
+            "qty": qty,
+            "limit_price": limit_price,
+            "filled": filled,
+            "filled_qty": filled_qty,
+            "filled_avg_price": filled_avg_price,
+        }
+
     def close_position(self, symbol: str):
         try:
             self.trade.close_position(symbol)

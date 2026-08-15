@@ -14,6 +14,7 @@ Outputs ranked candidates for the buy agent to evaluate.
 import yfinance as yf
 import pandas as pd
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
 import logging
 from datetime import datetime, timedelta
@@ -29,38 +30,61 @@ MIN_EPS_GROWTH_YEARS = 8   # Minimum years of positive EPS growth (out of last 1
 MAX_PE_RATIO = 25.0     # Maximum P/E ratio (relative to historical average)
 MIN_MARGIN_OF_SAFETY = 0.25 # 25% minimum discount to intrinsic value
 
+SCREEN_MAX_WORKERS = 10  # concurrent yfinance requests -- high enough to turn a
+# multi-minute serial screen into seconds, conservative enough to avoid
+# tripping Yahoo's undocumented soft rate-limiting on very high concurrency.
+
+
 def screen_for_buffett_candidates(
     symbols: List[str],
-    lookback_years: int = 10
+    lookback_years: int = 10,
+    max_workers: int = SCREEN_MAX_WORKERS,
 ) -> List[Dict[str, Any]]:
     """
     Screen a list of symbols for Buffett-value candidates.
 
+    Each symbol requires 4 separate yfinance round trips (.info,
+    .financials, .balance_sheet, .cashflow) -- for a ~100-symbol universe
+    that's ~400 sequential HTTP calls if run one at a time, which can take
+    several minutes. These calls are I/O-bound (network wait, not CPU), so
+    a thread pool gives a large real speedup with no change in behavior:
+    each symbol is still analyzed independently, one failure doesn't affect
+    another, and the final ordering is identical (sorted by conviction
+    score afterward, not by completion order).
+
     Args:
         symbols: List of stock symbols to screen
         lookback_years: Years of historical data to analyze
+        max_workers: Concurrent yfinance requests
 
     Returns:
         List of candidate dictionaries sorted by conviction score (highest first)
     """
-    log.info(f"Screening {len(symbols)} symbols for Buffett value candidates...")
+    log.info(f"Screening {len(symbols)} symbols for Buffett value candidates "
+             f"(concurrency={max_workers})...")
 
     candidates = []
 
-    for symbol in symbols:
-        try:
-            candidate = analyze_symbol(symbol, lookback_years)
-            if candidate and candidate['passes_screen']:
-                candidates.append(candidate)
-                log.debug(f"{symbol}: PASSED screen (score: {candidate['conviction_score']:.1f})")
-            else:
-                log.debug(f"{symbol}: FAILED screen")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_symbol = {
+            executor.submit(analyze_symbol, symbol, lookback_years): symbol
+            for symbol in symbols
+        }
+        for future in as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            try:
+                candidate = future.result()
+                if candidate and candidate['passes_screen']:
+                    candidates.append(candidate)
+                    log.debug(f"{symbol}: PASSED screen (score: {candidate['conviction_score']:.1f})")
+                else:
+                    log.debug(f"{symbol}: FAILED screen")
+            except Exception as e:
+                log.warning(f"Error analyzing {symbol}: {e}")
+                continue
 
-        except Exception as e:
-            log.warning(f"Error analyzing {symbol}: {e}")
-            continue
-
-    # Sort by conviction score (highest first)
+    # Sort by conviction score (highest first) -- deterministic regardless
+    # of the concurrent completion order above.
     candidates.sort(key=lambda x: x['conviction_score'], reverse=True)
 
     log.info(f"Found {len(candidates)} Buffett value candidates")

@@ -22,6 +22,10 @@ import pytz
 from core import config, logger
 from core.analyst import analyze_market_regime, detect_ftd, review_open_positions
 from core.broker import BrokerClient
+from core.buffett_tracker import get_all as buffett_all
+from core.buffett_tracker import remove_position as buffett_untrack
+from core.buffett_value import evaluate_exit as buffett_evaluate_exit
+from core.buffett_value import monitor_portfolio as buffett_monitor_portfolio
 from core.fmp import get_daily_bars, get_market_breadth, get_quotes
 from core.notifier import send_eod_summary, send_trade_alert
 from core.order_utils import order_field
@@ -142,6 +146,7 @@ def _late_trail(broker: BrokerClient) -> int:
     positions = broker.get_positions()
     open_orders = broker.get_open_orders()
     stop_map = _build_stop_map(open_orders)
+    tracked_buffett = buffett_all()  # one read, not one per position below
 
     quotes = get_quotes([p.symbol for p in positions])
     tightened = 0
@@ -149,6 +154,8 @@ def _late_trail(broker: BrokerClient) -> int:
         sym = pos.symbol
         if is_base_symbol(sym):
             continue  # SPY base carries no protective stop by design
+        if sym in tracked_buffett:
+            continue  # Buffett Value carries no protective stop by design
         entry = float(pos.avg_entry_price)
         cur = float(quotes.get(sym, {}).get("price", entry))
         if cur <= entry:
@@ -176,6 +183,142 @@ def _resolve_eod_stop(base_stop: float, action: str, new_stop) -> float:
     if action == "TIGHTEN_STOP" and isinstance(new_stop, (int, float)) and new_stop > base_stop:
         return round(float(new_stop), 2)
     return base_stop
+
+
+def _run_buffett_value_exits(broker: BrokerClient, candidate_pool: list | None = None) -> int:
+    """Evaluate exits for every tracked Buffett Value position: profit
+    target, fundamentals thesis break, or a materially better opportunity
+    elsewhere. Never a stop-loss, never a calendar exit -- see
+    skills/buffett-value/scripts/sell.py. Runs independently of the generic
+    force-close/EOD-review loop in run() (which assumes every position
+    carries a stop and would mismanage one that doesn't); those positions
+    are excluded from that loop via the tracked_buffett membership check above.
+
+    candidate_pool: optional freshly-screened analyst candidates, used by
+    hold.monitor_portfolio() to populate the "better opportunity elsewhere"
+    signal. Omitted here (daily): re-screening the ~100-symbol universe
+    just for this one signal is too expensive to pay for every day on a
+    low-turnover, buy-and-hold strategy. routines/weekly_review.py calls
+    this same function with a fresh pool on a weekly cadence instead --
+    profit-target and fundamentals-thesis-break are still evaluated daily
+    either way, since monitor_portfolio() with candidate_pool=None behaves
+    identically to the old per-symbol monitor_position() calls (just
+    leaves better_opportunity as None).
+
+    Does not gate on config.STRATEGY_MODES: mirrors the PEAD time-exit
+    block's behavior of exiting whatever is actually tracked, so an
+    existing position still gets a clean exit even if the strategy is later
+    turned off. When nothing is tracked (buffett_value has never been
+    active), this is a no-op -- one empty-dict read, no network calls.
+
+    Returns the number of positions exited.
+    """
+    positions = buffett_all()
+    if not positions:
+        return 0
+
+    log.info(f"── Buffett Value: evaluating exits for {len(positions)} position(s)")
+
+    # Corrupted/hand-edited state records with no entry_price are dropped
+    # up front. Don't let sell.py's position.get("entry_price", 0.0)
+    # default silently kick in for us here -- the key IS present (just
+    # None) in the dict we'd otherwise build, so that default never fires
+    # there, and a 0.0 entry_price would make profit_per_share ==
+    # current_price, which can look like a spurious profit-target hit and
+    # trigger a wrong sell off bad data.
+    valid_positions = {}
+    for sym, info in positions.items():
+        if info.get("entry_price") is None:
+            log.error(
+                f"  {sym}: tracked position missing entry_price -- "
+                f"skipping exit evaluation (state may be corrupted)"
+            )
+            continue
+        valid_positions[sym] = info
+
+    if not valid_positions:
+        return 0
+
+    positions_list = [
+        {"symbol": sym, "entry_snapshot": info.get("entry_snapshot", {})}
+        for sym, info in valid_positions.items()
+    ]
+    try:
+        monitor_results = buffett_monitor_portfolio(positions_list, candidate_pool=candidate_pool)
+    except Exception as e:
+        # Batch call, unlike the old per-symbol monitor_position() calls
+        # this replaced -- a failure here would otherwise take down exit
+        # evaluation for every tracked position in this run, not just one.
+        # In practice hold.monitor_position()/analyze_symbol() already
+        # catch their own per-symbol errors and degrade gracefully rather
+        # than raise, so this should be rare; if it does happen, skip this
+        # run's exits entirely (positions stay tracked) rather than guess.
+        log.error(f"Buffett Value monitor_portfolio batch call failed: {e} -- skipping this run's exits")
+        return 0
+    monitor_by_symbol = {r["symbol"]: r for r in monitor_results}
+
+    exited = 0
+    for sym, info in valid_positions.items():
+        try:
+            entry_price = info["entry_price"]
+            entry_snapshot = info.get("entry_snapshot", {})
+            monitor_result = monitor_by_symbol[sym]
+
+            pos = broker.get_position(sym)
+            if pos is None:
+                log.warning(f"  {sym}: tracked but no live Alpaca position — untracking")
+                buffett_untrack(sym)
+                continue
+            qty = float(pos.qty)
+            current_price = broker.get_price(sym)
+
+            position = {
+                "symbol": sym,
+                "qty": qty,
+                "entry_price": entry_price,
+                "entry_snapshot": entry_snapshot,
+            }
+            exit_decision = buffett_evaluate_exit(position, monitor_result, current_price)
+
+            if exit_decision is None:
+                log.info(f"  {sym}: HOLD — thesis intact, no exit condition met")
+                continue
+
+            order = exit_decision["order"]
+            result = broker.sell_limit(sym, qty=order["qty"], limit_price=order["limit_price"])
+
+            if not result.get("filled"):
+                # Order is either still resting or already expired unfilled
+                # (it's a DAY order) -- either way, nothing has actually
+                # happened yet. Leave the position tracked so the next
+                # market_close run re-evaluates and retries; do NOT log
+                # success, alert, or untrack on an unconfirmed order.
+                log.warning(
+                    f"  {sym}: SELL_LIMIT submitted (${order['limit_price']:.2f}) but not "
+                    f"confirmed filled -- leaving tracked, will re-evaluate next run"
+                )
+                continue
+
+            fill_price = result.get("filled_avg_price", order["limit_price"])
+            log.info(
+                f"  ✓ Buffett Value SELL {sym} x{qty} @ ${fill_price:.2f} "
+                f"({exit_decision['reason_code']}: {exit_decision['reason_detail']})"
+            )
+            send_trade_alert(
+                action="SELL",
+                ticker=sym,
+                shares=qty,
+                price=fill_price,
+                stop=0,
+                target=0,
+                reason=f"Buffett Value {exit_decision['reason_code']}: {exit_decision['reason_detail']}",
+            )
+            buffett_untrack(sym)
+            exited += 1
+        except Exception as e:
+            log.error(f"  ✗ Buffett Value exit check {sym} failed: {e}")
+
+    return exited
 
 
 def run():
@@ -235,6 +378,14 @@ def run():
                     f"(surprise={info.get('surprise_pct', '?')}%)"
                 )
 
+    # ── Buffett Value exits: profit target / thesis break / better opportunity ──
+    try:
+        buffett_exited = _run_buffett_value_exits(broker)
+        if buffett_exited:
+            log.info(f"── Buffett Value: {buffett_exited} position(s) exited")
+    except Exception as e:
+        log.error(f"Buffett Value exit check failed (non-blocking): {e}")
+
     # ── Position final review ─────────────────────────────────────────────────
     positions = broker.get_positions()
     log.info(f"── Positions at close: {len(positions)}")
@@ -251,6 +402,7 @@ def run():
     else:
         symbols = [p.symbol for p in positions]
         quotes = get_quotes(symbols)
+        tracked_buffett = buffett_all()  # one read, not one per position below
 
         pos_data = []
 
@@ -261,6 +413,15 @@ def run():
             # ~full-portfolio base on a -3% day is not a trade exit.
             if is_base_symbol(sym):
                 log.info(f"  {sym:6} | SPY base holding — excluded from EOD review")
+                continue
+            # Buffett Value positions carry no stop-loss by design (see
+            # skills/buffett-value/scripts/sell.py). The -3% force-close, the
+            # Claude EOD review's SELL/HOLD/TIGHTEN_STOP, and the unconditional
+            # attach_stop_target() re-arm below all assume a stop exists --
+            # exclude these positions here and evaluate their exits separately
+            # via _run_buffett_value_exits(), fundamentals/profit-target only.
+            if sym in tracked_buffett:
+                log.info(f"  {sym:6} | Buffett Value position — excluded from EOD review")
                 continue
             entry = float(p.avg_entry_price)
             current = float(quotes.get(sym, {}).get("price", entry))

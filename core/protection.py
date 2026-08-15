@@ -11,6 +11,7 @@ all. Both routines call this so the gap is closed at both checkpoints.
 
 from __future__ import annotations
 
+from core.buffett_tracker import get_by_symbol as buffett_get
 from core.notifier import send_trade_alert
 from core.order_utils import order_field
 from core.safe_oco_attach import cancel_open_sell_orders
@@ -23,10 +24,15 @@ def reattach_missing_protection(broker, config, log) -> set[str]:
     it. A position whose attach fails (and fails Alpaca verification) is
     flattened rather than left naked. Returns the set of flattened symbols.
 
-    Skips SPY base holdings (managed separately by spy_base) and any
-    position that already has a live stop — including a same-day fractional
-    DAY stop, so this never overwrites a fresher trailing stop, and a
-    whole-share GTC stop from a prior day is left alone.
+    Skips SPY base holdings (managed separately by spy_base), Buffett Value
+    positions (no stop-loss by design — see
+    skills/buffett-value/scripts/sell.py — attaching one here would silently
+    convert them into normal stopped positions and let Alpaca force-sell on
+    a routine dip, bypassing evaluate_exit()'s fundamentals/profit-target
+    logic entirely), and any position that already has a live stop —
+    including a same-day fractional DAY stop, so this never overwrites a
+    fresher trailing stop, and a whole-share GTC stop from a prior day is
+    left alone.
     """
     flattened: set[str] = set()
     positions = broker.get_positions()
@@ -45,6 +51,8 @@ def reattach_missing_protection(broker, config, log) -> set[str]:
     for p in positions:
         sym = p.symbol
         if is_base_symbol(sym):
+            continue
+        if buffett_get(sym):
             continue
         if sym in stop_orders:
             continue
