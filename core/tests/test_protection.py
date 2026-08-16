@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 from alpaca.trading.enums import OrderSide, OrderType
 
+import core.protection as protection_module
 from core import config
 from core.protection import reattach_missing_protection
 
@@ -87,6 +88,25 @@ def test_flattens_and_returns_symbol_when_attach_fails():
 def test_zero_qty_position_is_skipped():
     positions = [_position("AAPL", 0.0, 320.0)]
     broker = _broker(positions, open_orders=[])
+
+    reattach_missing_protection(broker, config, MagicMock())
+
+    broker.attach_stop_target.assert_not_called()
+
+
+def test_skips_buffett_value_position(monkeypatch):
+    """Regression: Buffett Value carries no stop-loss by design (see
+    skills/buffett-value/scripts/sell.py). Before this exclusion existed,
+    this function would silently attach a normal stop/target bracket to a
+    Buffett Value position the very next morning after entry, converting it
+    into an ordinary stopped position and bypassing evaluate_exit()'s
+    fundamentals/profit-target logic entirely."""
+    monkeypatch.setattr(
+        protection_module, "buffett_get",
+        lambda sym: {"strategy": "buffett_value"} if sym == "CMCSA" else None,
+    )
+    positions = [_position("CMCSA", 10.0, 26.18)]
+    broker = _broker(positions, open_orders=[], price=27.0)
 
     reattach_missing_protection(broker, config, MagicMock())
 

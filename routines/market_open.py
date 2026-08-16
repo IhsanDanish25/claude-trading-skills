@@ -17,6 +17,9 @@ import pytz
 from circuit_breaker import CircuitBreaker, EmergencyLiquidation, TradingHalted
 from core import config, cost_tracker, logger, timeseries_signal, trade_logger
 from core.broker import BrokerClient
+from core.buffett_tracker import add_position as buffett_track
+from core.buffett_tracker import remove_position as buffett_untrack
+from core.buffett_value import get_top_buy_signals, screen_for_buffett_candidates
 from core.earnings_screener import screen_earnings
 from core.notifier import send_trade_alert
 from core.pead_tracker import add_position as pead_track
@@ -1316,6 +1319,161 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today, sector_coun
             log.error(f"  ✗ Breakout {sym} failed: {e}")
 
 
+def _run_buffett_value(broker, cb, pv, slots, held, already_bought_today, sector_counts):
+    """Buffett Value: business quality + margin-of-safety screen, candlestick
+    entry timing. NO stop-loss and NO calendar exit by design -- see
+    skills/buffett-value/scripts/. Entries use broker.buy_simple() (no
+    stop attached); exits are evaluated separately by
+    _run_buffett_value_exits() in market_close.py, not by this handler or
+    by the generic force-close/trim loop (which assumes every position has
+    a stop and would misbehave against one that doesn't)."""
+    log.info("Buffett Value: screening for quality/value candidates...")
+    universe = [s for s in config.SP80_UNIVERSE if s.isalpha() and len(s) <= 5]
+    candidates = screen_for_buffett_candidates(universe)
+    log.info(f"Buffett Value: {len(candidates)} candidates passed the fundamentals screen")
+    if not candidates:
+        return
+
+    buy_signals = get_top_buy_signals(candidates, limit=MAX_BUYS)
+    log.info(f"Buffett Value: {len(buy_signals)} candlestick buy signals")
+    if not buy_signals:
+        return
+
+    candidates_by_symbol = {c["symbol"]: c for c in candidates}
+
+    for sig in buy_signals:
+        sym = sig["symbol"]
+        amount = pv * sig["position_size_pct"]  # conviction-based sizing (3-10%)
+
+        trade_logger.log_event(
+            "signal_detected",
+            "buffett_value",
+            sym,
+            price=sig["signal_price"],
+            conviction_score=sig["conviction_score"],
+            patterns=",".join(sig.get("patterns_detected", [])),
+        )
+
+        if sym in held:
+            log.info(f"  ✗ {sym} SKIP — already holding")
+            trade_logger.log_event(
+                "order_skipped", "buffett_value", sym, gate="already_held", reason="already holding"
+            )
+            continue
+        if sym in already_bought_today:
+            log.info(f"  ✗ {sym} SKIP — already bought today")
+            trade_logger.log_event(
+                "order_skipped", "buffett_value", sym, gate="idempotency", reason="already bought today"
+            )
+            continue
+
+        _fkp = getattr(config, "FMP_API_KEY", "") or os.environ.get("FMP_API_KEY", "")
+        if not _sector_gate(sym, sector_counts, _fkp, "buffett_value", log):
+            continue
+
+        log.info(
+            f"Buffett Value BUY {sym} | price=${sig['signal_price']:.2f} "
+            f"conviction={sig['conviction_score']:.2f} | ${amount:,.0f}"
+        )
+        try:
+            if not free_cash_for_pead(broker, amount):
+                log.warning(f"  ✗ {sym} SKIP — cannot free cash")
+                trade_logger.log_event(
+                    "gate_failed",
+                    "buffett_value",
+                    sym,
+                    gate="free_cash",
+                    amount=round(amount, 2),
+                    reason="cannot free cash from SPY base",
+                )
+                continue
+            trade_logger.log_event(
+                "gate_passed", "buffett_value", sym, gate="free_cash", amount=round(amount, 2)
+            )
+            try:
+                cb.check_before_order(intended_notional=amount, symbol=sym)
+                trade_logger.log_event(
+                    "gate_passed", "buffett_value", sym, gate="circuit_breaker", amount=round(amount, 2)
+                )
+            except EmergencyLiquidation as emerg:
+                log.error(f"✗ {sym} EMERGENCY LIQUIDATION: {emerg}")
+                trade_logger.log_event(
+                    "gate_failed", "buffett_value", sym, gate="emergency_liquidation", reason=str(emerg)
+                )
+                raise
+            except TradingHalted as halt:
+                log.warning(f"  ✗ {sym} circuit breaker: {halt}")
+                trade_logger.log_event(
+                    "gate_failed", "buffett_value", sym, gate="circuit_breaker", reason=str(halt)
+                )
+                continue
+
+            candidate = candidates_by_symbol.get(sym)
+            if candidate is None:
+                log.warning(f"  ✗ {sym} SKIP — analyst candidate snapshot not found")
+                continue
+
+            result = broker.buy_simple(sym, dollar_amount=amount, strategy="buffett_value")
+            if result.get("blocked"):
+                log.warning(f"  ✗ {sym} buy blocked: {result.get('reason')}")
+                trade_logger.log_event(
+                    "order_skipped", "buffett_value", sym, gate="broker_buy", reason=result.get("reason")
+                )
+                continue
+
+            log.info(
+                f"  ✓ Buffett Value {sym} {result['qty']} sh @ ${result['price']:.2f} "
+                f"(no stop -- fundamentals/profit-target exit only)"
+            )
+            trade_logger.log_event(
+                "order_placed",
+                "buffett_value",
+                sym,
+                qty=result["qty"],
+                price=result["price"],
+                amount=round(amount, 2),
+                conviction_score=sig["conviction_score"],
+            )
+
+            buffett_track(sym, result["price"], result["qty"], entry_snapshot=candidate)
+
+            send_trade_alert(
+                action="BUY",
+                ticker=sym,
+                shares=result["qty"],
+                price=result["price"],
+                stop=None,
+                target=None,
+                reason=(
+                    f"Buffett Value conviction={sig['conviction_score']:.2f} "
+                    f"patterns={','.join(sig.get('patterns_detected', []))}"
+                ),
+            )
+            _mark_bought(sym, result)
+            _append_trade_log(
+                {
+                    "ts": datetime.datetime.now(ET).isoformat(timespec="seconds"),
+                    "symbol": sym,
+                    "side": "buy",
+                    "qty": result.get("qty"),
+                    "price": result.get("price"),
+                    "stop": None,
+                    "target": None,
+                    "strategy": "buffett_value",
+                    "conviction_score": sig["conviction_score"],
+                    "exit_date": None,
+                    "exit_price": None,
+                    "pnl_pct": None,
+                }
+            )
+            slots[0] -= 1
+            if slots[0] <= 0:
+                log.info("Slots exhausted — Buffett Value stopping")
+                break
+        except Exception as e:
+            log.error(f"  ✗ Buffett Value {sym} failed: {e}")
+
+
 def _run_macross(broker, cb, pv, slots, held, already_bought_today, sector_counts):
     """MA Crossover: 20/50d golden cross, volume-confirmed. Hold ~21d.
 
@@ -2370,6 +2528,7 @@ STRATEGY_HANDLERS = {
     "vcp": _run_vcp,
     "crypto": _run_crypto,
     "macross": _run_macross,
+    "buffett_value": _run_buffett_value,
 }
 
 
@@ -2549,6 +2708,7 @@ def run():
                 try:
                     broker.close_position(p.symbol)
                     log.info(f"  Emergency closed {p.symbol}")
+                    buffett_untrack(p.symbol)  # no-op if not a Buffett Value position
                 except Exception as e:
                     log.warning(f"  Emergency close {p.symbol} failed: {e}")
         except Exception as e:

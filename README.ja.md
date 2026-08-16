@@ -145,6 +145,7 @@ FMP / FINVIZ / Alpaca の有料サブスクをまだ持っていない場合は�
 
 | スキル | サマリ | 依存 | ステータス |
 |---|---|---|---|
+| **Buffett Value** (`buffett-value`) | Screen for Buffett-style value stocks using business quality (ROE, ROIC, debt), consistency (EPS growth, dividend history), and margin-of-safety valuation via Graham number, with candlestick entry timing. Exits only on profit target, fundamentals deterioration, or a better opportunity — no fixed holding period or stop-loss. | `yfinance` **required** | production |
 | **Dividend Growth Pullback Screener** (`dividend-growth-pullback-screener`) | Use this skill to find high-quality dividend growth stocks (12%+ annual dividend growth, 1.5%+ yield) that are experiencing temporary pullbacks, identified by RSI oversold conditions (RSI ≤40). | `fmp` **required**, `finviz` _recommended_ | production |
 | **Kanchi Dividend Review Monitor** (`kanchi-dividend-review-monitor`) | Monitor dividend portfolios with Kanchi-style forced-review triggers (T1-T5) and convert anomalies into OK/WARN/REVIEW states without auto-selling. | `fmp` _recommended_ | production |
 | **Kanchi Dividend SOP** (`kanchi-dividend-sop`) | Convert Kanchi-style dividend investing into a repeatable US-stock operating procedure. | `fmp` _recommended_ | production |

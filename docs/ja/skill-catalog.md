@@ -51,6 +51,7 @@ Claude Trading Skillsの全スキルをカテゴリ別に紹介します。各�
 | **PEAD Screener** | 決算ギャップアップ銘柄のPost-Earnings Announcement Drift パターンを週足分析。MONITORING→SIGNAL_READY→BREAKOUTのステージ管理 | <span class="badge badge-api">FMP必須</span> |
 | **FTD Detector** | William O'Neilの手法でFollow-Through Day シグナルを検出。市場底打ち確認のためのデュアルインデックス追跡 | <span class="badge badge-api">FMP必須</span> |
 | **Institutional Flow Tracker** | 13F SEC提出書類で機関投資家の蓄積・分配パターンを追跡。スーパーインベスター重み付き品質フレームワーク | <span class="badge badge-api">FMP必須</span> |
+| **[Buffett Value]({{ '/ja/skills/buffett-value/' | relative_url }})** | ウォーレン・バフェット流のバリュー投資: 事業品質（ROE、ROIC、負債）、一貫性（EPS成長、配当履歴）、グレアム数によるマージン・オブ・セーフティ評価。ローソク足によるエントリータイミング判定。利益目標達成、ファンダメンタルズ悪化、またはより良い投資機会が出た場合のみ決済 -- 保有期間の固定やストップロスなし | <span class="badge badge-free">API不要</span> |
 
 ---
 

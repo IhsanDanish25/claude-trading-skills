@@ -23,6 +23,7 @@ import pytz
 from core import config, logger
 from core.analyst import analyze_market_regime, review_open_positions, score_vcp_candidates
 from core.broker import BrokerClient
+from core.buffett_tracker import get_all as buffett_all
 from core.edge import compute_trail_stop, should_pyramid
 from core.fmp import get_market_breadth, get_quotes
 from core.notifier import send_trade_alert
@@ -165,6 +166,7 @@ def run():
 
     positions = broker.get_positions()
     log.info(f"Open positions: {len(positions)}")
+    tracked_buffett = buffett_all()  # one read, shared by both review loops below
 
     # ── Repair: ensure every position has a stop order ──────────────────────
     # Only cancel orphaned orders (limiting old positions we no longer hold).
@@ -219,6 +221,13 @@ def run():
                     f"  {p.symbol}: SPY base holding — no protection OCO"
                     + (f" ({n} legacy sell orders cancelled)" if n else "")
                 )
+                continue
+
+            # Buffett Value positions are entered via broker.buy_simple() with
+            # no stop by design -- never attach one here even though this loop
+            # would otherwise treat "no live stop order" as something to fix.
+            if p.symbol in tracked_buffett:
+                log.info(f"  {p.symbol}: Buffett Value position — no protection OCO by design")
                 continue
 
             # Stale-stop guard: skip re-attach if position already holds a stop
@@ -297,6 +306,15 @@ def run():
             # SELL decision can't liquidate the cash-parking base.
             if is_base_symbol(sym):
                 log.info(f"  {sym:6} | SPY base holding — excluded from review")
+                continue
+            # Buffett Value positions carry no stop-loss by design (see
+            # skills/buffett-value/scripts/sell.py) -- the trim/trail/pyramid
+            # math below and the entry*(1±pct) stop/target it computes don't
+            # apply. Exits for these are evaluated once daily at market close
+            # via routines/market_close.py::_run_buffett_value_exits, on
+            # fundamentals/profit-target only.
+            if sym in tracked_buffett:
+                log.info(f"  {sym:6} | Buffett Value position — excluded from review")
                 continue
             entry = float(p.avg_entry_price)
             current = float(quotes.get(sym, {}).get("price", entry))

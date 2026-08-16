@@ -31,6 +31,8 @@ except ImportError:
 from core import config, cost_tracker, logger
 from core.analyst import generate_weekly_summary
 from core.broker import BrokerClient
+from core.buffett_tracker import get_all as buffett_all
+from core.buffett_value import screen_for_buffett_candidates
 from core.fmp import get_market_breadth
 from core.notifier import send_weekly_summary
 from core.order_utils import order_field
@@ -119,6 +121,39 @@ def calc_week_stats(trades: list) -> dict:
         "worst_trade_pct": round(min(pnls), 2) if pnls else 0,
         "all_pnls": [round(p, 2) for p in pnls],
     }
+
+
+def _run_buffett_value_weekly_check(broker: BrokerClient) -> int:
+    """Weekly pass: re-screens the full universe so the 'materially better
+    opportunity elsewhere' exit signal (see
+    skills/buffett-value/scripts/sell.py) can actually fire -- it needs a
+    fresh candidate_pool that routines/market_close.py's daily exit check
+    deliberately omits, since paying for a ~100-symbol fundamentals screen
+    every day is too expensive for a low-turnover, buy-and-hold strategy.
+    Profit-target and fundamentals-thesis-break exits are already evaluated
+    daily regardless; this only adds the better-opportunity signal on top,
+    by delegating to the exact same execution path (fill confirmation,
+    alerting, untracking) rather than duplicating it.
+
+    Skipped entirely (no screen, no network calls) when nothing is
+    currently tracked.
+    """
+    positions = buffett_all()
+    if not positions:
+        return 0
+
+    log.info(f"── Buffett Value weekly: re-screening universe for {len(positions)} tracked position(s)")
+    universe = [s for s in config.SP80_UNIVERSE if s.isalpha() and len(s) <= 5]
+    candidate_pool = screen_for_buffett_candidates(universe)
+    log.info(f"  {len(candidate_pool)} candidates in this week's fresh screen")
+
+    # Local import: routines/ is a proper package (see scheduler.py's
+    # importlib.import_module("routines.market_close")), so this is a
+    # normal intra-package import, not a hack -- deferred here just to keep
+    # market_close's own module-load cheap for callers that don't need it.
+    from routines.market_close import _run_buffett_value_exits
+
+    return _run_buffett_value_exits(broker, candidate_pool=candidate_pool)
 
 
 def run():
@@ -234,6 +269,13 @@ def run():
         log.info("  ✓ Weekly email sent")
     except Exception as e:
         log.error(f"  ✗ Weekly email failed: {e}")
+
+    try:
+        buffett_exited = _run_buffett_value_weekly_check(broker)
+        if buffett_exited:
+            log.info(f"── Buffett Value weekly: {buffett_exited} position(s) exited on a better opportunity")
+    except Exception as e:
+        log.error(f"Buffett Value weekly check failed (non-blocking): {e}")
 
     logger.banner(log, "WEEKLY REVIEW COMPLETE")
 
