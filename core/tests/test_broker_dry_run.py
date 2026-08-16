@@ -1,5 +1,5 @@
-"""Unit tests for DRY_RUN — buy()/_buy_fractional() short-circuit right
-before order submission when core.broker.DRY_RUN is True.
+"""Unit tests for DRY_RUN — buy() short-circuits right before order
+submission when core.broker.DRY_RUN is True.
 
 The paper trading account no longer exists (deleted 2026-08-01), so DRY_RUN
 is the only way to validate the full live pipeline (spread gate, sizing,
@@ -61,18 +61,16 @@ def test_dry_run_buy_never_submits_order(monkeypatch):
     assert result["target"] == 110.0
 
 
-def test_dry_run_fractional_buy_never_submits_order(monkeypatch):
+def test_dry_run_blocks_rather_than_going_fractional(monkeypatch):
     monkeypatch.setattr(broker_module, "DRY_RUN", True)
-    # ref_price high enough / cash low enough to force the fractional path.
+    # ref_price high enough / cash low enough that a whole share doesn't
+    # fit — fractional buys are disabled, so this blocks even in DRY_RUN
+    # (the block check runs before the DRY_RUN short-circuit).
     broker = _make_broker(ref_price=339.0, equity=264.0, buying_power=205.0)
 
     result = broker.buy("AAPL", dollar_amount=26.0, stop_loss_pct=0.05, take_profit_pct=0.10)
 
-    assert result["dry_run"] is True
-    assert result.get("blocked") is None
-    # notional clamps to 8% of $264 equity ($21.12) same as the live path.
-    assert result["qty"] == round(21.12 / 339.0, 9)
-    assert result["price"] == 339.0
+    assert result == {"blocked": True, "reason": "insufficient_cash"}
 
 
 def test_dry_run_still_enforces_spread_gate(monkeypatch):

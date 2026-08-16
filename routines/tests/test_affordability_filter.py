@@ -24,12 +24,10 @@ def _make_log():
     return MagicMock()
 
 
-def test_affordable_candidates_keeps_whole_share_and_fractional_affordable():
+def test_affordable_candidates_keeps_whole_share_affordable():
     broker = MagicMock()
-    # AAPL costs more than its own whole-share budget, but the budget still
-    # clears the fractional floor — broker.buy() will size it as a notional
-    # order, so it must NOT be dropped here. MSFT is affordable outright.
-    broker.affordable_budget.side_effect = lambda sym: {"AAPL": 20.0, "MSFT": 500.0}[sym]
+    # Both candidates' budgets cover at least 1 whole share at their price.
+    broker.affordable_budget.side_effect = lambda sym: {"AAPL": 350.0, "MSFT": 500.0}[sym]
     candidates = [
         {"symbol": "AAPL", "price": 340.0},
         {"symbol": "MSFT", "price": 400.0},
@@ -40,14 +38,15 @@ def test_affordable_candidates_keeps_whole_share_and_fractional_affordable():
     assert [c["symbol"] for c in result] == ["AAPL", "MSFT"]
 
 
-def test_affordable_candidates_drops_below_fractional_floor():
+def test_affordable_candidates_drops_whole_share_unaffordable():
     broker = MagicMock()
-    # Budget below MIN_FRACTIONAL_NOTIONAL (default $5) — not even a sliver
-    # fractional order is worth the round-trip cost, so this is genuinely
-    # unaffordable regardless of price.
-    broker.affordable_budget.side_effect = lambda sym: {"PENNIES": 2.50, "MSFT": 500.0}[sym]
+    # AAPL's budget can't cover even 1 whole share at its price. Fractional
+    # buys are disabled (Alpaca can only attach a DAY-tif stop to a
+    # fractional position, so protection lapses at the day's close), so this
+    # is dropped regardless of how close the budget comes.
+    broker.affordable_budget.side_effect = lambda sym: {"AAPL": 20.0, "MSFT": 500.0}[sym]
     candidates = [
-        {"symbol": "PENNIES", "price": 340.0},
+        {"symbol": "AAPL", "price": 340.0},
         {"symbol": "MSFT", "price": 400.0},
     ]
 
@@ -73,10 +72,8 @@ def test_run_pead_skips_unaffordable_top_candidate_and_buys_cheaper_one(monkeypa
     # affordable candidate existing. The filter must run first so the
     # truncated window contains only buyable names.
     #
-    # EXPENSIVE's budget here is below MIN_FRACTIONAL_NOTIONAL (genuinely
-    # unaffordable, not even as a fractional sliver) — a merely
-    # whole-share-unaffordable price is no longer dropped by the filter,
-    # since broker.buy() sizes those as a fractional order instead.
+    # EXPENSIVE's $2.00 budget can't cover even 1 whole share at $340 —
+    # fractional buys are disabled, so it's dropped by the filter.
     monkeypatch.setattr(market_open, "_sector_gate", lambda *a, **k: True)
     monkeypatch.setattr(market_open, "free_cash_for_pead", lambda broker, amount: True)
     monkeypatch.setattr(market_open, "pead_track", lambda *a, **k: None)

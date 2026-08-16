@@ -147,28 +147,26 @@ def _affordable_candidates(broker, candidates: list, strategy: str, log) -> list
     or an expensive top candidate silently crowds out a cheaper one further
     down the list that the account could actually buy.
 
-    A candidate priced above its whole-share budget is still kept as long as
-    the budget clears MIN_FRACTIONAL_NOTIONAL — broker.buy() falls back to a
-    notional (fractional-share) order in exactly that case (see buy()'s
-    qty<1 branch), so rejecting it here on a whole-share-only price check
-    silently dropped good signals (e.g. an insider-buy candidate priced at
-    $215 on a $21 budget) that the broker was fully capable of executing as
-    a $21 fractional buy. Only candidates below the fractional floor — where
-    even a sliver order isn't worth the round-trip cost — are dropped.
+    A candidate whose budget can't cover even 1 whole share is dropped here.
+    broker.buy() no longer falls back to a fractional (notional) order for
+    those — fractional positions can only ever get a DAY-tif stop from
+    Alpaca (GTC is rejected), so protection lapses at that day's close —
+    so there is no point carrying a whole-share-unaffordable candidate
+    through to a buy() call that will just block it.
     """
     affordable = []
     for c in candidates:
         sym = c["symbol"]
         price = c.get("price", 0)
         budget = broker.affordable_budget(sym)
-        if price <= 0 or budget < config.MIN_FRACTIONAL_NOTIONAL:
-            log.info(f"  ✗ {sym} SKIP — affordable budget ${budget:.2f} below fractional minimum")
+        if price <= 0 or budget < price:
+            log.info(f"  ✗ {sym} SKIP — affordable budget ${budget:.2f} can't cover 1 whole share @ ${price:.2f}")
             trade_logger.log_event(
                 "order_skipped",
                 strategy,
                 sym,
                 gate="affordability",
-                reason=f"budget ${budget:.2f} < fractional minimum ${config.MIN_FRACTIONAL_NOTIONAL:.2f}",
+                reason=f"budget ${budget:.2f} < whole-share price ${price:.2f}",
                 price=price,
                 budget=round(budget, 2),
             )
