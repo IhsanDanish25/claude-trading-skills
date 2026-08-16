@@ -45,7 +45,6 @@ from core.config import (
     MAX_OPEN_POSITIONS,
     MAX_POSITION_SIZE_PCT,
     MAX_SPREAD_PCT,
-    MIN_FRACTIONAL_NOTIONAL,
     RISK_PCT,
     STOP_LOSS_PCT,
     TAKE_PROFIT_PCT,
@@ -473,7 +472,7 @@ class BrokerClient:
         strategy: str | None,
         spread_pct: float | None,
     ) -> dict:
-        """DRY_RUN short-circuit for buy()/_buy_fractional(): everything up to
+        """DRY_RUN short-circuit for buy(): everything up to
         this point (spread gate, sizing guardrails) ran against real market
         data — this just replaces the real order submission + fill poll +
         stop/target attach with a simulated fill at ref_price, so no order
@@ -550,10 +549,15 @@ class BrokerClient:
         Guardrails enforced before every order:
         0. Bid-ask spread must not exceed MAX_SPREAD_PCT of price (see
            check_spread) — hard block, applies uniformly across all
-           strategies that route through buy()/_buy_fractional().
+           strategies that route through buy().
         1. Position count must be below MAX_OPEN_POSITIONS (new symbols only).
         2. Order value is clamped to equity * MAX_POSITION_SIZE_PCT, accounting
            for any existing position in the same symbol.
+        3. If even 1 whole share doesn't fit the remaining cap/cash, the
+           trade is skipped rather than falling back to a fractional-share
+           buy — Alpaca can only attach a DAY-tif stop to a fractional
+           position (GTC is rejected), so it can never carry durable
+           protection.
 
         Pass either dollar_amount OR shares. `strategy` (e.g. "breakout",
         "meanrev") is optional and only used to attribute cost-tracking
@@ -681,35 +685,17 @@ class BrokerClient:
             qty = cash_qty
 
         if qty < 1:
-            # Fractional fallback: a whole share doesn't fit the caps, but the
-            # caller gave us an explicit dollar budget — use a notional order
-            # instead of blocking. attach_stop_target uses a DAY time-in-force
-            # for fractional qty (Alpaca rejects GTC on fractional orders,
-            # error 42210000), so the protective exit still attaches and the
-            # caller's "flatten if stop_attached is False" guard still holds.
-            if dollar_amount is not None:
-                notional = round(min(dollar_amount, remaining_cap, available_cash), 2)
-                if notional < MIN_FRACTIONAL_NOTIONAL:
-                    log.warning(
-                        "BUY %s BLOCKED — fractional notional $%.2f below $%.2f minimum",
-                        symbol,
-                        notional,
-                        MIN_FRACTIONAL_NOTIONAL,
-                    )
-                    return {"blocked": True, "reason": "insufficient_cash"}
-                return self._buy_fractional(
-                    symbol,
-                    notional,
-                    ref_price,
-                    stop_loss_pct,
-                    take_profit_pct,
-                    strategy=strategy,
-                    spread_pct=spread_check.get("spread_pct"),
-                )
-
+            # Fractional-share buys are disabled outright. Alpaca rejects GTC
+            # on a fractional position (error 42210000) — only a DAY-tif stop
+            # can attach, so protection lapses at that day's close and stays
+            # off until a repair pass (midday_review/market_open) happens to
+            # re-attach it. That gap is exactly what left MSFT sitting on the
+            # exchange with zero live stop for days before it was caught and
+            # closed manually (2026-08-15). A position that can only ever get
+            # temporary protection isn't worth opening — skip the trade.
             log.warning(
                 "BUY %s BLOCKED — cannot afford 1 whole share @ $%.2f "
-                "(remaining cap $%.2f, buying power $%.2f); no dollar_amount to size a fractional order",
+                "(remaining cap $%.2f, buying power $%.2f); fractional buys are disabled",
                 symbol,
                 ref_price,
                 remaining_cap,
@@ -786,99 +772,6 @@ class BrokerClient:
                 fill_price=fill_price,
                 qty=filled_qty,
                 spread_pct=spread_check.get("spread_pct"),
-            )
-
-        return {
-            "order": order,
-            "qty": filled_qty,
-            "price": basis,
-            "stop": stop,
-            "target": target,
-            "stop_attached": stop_attached,
-            "target_attached": target_attached,
-        }
-
-    def _buy_fractional(
-        self,
-        symbol: str,
-        notional: float,
-        ref_price: float,
-        stop_loss_pct: float,
-        take_profit_pct: float,
-        strategy: str | None = None,
-        spread_pct: float | None = None,
-    ) -> dict:
-        """Notional (fractional-share) market BUY, then attach a DAY-tif
-        protective exit. Mirrors buy()'s whole-share flow above; kept
-        separate because the order request and fill-qty math differ
-        (notional in/qty out, vs. qty in/qty out)."""
-        if DRY_RUN:
-            return self._dry_run_fill(
-                symbol=symbol,
-                qty=None,
-                notional=notional,
-                ref_price=ref_price,
-                stop_loss_pct=stop_loss_pct,
-                take_profit_pct=take_profit_pct,
-                strategy=strategy,
-                spread_pct=spread_pct,
-            )
-
-        order = self.trade.submit_order(
-            MarketOrderRequest(
-                symbol=symbol,
-                notional=notional,
-                side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
-            )
-        )
-        log.info(
-            f"BUY {symbol} ${notional:.2f} notional (fractional) submitted [{str(order.id)[:8]}]"
-        )
-
-        market_open = self.is_market_open()
-        fill_price = None
-        filled_qty = round(notional / ref_price, 9)
-        for i in range(10):
-            if not market_open and i > 0:
-                log.warning("Market closed — aborting fill poll for %s", symbol)
-                break
-            try:
-                o = self.trade.get_order_by_id(order.id)
-            except Exception as e:
-                log.warning("poll order %s failed: %s", symbol, e)
-                break
-            if o.filled_avg_price:
-                fill_price = float(o.filled_avg_price)
-                if o.filled_qty:
-                    filled_qty = float(o.filled_qty)
-                break
-            time.sleep(0.5)
-
-        basis = fill_price if fill_price else ref_price
-        if fill_price is None:
-            log.warning(
-                f"{symbol} not filled within 5s — using reference ${ref_price:.2f} for stop/target"
-            )
-        stop = round(basis * (1 - stop_loss_pct), 2)
-        target = round(basis * (1 + take_profit_pct), 2) if take_profit_pct is not None else None
-
-        stop_attached, target_attached = self.attach_stop_target(symbol, filled_qty, stop, target)
-        log.info(
-            f"BUY {symbol} {filled_qty:.6f} @ ${basis:.2f} (fractional) | SL={stop} "
-            f"TP={'None (no cap)' if target is None else target} "
-            f"| stop_attached={stop_attached} target_attached={target_attached}"
-        )
-
-        if strategy is not None and fill_price is not None:
-            cost_tracker.record_fill(
-                strategy=strategy,
-                symbol=symbol,
-                side="buy",
-                signal_price=ref_price,
-                fill_price=fill_price,
-                qty=filled_qty,
-                spread_pct=spread_pct,
             )
 
         return {

@@ -146,30 +146,27 @@ def test_buy_without_dollar_amount_unaffected():
     assert broker.trade.submitted[-1].qty == result["qty"]
 
 
-def test_buy_falls_back_to_fractional_when_whole_share_unaffordable():
+def test_buy_blocks_rather_than_going_fractional_when_whole_share_unaffordable():
     # A dollar_amount request whose share price exceeds the affordable
-    # whole-share budget submits a fractional (notional) order instead of
-    # blocking. This depends on attach_stop_target using a DAY time-in-force
-    # for fractional qty (Alpaca rejects GTC on fractional orders, error
-    # 42210000) — see test_broker_attach_stop_target_tif.py. Mirrors the live
-    # 2026-07-28 AAPL/TXN case (share $339, ~$26 budget) that previously
-    # caused immediate-flatten churn under the old GTC-only attach.
+    # whole-share budget used to submit a fractional (notional) order.
+    # Fractional buys are now disabled outright — Alpaca only allows a
+    # DAY-tif stop on a fractional position (GTC is rejected, error
+    # 42210000), so protection lapses at that day's close and depends on a
+    # repair pass to re-attach it. That gap is what left MSFT sitting
+    # unprotected on the exchange for days (2026-08-15). The trade must
+    # block instead of opening a position that can only ever get temporary
+    # protection.
     broker = _make_broker(ref_price=339.0, equity=264.0, buying_power=205.0)
 
     result = broker.buy("AAPL", dollar_amount=26.0, stop_loss_pct=0.05, take_profit_pct=0.10)
 
-    assert result.get("blocked") is None
-    submitted = broker.trade.submitted[-1]
-    # notional clamps to the 8% position cap (0.08 * $264 = $21.12), the
-    # tightest of dollar_amount/remaining_cap/available_cash here.
-    assert submitted.notional == 21.12
-    assert result["qty"] == round(21.12 / 339.0, 9)
+    assert result == {"blocked": True, "reason": "insufficient_cash"}
+    assert broker.trade.submitted == []
 
 
-def test_buy_blocks_fractional_below_min_notional():
-    # A dollar_amount so small the fractional order wouldn't clear
-    # MIN_FRACTIONAL_NOTIONAL still blocks rather than submitting a
-    # near-zero order that just bleeds spread/fees.
+def test_buy_blocks_small_dollar_amount_when_whole_share_unaffordable():
+    # Even a small dollar_amount that could once have sized a fractional
+    # sliver order still blocks now — there's no fractional path left.
     broker = _make_broker(ref_price=339.0, equity=264.0, buying_power=205.0)
 
     result = broker.buy("AAPL", dollar_amount=2.0, stop_loss_pct=0.05, take_profit_pct=0.10)
