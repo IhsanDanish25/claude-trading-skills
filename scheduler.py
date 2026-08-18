@@ -294,9 +294,44 @@ def run_routine(module: str):
     mod.run()
 
 
+def run_protection_sweep():
+    """Verify every open position still has a live stop, every tick — not
+    just at the three daily checkpoints (market_open/midday/market_close).
+
+    A fractional position's stop can only be a DAY-tif order (Alpaca
+    rejects GTC on fractional qty), so it expires at that session's close
+    and the position is naked until the next checkpoint re-attaches one.
+    Previously that gap ran from market_close's cancel-all (~15:07 ET)
+    until market_open's repair pass (~09:35 ET) — MSFT sat unprotected for
+    over 17 hours on 2026-08-13 as a result. worker.py fires this module
+    every 10 minutes 24/7 (get_routine's market-hours window only gates
+    the scheduled routines, not the process itself), so running the sweep
+    unconditionally on every tick bounds the gap to ~10 minutes instead,
+    including overnight — Alpaca accepts a DAY order submitted while the
+    market is closed and simply queues it for the next session.
+
+    reattach_missing_protection is idempotent (skips symbols that already
+    have a live stop), so calling it here as well as from the checkpoint
+    routines in the same tick is harmless.
+    """
+    try:
+        from core import config as core_config
+        from core.broker import BrokerClient
+        from core.protection import reattach_missing_protection
+
+        broker = BrokerClient()
+        flattened = reattach_missing_protection(broker, core_config, log)
+        if flattened:
+            log.warning(f"Protection sweep flattened (attach failed): {sorted(flattened)}")
+    except Exception:
+        log.error("Protection sweep failed", exc_info=True)
+
+
 def main():
     now = datetime.datetime.now(ET)
     log.info(f"Scheduler fired: {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
+
+    run_protection_sweep()
 
     routine = get_routine(now)
 
