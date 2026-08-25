@@ -1,6 +1,5 @@
 """
-Earnings Momentum screener — yfinance earnings history (live), FMP /stable/
-earnings (backtest only — engine5 patches _get with point-in-time fixtures).
+Earnings Momentum screener — yfinance earnings history only, no FMP.
 
 Earnings momentum: stocks that reported earnings 8-45 days ago and BEAT,
 but have not yet re-rated — price is still drifting up as the market catches on.
@@ -18,10 +17,12 @@ Filters:
   - Price has drifted up since beat (drift > MIN_DRIFT_PCT, default 2%)
   - Above $10, avg volume > 500k (liquidity)
 
-Live earnings source: yfinance Ticker.get_earnings_dates() — no FMP key
-required, 0 FMP calls. Backtest keeps using FMP /stable/earnings via _get
-(unchanged) since backtest_harness/satellite_signals.py's point-in-time
-replica is what's actually validated, not this live-only screener.
+Earnings source: yfinance Ticker.get_earnings_dates() — no FMP key or
+FMP calls anywhere in this module (live or backtest). Only
+routines/market_open.py calls this screener; backtest_harness/
+satellite_signals.py has its own independent point-in-time replica and
+never imports this module, so there was never a real backtest path here
+to preserve.
 """
 
 from __future__ import annotations
@@ -43,14 +44,12 @@ from core.config import (
     EARNMOM_MIN_SURPRISE_PCT,
     SP80_UNIVERSE,
 )
-from core.fmp import _STABLE as _stable
-from core.fmp import _get
 from core.yf_utils import yf_download
 
 log = logging.getLogger(__name__)
 
-# Live daily cache for /stable/earnings (earnings only change quarterly, so one
-# fetch per symbol per day is plenty and keeps us well under the FMP quota).
+# Daily cache for yfinance earnings history (earnings only change quarterly,
+# so one fetch per symbol per day is plenty).
 _EARN_CACHE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cache", "earnings_live"
 )
@@ -94,17 +93,10 @@ def _fetch_earnings_yf(sym: str) -> list[dict]:
 
 
 def _load_symbol_earnings(sym: str) -> list[dict]:
-    """Full reported-earnings history for one symbol.
+    """Full reported-earnings history for one symbol, via yfinance.
 
-    Backtest: call FMP /stable/earnings straight through (engine5 patches
-    _get to serve point-in-time rows) — unchanged. Live: fetch from
-    yfinance (no FMP key needed), served from a per-day disk cache since
-    earnings only change quarterly.
+    Served from a per-day disk cache since earnings only change quarterly.
     """
-    if clock.is_backtest():
-        raw = _get(f"{_stable}/earnings", {"symbol": sym})
-        return raw if isinstance(raw, list) else []
-
     today_s = clock.today().isoformat()
     path = os.path.join(_EARN_CACHE_DIR, f"{sym.upper()}.json")
     try:
@@ -245,9 +237,9 @@ def screen() -> list[dict]:
     candidates: list[dict] = []
     fetched = 0
 
-    # Per-symbol /stable/earnings (the /earning_calendar batch endpoint is 404 on
-    # our FMP tier). For each symbol keep the most recent REPORTED quarter within
-    # the lookback window and derive the surprise % from actual vs. estimate.
+    # Per-symbol yfinance earnings history. For each symbol keep the most
+    # recent REPORTED quarter within the lookback window and derive the
+    # surprise % from actual vs. estimate.
     log.info(
         f"EarnMom screen: fetching per-symbol earnings via yfinance "
         f"(from={cutoff_s}, universe={len(SP80_UNIVERSE)})"
