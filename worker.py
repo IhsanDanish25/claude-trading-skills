@@ -7,7 +7,7 @@ and dispatches the right routine (pre_market / market_open / midday /
 market_close / weekly_review), or exits quietly when nothing is scheduled.
 This process runs forever so Railway keeps it alive between ticks.
 
-On startup: runs a health check that tests Alpaca + FMP connectivity so
+On startup: runs a health check that tests Alpaca connectivity so
 credential problems surface immediately in the logs (not hours later when
 a routine finally fires).
 
@@ -104,17 +104,20 @@ def _interrupted_sleep(seconds: float) -> None:
 
 
 def startup_health_check() -> None:
-    """Test Alpaca + FMP connectivity on boot. Logs results, never crashes."""
+    """Test Alpaca connectivity on boot. Logs results, never crashes."""
     log.info("=" * 50)
     log.info("STARTUP HEALTH CHECK")
     log.info("=" * 50)
 
-    # Check env vars
+    # Check env vars. FMP_API_KEY deliberately excluded: no active strategy
+    # (breakout, meanrev, earnmom, insider) calls FMP anymore — all yfinance/
+    # EDGAR — so treating it as required just broke this whole health check
+    # every boot (missing -> early return -> Alpaca/heartbeat/schedule checks
+    # below never ran).
     required = {
         "ALPACA_API_KEY": os.environ.get("ALPACA_API_KEY", ""),
         "ALPACA_SECRET_KEY": os.environ.get("ALPACA_SECRET_KEY", ""),
         "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
-        "FMP_API_KEY": os.environ.get("FMP_API_KEY", ""),
     }
     for name, val in required.items():
         if val:
@@ -165,28 +168,6 @@ def startup_health_check() -> None:
         log.error("  Fix: regenerate API keys at app.alpaca.markets → API Keys")
         log.error("  Then update ALPACA_API_KEY + ALPACA_SECRET_KEY in Railway Variables")
         return
-
-    # Test FMP connection
-    try:
-        import requests
-
-        fmp_key = os.environ.get("FMP_API_KEY", "")
-        r = requests.get(
-            "https://financialmodelingprep.com/stable/quote",
-            params={"symbol": "AAPL", "apikey": fmp_key},
-            timeout=10,
-        )
-        r.raise_for_status()
-        data = r.json()
-        if data:
-            price = data[0].get("price", 0) if isinstance(data, list) else 0
-            log.info("  FMP: CONNECTED ✓ (AAPL=$%.2f)", price)
-        else:
-            log.warning(
-                "  FMP: empty response (may be rate-limited) — yfinance fallback auto-enabled"
-            )
-    except Exception as e:
-        log.warning("  FMP: FAILED — %s (yfinance fallback auto-enabled)", e)
 
     # Test heartbeat — hit localhost so it works before the Railway domain
     # propagates. Also logs the public URL for quick reference.
