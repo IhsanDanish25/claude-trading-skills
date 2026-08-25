@@ -1,5 +1,6 @@
 """
-Earnings Momentum screener — FMP /stable/ earning_calendar.
+Earnings Momentum screener — yfinance earnings history (live), FMP /stable/
+earnings (backtest only — engine5 patches _get with point-in-time fixtures).
 
 Earnings momentum: stocks that reported earnings 8-45 days ago and BEAT,
 but have not yet re-rated — price is still drifting up as the market catches on.
@@ -17,11 +18,10 @@ Filters:
   - Price has drifted up since beat (drift > MIN_DRIFT_PCT, default 2%)
   - Above $10, avg volume > 500k (liquidity)
 
-FMP /stable/ earning_calendar endpoint:
-  [{date, symbol, epsd, epfA, epsChanged, revenueEstimated, revenueActual,
-    surprisePercentage, fiscalPressure, displayPeriod}, ...]
-
-Also fetches current FMP quote for price and volume drift confirmation.
+Live earnings source: yfinance Ticker.get_earnings_dates() — no FMP key
+required, 0 FMP calls. Backtest keeps using FMP /stable/earnings via _get
+(unchanged) since backtest_harness/satellite_signals.py's point-in-time
+replica is what's actually validated, not this live-only screener.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import math
 import os
 
 from core import clock
@@ -43,7 +44,7 @@ from core.config import (
     SP80_UNIVERSE,
 )
 from core.fmp import _STABLE as _stable
-from core.fmp import _get, fmp_remaining_calls
+from core.fmp import _get
 from core.yf_utils import yf_download
 
 log = logging.getLogger(__name__)
@@ -55,16 +56,50 @@ _EARN_CACHE_DIR = os.path.join(
 )
 
 
+def _fetch_earnings_yf(sym: str) -> list[dict]:
+    """Recent reported-earnings history for one symbol via yfinance.
+
+    Shaped like the old FMP /stable/earnings rows so the rest of screen()
+    (surprise-pct calc, report-date window filter) is unchanged:
+    [{date, epsActual, epsEstimated}, ...]. Rows with no reported EPS yet
+    (future/upcoming quarter) are dropped.
+    """
+    try:
+        import yfinance as yf
+
+        df = yf.Ticker(sym).get_earnings_dates(limit=8)
+    except Exception as e:  # noqa: BLE001
+        log.debug("earnmom yfinance earnings %s: %s", sym, e)
+        return []
+    if df is None or df.empty:
+        return []
+
+    rows: list[dict] = []
+    for ts, row in df.iterrows():
+        reported = row.get("Reported EPS")
+        if reported is None or (isinstance(reported, float) and math.isnan(reported)):
+            continue
+        estimate = row.get("EPS Estimate")
+        has_estimate = estimate is not None and not (
+            isinstance(estimate, float) and math.isnan(estimate)
+        )
+        rows.append(
+            {
+                "date": ts.strftime("%Y-%m-%d"),
+                "epsActual": float(reported),
+                "epsEstimated": float(estimate) if has_estimate else None,
+            }
+        )
+    return rows
+
+
 def _load_symbol_earnings(sym: str) -> list[dict]:
-    """Full reported-earnings history for one symbol via FMP /stable/earnings.
+    """Full reported-earnings history for one symbol.
 
-    NOTE: /stable/earnings must be called with NO `limit` param — the free tier
-    returns full history that way (limit>=8 triggers 402). The old code hit the
-    404 /stable/earning_calendar endpoint, which is why earnmom was a silent
-    no-op live.
-
-    Backtest: call straight through (engine5 patches _get to serve point-in-time
-    rows). Live: serve from a per-day disk cache, refreshing once per day.
+    Backtest: call FMP /stable/earnings straight through (engine5 patches
+    _get to serve point-in-time rows) — unchanged. Live: fetch from
+    yfinance (no FMP key needed), served from a per-day disk cache since
+    earnings only change quarterly.
     """
     if clock.is_backtest():
         raw = _get(f"{_stable}/earnings", {"symbol": sym})
@@ -80,8 +115,7 @@ def _load_symbol_earnings(sym: str) -> list[dict]:
     except (OSError, ValueError):
         pass
 
-    raw = _get(f"{_stable}/earnings", {"symbol": sym})
-    rows = raw if isinstance(raw, list) else []
+    rows = _fetch_earnings_yf(sym)
     try:
         os.makedirs(_EARN_CACHE_DIR, exist_ok=True)
         with open(path, "w") as f:
@@ -215,7 +249,7 @@ def screen() -> list[dict]:
     # our FMP tier). For each symbol keep the most recent REPORTED quarter within
     # the lookback window and derive the surprise % from actual vs. estimate.
     log.info(
-        f"EarnMom screen: fetching per-symbol earnings via FMP /stable/earnings "
+        f"EarnMom screen: fetching per-symbol earnings via yfinance "
         f"(from={cutoff_s}, universe={len(SP80_UNIVERSE)})"
     )
 
@@ -224,20 +258,6 @@ def screen() -> list[dict]:
     log.info("  Prefetching 1y bars for all %d symbols via yfinance...", len(SP80_UNIVERSE))
     bars_map = _fetch_bars_batch(SP80_UNIVERSE)
     log.info("  Got bars for %d symbols", len(bars_map))
-
-    # ── FMP budget guard — now only 1 call per symbol for /earnings ────────────
-    remaining = fmp_remaining_calls()
-    needed = len(SP80_UNIVERSE)  # worst case: 1 earnings call per symbol
-    if remaining < needed:
-        log.warning(
-            "EarnMom SKIPPED: FMP budget %d remaining, need ~%d calls. "
-            "EarnMom will run after other strategies exhaust fewer calls, "
-            "or increase FMP tier.",
-            remaining,
-            needed,
-        )
-        return []
-    log.info("EarnMom: FMP budget %d remaining, need ~%d — proceeding", remaining, needed)
 
     earnings_by_sym: dict[str, dict] = {}
     earnings_fetch_failed = 0

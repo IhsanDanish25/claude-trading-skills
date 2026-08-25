@@ -19,7 +19,6 @@ from core import earnings_momentum_screener as ems
 def _patch_common(monkeypatch):
     monkeypatch.setattr(ems, "SP80_UNIVERSE", ["AAPL", "MSFT", "GOOGL"])
     monkeypatch.setattr(ems, "_fetch_bars_batch", lambda symbols: {})
-    monkeypatch.setattr(ems, "fmp_remaining_calls", lambda: 1000)
 
 
 def test_warns_when_some_symbol_fetches_fail(monkeypatch):
