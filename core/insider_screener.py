@@ -1,16 +1,18 @@
 """
-Insider screener — SEC EDGAR Form 4 (primary) + FMP /stable/ (fallback).
+Insider screener — SEC EDGAR Form 4 only, no FMP.
 
 P-Purchase = "Purchase" transactions filed on Form 4:
   - Directors buying their own stock (no banker's pitch, pure conviction)
   - Scored on: CEO/CFO seniority, cluster count, dollar value relative to market cap,
     and recency weighting.
 
-Sources:
-  1. SEC EDGAR (primary) — 0 API key, unlimited calls, fetches directly from sec.gov
-  2. FMP /stable/insider-trading (fallback) — only if EDGAR returns nothing
-
-FMP drain: 0 FMP calls per run under normal conditions.
+Source: SEC EDGAR — 0 API key, unlimited calls, fetches directly from
+sec.gov. Price comes straight from the transaction data (no external
+price lookup needed). There used to be an FMP /stable/insider-trading
+fallback for when EDGAR came up empty, but with no FMP_API_KEY set it
+was pure dead weight — it fired (and logged an ERROR line) on any
+ordinary day EDGAR legitimately found zero purchases, not just on real
+failures. Removed.
 """
 from __future__ import annotations
 
@@ -23,7 +25,6 @@ from core.config import (
     INSIDER_MIN_PRICE, INSIDER_MIN_DOLLAR, INSIDER_LOOKBACK_DAYS,
     INSIDER_LIMIT, SP80_UNIVERSE,
 )
-from core.fmp import _get, _STABLE as _stable, fmp_remaining_calls
 from core.edgar import get_insider_transactions
 
 log = logging.getLogger(__name__)
@@ -87,51 +88,26 @@ def screen() -> list[dict]:
     Run insider purchase screen. Returns top-LIMIT candidates sorted by
     aggregate insider_score.
 
-    Sources (in order):
-      1. SEC EDGAR — Form 4 XML directly from sec.gov (primary, zero FMP cost)
-      2. FMP /stable/insider-trading — only if EDGAR returns nothing
-
-    Both results are in-process cached for the rest of the run.
+    Source: SEC EDGAR — Form 4 XML directly from sec.gov, zero API key.
+    Result is in-process cached for the rest of the run.
     """
     global _all_transactions_cache
     today = datetime.date.today()
 
-    # ── Transaction fetch (EDGAR primary, FMP fallback) ─────────────────────
     if _all_transactions_cache is not None:
         all_transactions = _all_transactions_cache
         log.info(f"  Using in-process cache ({len(all_transactions)} transactions)")
-
     else:
-        # 1. SEC EDGAR (0 FMP calls, 0 API keys)
         log.info("Insider: pulling Form 4 P-Purchases from SEC EDGAR")
         try:
             all_transactions = get_insider_transactions()
         except Exception as e:
-            log.warning(f"EDGAR failed: {e} — falling back to FMP")
+            log.warning(f"EDGAR failed: {e}")
             all_transactions = []
 
         if all_transactions:
             _all_transactions_cache = all_transactions
-            log.info(f"  EDGAR → {len(all_transactions)} transactions")
-        else:
-            # 2. FMP fallback (only if EDGAR came up empty)
-            if fmp_remaining_calls() >= 1:
-                cutoff = today - datetime.timedelta(days=INSIDER_LOOKBACK_DAYS)
-                log.info("Insider: EDGAR empty — trying FMP /stable/insider-trading")
-                try:
-                    data = _get(f"{_stable}/insider-trading", {
-                        "from": cutoff.isoformat(),
-                        "to":   today.isoformat(),
-                    })
-                    all_transactions = data if isinstance(data, list) else []
-                except Exception as e:
-                    log.warning(f"FMP fallback failed: {e}")
-                    all_transactions = []
-                if all_transactions:
-                    _all_transactions_cache = all_transactions
-                    log.info(f"  FMP → {len(all_transactions)} transactions")
-            else:
-                log.info("Insider: no transactions (EDGAR empty, FMP budget exhausted)")
+        log.info(f"  EDGAR → {len(all_transactions)} transactions")
 
     # ── Filter to P-Purchases ──────────────────────────────────────────────────
     purchases = [
