@@ -43,7 +43,11 @@ def reattach_missing_protection(broker, config, log) -> set[str]:
     stop_orders = set()
     for o in open_orders:
         try:
-            if "stop" in order_field(o, "type") and order_field(o, "side") == "sell":
+            if order_field(o, "side") != "sell":
+                continue
+            otype = order_field(o, "type")
+            oclass = order_field(o, "order_class")
+            if "stop" in otype or oclass in ("oco", "bracket", "oto"):
                 stop_orders.add(o.symbol)
         except Exception:
             pass
