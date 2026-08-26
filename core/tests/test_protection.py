@@ -24,8 +24,8 @@ def _position(symbol, qty, avg_entry_price):
     return SimpleNamespace(symbol=symbol, qty=qty, avg_entry_price=avg_entry_price)
 
 
-def _order(symbol, otype, side=OrderSide.SELL):
-    return SimpleNamespace(symbol=symbol, type=otype, side=side)
+def _order(symbol, otype, side=OrderSide.SELL, order_class=None):
+    return SimpleNamespace(symbol=symbol, type=otype, side=side, order_class=order_class)
 
 
 def _broker(positions, open_orders, price=None, attach_result=(True, True)):
@@ -59,6 +59,23 @@ def test_attaches_protection_for_fractional_position_missing_a_stop():
 def test_skips_position_that_already_has_a_live_stop():
     positions = [_position("AAPL", 0.0768, 320.0)]
     open_orders = [_order("AAPL", OrderType.STOP_LIMIT)]
+    broker = _broker(positions, open_orders, price=325.0)
+
+    reattach_missing_protection(broker, config, MagicMock())
+
+    broker.attach_stop_target.assert_not_called()
+
+
+def test_skips_position_protected_by_an_oco_order():
+    """Regression: Alpaca returns an OCO's take-profit leg as the top-level
+    order (type=limit, status=accepted) and nests the stop-loss leg as a
+    child that only appears with nested=True. Before this exclusion existed,
+    a live OCO's take-profit leg had no "stop" in its type, so the symbol
+    was never added to stop_orders — reattach_missing_protection treated it
+    as unprotected on every tick, cancelled the working OCO, and resubmitted
+    an identical one forever."""
+    positions = [_position("AAPL", 0.0768, 320.0)]
+    open_orders = [_order("AAPL", OrderType.LIMIT, order_class="oco")]
     broker = _broker(positions, open_orders, price=325.0)
 
     reattach_missing_protection(broker, config, MagicMock())
