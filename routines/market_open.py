@@ -15,7 +15,7 @@ import json
 import pytz
 
 from circuit_breaker import CircuitBreaker, EmergencyLiquidation, TradingHalted
-from core import config, cost_tracker, logger, timeseries_signal, trade_logger
+from core import ai_trader_client, config, cost_tracker, logger, timeseries_signal, trade_logger
 from core.broker import BrokerClient
 from core.buffett_tracker import add_position as buffett_track
 from core.buffett_tracker import remove_position as buffett_untrack
@@ -254,8 +254,12 @@ def _append_trade_log(entry: dict) -> None:
     """Record one order to BOTH sinks: state/trade_log.jsonl (local, kept for
     _reconcile_closed_trades) AND Axiom (durable, survives Railway redeploys).
     Delegates to trade_logger so the jsonl format/path is unchanged — reconcile
-    still finds side=="buy" rows exactly as before. Non-blocking on error."""
+    still finds side=="buy" rows exactly as before. Non-blocking on error.
+
+    Also mirrors the fill to AI-Trader's public feed via ai_trader_client,
+    which is a no-op unless AI_TRADER_ENABLED=true and AI_TRADER_TOKEN is set."""
     trade_logger.append_record(entry)
+    ai_trader_client.publish_trade(entry)
 
 
 def _reconcile_closed_trades(broker) -> int:
