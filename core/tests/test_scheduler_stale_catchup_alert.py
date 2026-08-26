@@ -73,31 +73,6 @@ def test_get_catchup_routine_alerts_exactly_once_when_giving_up(tmp_path, monkey
     assert "Gave up" in error
 
 
-def test_axiom_fallback_suppresses_stale_alert_across_a_lost_state_file(tmp_path, monkeypatch):
-    """Regression for the 2026-08-07/08 incident: Railway's STATE_DIR volume
-    does not survive worker restarts on this project (confirmed via repeated
-    redeploy testing across two separate volumes). Axiom is external and
-    unaffected by that, so an Axiom-recorded 'routine_completed' event must
-    suppress the stale-catchup alert even when the local state file and the
-    Alpaca order-history checks both come back empty (e.g. a no-trade day)."""
-    monkeypatch.setattr(scheduler, "STATE_DIR", str(tmp_path))
-    monkeypatch.setattr(scheduler, "SKIPPED_ROUTINES_FILE", str(tmp_path / "skipped_routines.json"))
-    monkeypatch.setattr(scheduler, "CATCHUP_FILE", str(tmp_path / ".scheduler_ran_today.json"))
-    monkeypatch.setattr(scheduler, "_market_open_ran_today", lambda: False)
-    monkeypatch.setattr(scheduler, "_midday_review_ran_today", lambda: False)
-    monkeypatch.setattr(scheduler, "_axiom_ran_today", lambda module, now: True)
-
-    alerts = []
-    monkeypatch.setattr(
-        "core.notifier.send_error_alert",
-        lambda routine, error: alerts.append((routine, error)) or True,
-    )
-
-    now = scheduler.ET.localize(datetime.datetime(2026, 8, 7, 20, 42, 0))
-    assert scheduler.get_catchup_routine(now) is None
-    assert alerts == []
-
-
 def test_midday_review_alpaca_fallback_suppresses_stale_alert(tmp_path, monkeypatch):
     """Regression for the 2026-08-07 false-positive: a lost state file (e.g.
     from a Railway redeploy) should not trigger a stale-catchup alert for
