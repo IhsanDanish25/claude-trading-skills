@@ -22,6 +22,18 @@ logger = logging.getLogger(__name__)
 DASHBOARD_DIR = Path(__file__).resolve().parent / "knowledge"
 RETENTION_DAYS = 3
 
+# Skills that call the FMP API. Running all of them at full concurrency (the
+# default pool width used for everything else) fires a burst of concurrent
+# FMP requests on every "Regenerate Dashboard" click, reliably tripping FMP's
+# per-window rate limit ("429 Too Many Requests / Limit Reach") independent
+# of the daily call quota -- see the economic-calendar-fetcher fix. These run
+# in their own narrower pool so they queue instead of colliding.
+_FMP_SKILL_NAMES = {
+    "FTD Detector", "Theme Detector", "Market Top Detector", "Economic Calendar",
+    "VCP Screener", "Earnings Momentum", "Insider Buying", "Short Squeeze",
+}
+_FMP_MAX_WORKERS = 2
+
 _I18N: dict[str, dict[str, str]] = {
     "en": {
         "title": "Daily Market Dashboard",
@@ -329,13 +341,25 @@ def _collect_json(tmpdir: str, pattern: str) -> Any | None:
 
 def run_all_skills(project_root: Path) -> dict[str, Any]:
     defs = _skill_defs(project_root)
+    fmp_defs = [d for d in defs if d["name"] in _FMP_SKILL_NAMES]
+    other_defs = [d for d in defs if d["name"] not in _FMP_SKILL_NAMES]
     results: dict[str, Any] = {}
 
     with tempfile.TemporaryDirectory(prefix="dashboard_") as tmpdir:
         futures = {}
-        with ProcessPoolExecutor(max_workers=10) as executor:
-            for skill_def in defs:
-                future = executor.submit(
+        # Two separate pools: FMP-backed skills stay narrow (shared rate
+        # limit), everything else keeps the original wide pool since free
+        # data sources (yfinance, local CSVs) don't share that constraint.
+        with ProcessPoolExecutor(max_workers=10) as other_executor, \
+                ProcessPoolExecutor(max_workers=_FMP_MAX_WORKERS) as fmp_executor:
+            for skill_def in other_defs:
+                future = other_executor.submit(
+                    _run_skill, skill_def["name"], skill_def["script"],
+                    skill_def["args"], tmpdir,
+                )
+                futures[future] = skill_def
+            for skill_def in fmp_defs:
+                future = fmp_executor.submit(
                     _run_skill, skill_def["name"], skill_def["script"],
                     skill_def["args"], tmpdir,
                 )

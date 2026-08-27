@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
 # Add parent to path so we can import the module
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import generate_dashboard as gd
 from generate_dashboard import _safe_get, generate_markdown
 
 
@@ -153,6 +156,81 @@ class TestGenerateMarkdown(unittest.TestCase):
         md = generate_markdown(self._make_results(), date(2026, 3, 18))
         assert "Market Top Detector" in md
         assert "/economic-calendar-fetcher" in md
+
+
+class TestRunAllSkillsConcurrency(unittest.TestCase):
+    """FMP-backed skills share one rate-limited API. Running all of them at
+    the same wide concurrency used for everything else fires a burst of
+    simultaneous FMP requests on every "Regenerate Dashboard" click and
+    reliably trips FMP's per-window rate limit ("429 Too Many Requests"),
+    independent of the daily call quota -- this is what surfaced the
+    economic-calendar-fetcher fix. Confirms they're capped to a narrow pool
+    while unrelated (free-data) skills still run at full concurrency.
+    """
+
+    @staticmethod
+    def _write_probe_script(path: Path) -> None:
+        path.write_text(
+            "import argparse, json, os, time\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--output-dir')\n"
+            "p.add_argument('--tag')\n"
+            "p.add_argument('--log')\n"
+            "args = p.parse_args()\n"
+            "with open(args.log, 'a') as f:\n"
+            "    f.write(f'{args.tag} start {time.time()}\\n')\n"
+            "time.sleep(0.3)\n"
+            "with open(args.log, 'a') as f:\n"
+            "    f.write(f'{args.tag} end {time.time()}\\n')\n"
+            "os.makedirs(args.output_dir, exist_ok=True)\n"
+            "with open(os.path.join(args.output_dir, f'{args.tag}_out.json'), 'w') as f:\n"
+            "    json.dump({'results': []}, f)\n"
+        )
+
+    def test_fmp_skills_run_at_bounded_concurrency(self):
+        fmp_names = sorted(gd._FMP_SKILL_NAMES)
+        other_names = ["Uptrend Analyzer", "Market Breadth", "Sector Rotation"]
+
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch_path = Path(scratch)
+            log_path = scratch_path / "concurrency.log"
+            script_path = scratch_path / "probe.py"
+            self._write_probe_script(script_path)
+
+            def fake_skill_defs(project_root):
+                defs = []
+                for name in fmp_names + other_names:
+                    tag = name.replace(" ", "_")
+                    defs.append({
+                        "name": name,
+                        "script": str(script_path),
+                        "args": ["--tag", tag, "--log", str(log_path), "--output-dir", "{tmpdir}"],
+                        "glob": f"{tag}_out.json",
+                    })
+                return defs
+
+            with mock.patch.object(gd, "_skill_defs", fake_skill_defs), \
+                    mock.patch.object(gd, "_load_latest_vcp", return_value=None):
+                results = gd.run_all_skills(Path("unused"))
+
+            for name in fmp_names + other_names:
+                self.assertEqual(results[name]["status"], "ok", name)
+
+            events = []
+            for line in log_path.read_text().splitlines():
+                tag, kind, ts = line.split()
+                if tag.replace("_", " ") in fmp_names:
+                    events.append((float(ts), 1 if kind == "start" else -1))
+            events.sort()
+            peak = running = 0
+            for _, delta in events:
+                running += delta
+                peak = max(peak, running)
+
+            self.assertLessEqual(
+                peak, gd._FMP_MAX_WORKERS,
+                f"FMP-backed skills hit {peak} concurrent runs, expected <= {gd._FMP_MAX_WORKERS}",
+            )
 
 
 if __name__ == "__main__":
