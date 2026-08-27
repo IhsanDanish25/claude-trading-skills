@@ -104,7 +104,7 @@ def main() -> None:
     parser.add_argument("--api-key", help="FMP API key (or set FMP_API_KEY)")
     parser.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS)
     parser.add_argument("--min-short-float", type=float, default=10.0,
-                        help="Minimum short interest as % of float")
+                        help="Minimum short interest as %% of float")
     parser.add_argument("--min-days-to-cover", type=float, default=3.0)
     parser.add_argument("--top", type=int, default=15)
     parser.add_argument("--output-dir", default="reports/")
