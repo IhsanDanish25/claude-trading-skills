@@ -299,14 +299,22 @@ def _run_skill(name: str, script: str, args: list[str], tmpdir: str) -> dict[str
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
         logger.warning("%s timed out", name)
-        return {"name": name, "status": "timeout", "data": None}
+        return {"name": name, "status": "timeout", "data": None, "error": "Timed out after 300s"}
     except Exception as exc:
         logger.warning("%s failed: %s", name, exc)
-        return {"name": name, "status": "error", "data": None}
+        return {"name": name, "status": "error", "data": None, "error": str(exc)}
     if result.returncode != 0:
-        logger.warning("%s exit %d: %s", name, result.returncode, (result.stderr or "")[:300])
-        return {"name": name, "status": "partial", "data": None}
-    return {"name": name, "status": "ok", "data": None}
+        # The real failure (auth error, bad request, traceback) is usually the
+        # last thing printed, not the first — keep the tail, not the head.
+        detail = (result.stderr or result.stdout or "").strip()[-500:]
+        logger.warning("%s exit %d: %s", name, result.returncode, detail[:300])
+        return {
+            "name": name,
+            "status": "partial",
+            "data": None,
+            "error": detail or f"exited with code {result.returncode}",
+        }
+    return {"name": name, "status": "ok", "data": None, "error": None}
 
 def _collect_json(tmpdir: str, pattern: str) -> Any | None:
     matches = sorted(glob.glob(f"{tmpdir}/{pattern}"))
@@ -338,9 +346,18 @@ def run_all_skills(project_root: Path) -> dict[str, Any]:
                     run_result = future.result()
                 except Exception as exc:
                     logger.warning("%s raised: %s", skill_def["name"], exc)
-                    run_result = {"name": skill_def["name"], "status": "error", "data": None}
+                    run_result = {"name": skill_def["name"], "status": "error", "data": None, "error": str(exc)}
                 data = _collect_json(tmpdir, skill_def["glob"])
                 run_result["data"] = data
+                if run_result.get("status") == "ok" and data is None:
+                    # Process exited 0 but never wrote the JSON we expected —
+                    # e.g. it crashed after printing partial output, or wrote
+                    # to the wrong path. Don't let this read as "ok".
+                    run_result["status"] = "no_output"
+                    run_result["error"] = (
+                        f"Exited successfully but produced no file matching "
+                        f"'{skill_def['glob']}' in the output directory."
+                    )
                 results[skill_def["name"]] = run_result
 
     # VCP fallback: if live run failed, use the most recent cached JSON
@@ -351,6 +368,7 @@ def run_all_skills(project_root: Path) -> dict[str, Any]:
             "name": "VCP Screener",
             "status": "cached" if cached else vcp.get("status", "error"),
             "data": cached,
+            "error": None if cached else vcp.get("error"),
         }
 
     return results
@@ -606,9 +624,34 @@ def generate_json_summary(results: dict[str, Any], today: date) -> dict[str, Any
         summary["skill_status"][name] = {
             "status": result.get("status", "unknown"),
             "has_data": result.get("data") is not None,
+            "error": result.get("error"),
         }
 
     return summary
+
+
+_STATUS_LABELS = {
+    "partial": "Scan failed",
+    "timeout": "Scan timed out",
+    "error": "Scan errored",
+    "no_output": "Scan produced no output",
+}
+
+
+def _empty_state_note(results: dict[str, Any], skill_name: str) -> str:
+    """Extra text distinguishing a failed/errored run from a genuinely empty scan.
+
+    Without this, a script that 401'd or timed out renders identically to one
+    that ran fine and found nothing — see the skill's `status` in `results`.
+    """
+    info = results.get(skill_name, {})
+    status = info.get("status", "unknown")
+    if status in ("ok", "cached"):
+        return ""
+    label = _STATUS_LABELS.get(status, f"Scan status: {status}")
+    error = (info.get("error") or "").strip().replace("\n", " ")
+    detail = f" ({error[:180]})" if error else ""
+    return f" ⚠️ {label}{detail} — not a confirmed empty result."
 
 
 def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") -> str:
@@ -725,7 +768,7 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
                     if isinstance(pivot_dist, float): pivot_dist = f"{pivot_dist:+.1f}%"
                     lines.append(f"| {ticker} | {score} | {rating} | {pivot_dist} |")
         else:
-            lines.append(f"*{_t(lang, 'no_vcp')}*")
+            lines.append(f"*{_t(lang, 'no_vcp')}{_empty_state_note(results, 'VCP Screener')}*")
     else:
         lines.append(f"*VCP Screener {_t(lang, 'no_data')}*")
     lines.append("")
@@ -854,7 +897,7 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
                     f"| {r.get('volume_ratio','?')}x | {btype} | {r.get('breakout_score','?')} |"
                 )
     else:
-        lines.append(f"*{_t(lang, 'no_breakouts')}*")
+        lines.append(f"*{_t(lang, 'no_breakouts')}{_empty_state_note(results, 'Breakout Scanner')}*")
     lines.append("")
 
     lines.append(f"## {_t(lang, 'mean_reversion')}")
@@ -871,7 +914,7 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
                     f"| ${r.get('target','?')} | {r.get('reversion_score','?')} |"
                 )
     else:
-        lines.append(f"*{_t(lang, 'no_mean_reversion')}*")
+        lines.append(f"*{_t(lang, 'no_mean_reversion')}{_empty_state_note(results, 'Mean Reversion')}*")
     lines.append("")
 
     lines.append(f"## {_t(lang, 'options_flow')}")
@@ -888,7 +931,7 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
                     f"| {r.get('score','?')} |"
                 )
     else:
-        lines.append(f"*{_t(lang, 'no_options_flow')}*")
+        lines.append(f"*{_t(lang, 'no_options_flow')}{_empty_state_note(results, 'Options Flow')}*")
     lines.append("")
 
     lines.append(f"## {_t(lang, 'earnings_momentum')}")
@@ -905,7 +948,7 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
                     f"| {r.get('momentum_10d','?')}% |"
                 )
     else:
-        lines.append(f"*{_t(lang, 'no_earnings_momentum')}*")
+        lines.append(f"*{_t(lang, 'no_earnings_momentum')}{_empty_state_note(results, 'Earnings Momentum')}*")
     lines.append("")
 
     lines.append(f"## {_t(lang, 'insider_buying')}")
@@ -924,7 +967,7 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
                     f"| {val_str} |"
                 )
     else:
-        lines.append(f"*{_t(lang, 'no_insider_buying')}*")
+        lines.append(f"*{_t(lang, 'no_insider_buying')}{_empty_state_note(results, 'Insider Buying')}*")
     lines.append("")
 
     lines.append(f"## {_t(lang, 'short_squeeze')}")
@@ -941,7 +984,7 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
                     f"| {r.get('setup','')} |"
                 )
     else:
-        lines.append(f"*{_t(lang, 'no_short_squeeze')}*")
+        lines.append(f"*{_t(lang, 'no_short_squeeze')}{_empty_state_note(results, 'Short Squeeze')}*")
     lines.append("")
 
     lines.append("---")

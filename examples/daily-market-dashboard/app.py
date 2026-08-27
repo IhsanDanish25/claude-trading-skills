@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -547,6 +548,31 @@ def _status_color(value: Any) -> str:
     return "status-yellow"
 
 
+_SKILL_STATUS_LABELS = {
+    "partial": "Scan failed",
+    "timeout": "Scan timed out",
+    "error": "Scan errored",
+    "no_output": "Scan produced no output",
+}
+
+
+def _skill_health_note(data: dict[str, Any], skill_name: str) -> str:
+    """HTML snippet warning that an empty section is a failed run, not a confirmed empty scan.
+
+    A script that 401'd, timed out, or crashed writes no results file, so its
+    section would otherwise render identically to a scan that legitimately
+    found nothing — this makes the two distinguishable in the UI.
+    """
+    info = data.get("skill_status", {}).get(skill_name, {})
+    status = info.get("status", "unknown")
+    if status in ("ok", "cached"):
+        return ""
+    label = _SKILL_STATUS_LABELS.get(status, f"Scan status: {status}")
+    error = (info.get("error") or "").strip().replace("\n", " ")
+    detail = f" — {html.escape(error[:200])}" if error else ""
+    return f'<p class="status-red">⚠ {html.escape(label)}{detail}. Not a confirmed empty result.</p>'
+
+
 def _render_metric_card(label: str, value: Any, sub: str = "", color: str = "") -> str:
     """Return HTML for a styled metric card."""
     css_class = color or _status_color(value)
@@ -595,15 +621,18 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
     for name, info in status.items():
         s = info.get("status", "unknown")
         has_data = info.get("has_data", False)
+        error = (info.get("error") or "").strip().replace("\n", " ")
+        title_attr = f' title="{html.escape(error[:300])}"' if error else ""
         if s == "ok" and has_data:
             badge = '<span class="skill-badge badge-ok">OK</span>'
         elif s == "cached":
             badge = '<span class="skill-badge badge-cached">CACHED</span>'
         elif s == "partial" or (s == "ok" and not has_data):
-            badge = '<span class="skill-badge badge-partial">PARTIAL</span>'
+            badge = f'<span class="skill-badge badge-partial"{title_attr}>PARTIAL</span>'
         else:
-            badge = '<span class="skill-badge badge-error">ERROR</span>'
-        signal_rows.append(f"<tr><td>{name}</td><td>{badge}</td></tr>")
+            label = _SKILL_STATUS_LABELS.get(s, "ERROR").upper()
+            badge = f'<span class="skill-badge badge-error"{title_attr}>{html.escape(label)}</span>'
+        signal_rows.append(f"<tr><td>{html.escape(name)}</td><td>{badge}</td></tr>")
 
     st.markdown(
         f"""<div class="section-card">
@@ -696,9 +725,10 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
             )
         else:
             st.markdown(
-                """<div class="section-card">
+                f"""<div class="section-card">
                     <h3>VCP Candidates</h3>
                     <p class="status-gray">No VCP candidates found.</p>
+                    {_skill_health_note(data, 'VCP Screener')}
                 </div>""",
                 unsafe_allow_html=True,
             )
@@ -928,8 +958,9 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
             )
         else:
             st.markdown(
-                """<div class="section-card"><h3>Breakout Scanner</h3>
-                <p class="status-gray">No breakout candidates.</p></div>""",
+                f"""<div class="section-card"><h3>Breakout Scanner</h3>
+                <p class="status-gray">No breakout candidates.</p>
+                {_skill_health_note(data, 'Breakout Scanner')}</div>""",
                 unsafe_allow_html=True,
             )
 
@@ -962,8 +993,9 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
             )
         else:
             st.markdown(
-                """<div class="section-card"><h3>Mean Reversion Setups</h3>
-                <p class="status-gray">No setups found.</p></div>""",
+                f"""<div class="section-card"><h3>Mean Reversion Setups</h3>
+                <p class="status-gray">No setups found.</p>
+                {_skill_health_note(data, 'Mean Reversion')}</div>""",
                 unsafe_allow_html=True,
             )
 
@@ -997,8 +1029,9 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
             )
         else:
             st.markdown(
-                """<div class="section-card"><h3>Options Flow</h3>
-                <p class="status-gray">No unusual options activity.</p></div>""",
+                f"""<div class="section-card"><h3>Options Flow</h3>
+                <p class="status-gray">No unusual options activity.</p>
+                {_skill_health_note(data, 'Options Flow')}</div>""",
                 unsafe_allow_html=True,
             )
 
@@ -1029,8 +1062,9 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
             )
         else:
             st.markdown(
-                """<div class="section-card"><h3>Earnings Momentum (PEAD)</h3>
-                <p class="status-gray">No PEAD candidates found.</p></div>""",
+                f"""<div class="section-card"><h3>Earnings Momentum (PEAD)</h3>
+                <p class="status-gray">No PEAD candidates found.</p>
+                {_skill_health_note(data, 'Earnings Momentum')}</div>""",
                 unsafe_allow_html=True,
             )
 
@@ -1071,8 +1105,9 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
             )
         else:
             st.markdown(
-                """<div class="section-card"><h3>Insider Buying</h3>
-                <p class="status-gray">No significant insider buying detected.</p></div>""",
+                f"""<div class="section-card"><h3>Insider Buying</h3>
+                <p class="status-gray">No significant insider buying detected.</p>
+                {_skill_health_note(data, 'Insider Buying')}</div>""",
                 unsafe_allow_html=True,
             )
 
@@ -1103,8 +1138,9 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
             )
         else:
             st.markdown(
-                """<div class="section-card"><h3>Short Squeeze Setups</h3>
-                <p class="status-gray">No short squeeze setups found.</p></div>""",
+                f"""<div class="section-card"><h3>Short Squeeze Setups</h3>
+                <p class="status-gray">No short squeeze setups found.</p>
+                {_skill_health_note(data, 'Short Squeeze')}</div>""",
                 unsafe_allow_html=True,
             )
 
@@ -1284,6 +1320,23 @@ def render_app() -> None:
             if result is not None:
                 if result.returncode == 0:
                     st.success(_msg("dashboard_success"))
+                    # generate_dashboard.py exits 0 even when individual skills
+                    # fail (it just records their status) — check that status
+                    # here so a failed scan doesn't read as "all clear".
+                    fresh = _find_latest_dashboard_json()
+                    if fresh:
+                        unhealthy = sorted(
+                            name
+                            for name, info in fresh.get("skill_status", {}).items()
+                            if info.get("status") not in ("ok", "cached")
+                        )
+                        if unhealthy:
+                            st.warning(
+                                f"{len(unhealthy)} skill(s) did not complete cleanly: "
+                                f"{', '.join(unhealthy)}. Their sections may show "
+                                f"\"no candidates\" that isn't a confirmed empty scan — "
+                                f"see the Skill Status table and each section's warning below."
+                            )
                 else:
                     detail = (result.stderr or result.stdout or "unknown error")[:200]
                     st.error(_msg("dashboard_failed", details=detail))
