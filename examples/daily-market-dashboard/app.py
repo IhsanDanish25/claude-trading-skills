@@ -568,7 +568,7 @@ def _skill_health_note(data: dict[str, Any], skill_name: str) -> str:
     if status in ("ok", "cached"):
         return ""
     label = _SKILL_STATUS_LABELS.get(status, f"Scan status: {status}")
-    error = (info.get("error") or "").strip().replace("\n", " ")
+    error = (info.get("error") or "").strip().replace("\n", " ").rstrip(".")
     detail = f" — {html.escape(error[:200])}" if error else ""
     return f'<p class="status-red">⚠ {html.escape(label)}{detail}. Not a confirmed empty result.</p>'
 
