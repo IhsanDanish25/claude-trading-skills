@@ -1,16 +1,21 @@
 """Tests for get_economic_calendar.py"""
 
+import io
 import json
 import os
 import sys
+import urllib.error
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
 # Add parent directory to path so we can import the script module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import get_economic_calendar as gec
 from get_economic_calendar import (
+    fetch_economic_calendar,
     format_event_output,
     get_api_key,
     validate_date_range,
@@ -158,3 +163,64 @@ class TestFormatEventOutput:
     def test_unknown_format_raises(self):
         with pytest.raises(ValueError, match="Unknown output format"):
             format_event_output([], "csv")
+
+
+# ---------------------------------------------------------------------------
+# fetch_economic_calendar tests
+#
+# A 404 from FMP's stable API means the endpoint/plan doesn't support the
+# request -- not that the calendar is confirmed empty. It must surface as a
+# real error, not get silently swallowed into a "0 events" result (which
+# would be indistinguishable from a genuinely quiet week in the dashboard).
+# ---------------------------------------------------------------------------
+
+
+class TestFetchEconomicCalendar:
+    def test_404_raises_instead_of_returning_empty(self):
+        def raise_404(*args, **kwargs):
+            raise urllib.error.HTTPError(
+                "https://financialmodelingprep.com/stable/economics-calendar",
+                404, "Not Found", {}, io.BytesIO(b"[]"),
+            )
+
+        with patch("urllib.request.urlopen", side_effect=raise_404):
+            with pytest.raises(urllib.error.HTTPError):
+                fetch_economic_calendar("2025-01-01", "2025-01-07", "fake_key")
+
+    def test_non_404_http_error_includes_response_body(self):
+        def raise_401(*args, **kwargs):
+            raise urllib.error.HTTPError(
+                "https://financialmodelingprep.com/stable/economics-calendar",
+                401, "Unauthorized", {}, io.BytesIO(b'{"error": "Invalid API key"}'),
+            )
+
+        with patch("urllib.request.urlopen", side_effect=raise_401):
+            with pytest.raises(urllib.error.HTTPError, match="Invalid API key"):
+                fetch_economic_calendar("2025-01-01", "2025-01-07", "fake_key")
+
+
+# ---------------------------------------------------------------------------
+# main() error-handling tests
+#
+# A fetch failure must exit non-zero, not fake a successful empty result --
+# generate_dashboard.py's skill_status/health-note handling relies on the
+# exit code to tell "fetch failed" apart from "genuinely 0 events".
+# ---------------------------------------------------------------------------
+
+
+class TestMainErrorHandling:
+    def test_fetch_failure_exits_nonzero_and_writes_nothing(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setenv("FMP_API_KEY", "fake_key")
+        output_path = tmp_path / "economic_calendar_latest.json"
+        monkeypatch.setattr(sys, "argv", ["get_economic_calendar.py", "--output", str(output_path)])
+        monkeypatch.setattr(
+            gec, "fetch_economic_calendar",
+            lambda *a, **k: (_ for _ in ()).throw(ValueError("Network error: simulated failure")),
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            gec.main()
+
+        assert exc_info.value.code == 1
+        assert not output_path.exists()
+        assert "economic calendar fetch failed" in capsys.readouterr().err
