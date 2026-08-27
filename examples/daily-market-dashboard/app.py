@@ -773,8 +773,7 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
             f"""<div class="section-card">
                 <h3>Market Top Detector</h3>
                 <p><strong>Signal:</strong> <span class="{_status_color(mktop['signal'])}">{mktop['signal']}</span></p>
-                <p><strong>Score:</strong> {mktop.get('score', 'N/A')}</p>
-                {details_html}
+                <p><strong>Score:</strong> {mktop.get('score', 'N/A')}</p>{details_html}
             </div>""",
             unsafe_allow_html=True,
         )
@@ -833,8 +832,7 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
         signal_p = f"<p><strong>Signal:</strong> {sector_sig}</p>" if sector_sig else ""
         st.markdown(
             f"""<div class="section-card">
-                <h3>Sector Rotation</h3>
-                {signal_p}
+                <h3>Sector Rotation</h3>{signal_p}
                 <table style="width:100%; border-collapse:collapse; font-size:0.82rem;">
                     <thead><tr>
                         <th style="padding:0.3rem; color:#A0AEC0;">#</th>
