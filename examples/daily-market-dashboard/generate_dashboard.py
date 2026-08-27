@@ -22,6 +22,29 @@ logger = logging.getLogger(__name__)
 DASHBOARD_DIR = Path(__file__).resolve().parent / "knowledge"
 RETENTION_DAYS = 3
 
+# Skills that call the FMP API. Running all of them at full concurrency (the
+# default pool width used for everything else) fires a burst of concurrent
+# FMP requests on every "Regenerate Dashboard" click, reliably tripping FMP's
+# per-window rate limit ("429 Too Many Requests / Limit Reach") independent
+# of the daily call quota -- see the economic-calendar-fetcher fix. These run
+# in their own narrower pool so they queue instead of colliding.
+_FMP_SKILL_NAMES = {
+    "FTD Detector", "Theme Detector", "Market Top Detector", "Economic Calendar",
+    "VCP Screener", "Earnings Momentum", "Insider Buying", "Short Squeeze",
+}
+_FMP_MAX_WORKERS = 2
+
+# Skills that call Yahoo Finance via yfinance -- a separate rate-limited API
+# from FMP, but with the same collision risk: Yahoo is well known for
+# blocking/throttling bursts of concurrent requests from a single (especially
+# cloud-hosted) IP. These get their own narrow pool too, independent of the
+# FMP one, so a burst here doesn't also mask itself as "no candidates".
+_YFINANCE_SKILL_NAMES = {
+    "Options Flow", "Sector Rotation", "Technical Indicators", "News Sentiment",
+    "Mean Reversion", "Breakout Scanner", "Macro Signals",
+}
+_YFINANCE_MAX_WORKERS = 3
+
 _I18N: dict[str, dict[str, str]] = {
     "en": {
         "title": "Daily Market Dashboard",
@@ -329,17 +352,35 @@ def _collect_json(tmpdir: str, pattern: str) -> Any | None:
 
 def run_all_skills(project_root: Path) -> dict[str, Any]:
     defs = _skill_defs(project_root)
+    fmp_defs = [d for d in defs if d["name"] in _FMP_SKILL_NAMES]
+    yf_defs = [d for d in defs if d["name"] in _YFINANCE_SKILL_NAMES]
+    other_defs = [
+        d for d in defs
+        if d["name"] not in _FMP_SKILL_NAMES and d["name"] not in _YFINANCE_SKILL_NAMES
+    ]
     results: dict[str, Any] = {}
 
     with tempfile.TemporaryDirectory(prefix="dashboard_") as tmpdir:
         futures = {}
-        with ProcessPoolExecutor(max_workers=10) as executor:
-            for skill_def in defs:
-                future = executor.submit(
-                    _run_skill, skill_def["name"], skill_def["script"],
-                    skill_def["args"], tmpdir,
-                )
-                futures[future] = skill_def
+        # One pool per shared rate-limited data source: FMP and Yahoo
+        # Finance (yfinance) each throttle bursts of concurrent requests
+        # independently, so each group gets its own narrow pool and queues
+        # internally instead of colliding. Everything else (local CSVs, no
+        # shared external API) keeps the original wide pool.
+        with ProcessPoolExecutor(max_workers=10) as other_executor, \
+                ProcessPoolExecutor(max_workers=_FMP_MAX_WORKERS) as fmp_executor, \
+                ProcessPoolExecutor(max_workers=_YFINANCE_MAX_WORKERS) as yf_executor:
+            for group_defs, executor in (
+                (other_defs, other_executor),
+                (fmp_defs, fmp_executor),
+                (yf_defs, yf_executor),
+            ):
+                for skill_def in group_defs:
+                    future = executor.submit(
+                        _run_skill, skill_def["name"], skill_def["script"],
+                        skill_def["args"], tmpdir,
+                    )
+                    futures[future] = skill_def
             for future in as_completed(futures):
                 skill_def = futures[future]
                 try:

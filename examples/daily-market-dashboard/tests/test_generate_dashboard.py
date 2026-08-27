@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
 # Add parent to path so we can import the module
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import generate_dashboard as gd
 from generate_dashboard import _safe_get, generate_markdown
 
 
@@ -153,6 +156,109 @@ class TestGenerateMarkdown(unittest.TestCase):
         md = generate_markdown(self._make_results(), date(2026, 3, 18))
         assert "Market Top Detector" in md
         assert "/economic-calendar-fetcher" in md
+
+
+class TestRunAllSkillsConcurrency(unittest.TestCase):
+    """FMP and yfinance/Yahoo Finance are two separate rate-limited APIs, each
+    shared by several dashboard skills. Running either group at the same wide
+    concurrency used for the rest of the skills fires a burst of simultaneous
+    requests on every "Regenerate Dashboard" click and reliably trips a
+    per-window rate limit ("429 Too Many Requests") independent of any daily
+    call quota -- this is what surfaced the economic-calendar-fetcher fix.
+    Confirms both groups are capped to their own narrow pools, and that those
+    pools still run alongside each other (not serialized end-to-end).
+    """
+
+    @staticmethod
+    def _write_probe_script(path: Path) -> None:
+        path.write_text(
+            "import argparse, json, os, time\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--output-dir')\n"
+            "p.add_argument('--tag')\n"
+            "p.add_argument('--log')\n"
+            "args = p.parse_args()\n"
+            "with open(args.log, 'a') as f:\n"
+            "    f.write(f'{args.tag} start {time.time()}\\n')\n"
+            "time.sleep(0.3)\n"
+            "with open(args.log, 'a') as f:\n"
+            "    f.write(f'{args.tag} end {time.time()}\\n')\n"
+            "os.makedirs(args.output_dir, exist_ok=True)\n"
+            "with open(os.path.join(args.output_dir, f'{args.tag}_out.json'), 'w') as f:\n"
+            "    json.dump({'results': []}, f)\n"
+        )
+
+    @staticmethod
+    def _peak_concurrency(log_path: Path, names: set[str]) -> int:
+        events = []
+        for line in log_path.read_text().splitlines():
+            tag, kind, ts = line.split()
+            if tag.replace("_", " ") in names:
+                events.append((float(ts), 1 if kind == "start" else -1))
+        events.sort()
+        peak = running = 0
+        for _, delta in events:
+            running += delta
+            peak = max(peak, running)
+        return peak
+
+    def test_rate_limited_skill_groups_run_at_bounded_concurrency(self):
+        fmp_names = sorted(gd._FMP_SKILL_NAMES)
+        yf_names = sorted(gd._YFINANCE_SKILL_NAMES)
+        other_names = ["Uptrend Analyzer", "Market Breadth"]
+        all_names = fmp_names + yf_names + other_names
+
+        # Sanity-check the fixture itself: these three groups must be
+        # disjoint, or the test below wouldn't actually be exercising three
+        # independent pools.
+        self.assertEqual(set(fmp_names) & set(yf_names), set())
+        self.assertEqual(set(fmp_names) & set(other_names), set())
+        self.assertEqual(set(yf_names) & set(other_names), set())
+
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch_path = Path(scratch)
+            log_path = scratch_path / "concurrency.log"
+            script_path = scratch_path / "probe.py"
+            self._write_probe_script(script_path)
+
+            def fake_skill_defs(project_root):
+                defs = []
+                for name in all_names:
+                    tag = name.replace(" ", "_")
+                    defs.append({
+                        "name": name,
+                        "script": str(script_path),
+                        "args": ["--tag", tag, "--log", str(log_path), "--output-dir", "{tmpdir}"],
+                        "glob": f"{tag}_out.json",
+                    })
+                return defs
+
+            with mock.patch.object(gd, "_skill_defs", fake_skill_defs), \
+                    mock.patch.object(gd, "_load_latest_vcp", return_value=None):
+                results = gd.run_all_skills(Path("unused"))
+
+            for name in all_names:
+                self.assertEqual(results[name]["status"], "ok", name)
+
+            fmp_peak = self._peak_concurrency(log_path, gd._FMP_SKILL_NAMES)
+            yf_peak = self._peak_concurrency(log_path, gd._YFINANCE_SKILL_NAMES)
+            overall_peak = self._peak_concurrency(log_path, set(all_names))
+
+            self.assertLessEqual(
+                fmp_peak, gd._FMP_MAX_WORKERS,
+                f"FMP-backed skills hit {fmp_peak} concurrent runs, expected <= {gd._FMP_MAX_WORKERS}",
+            )
+            self.assertLessEqual(
+                yf_peak, gd._YFINANCE_MAX_WORKERS,
+                f"yfinance-backed skills hit {yf_peak} concurrent runs, expected <= {gd._YFINANCE_MAX_WORKERS}",
+            )
+            # The two rate-limited pools (plus the "other" pool) must still
+            # run alongside each other, not one after another -- otherwise
+            # this "fix" would have just serialized the entire pipeline.
+            self.assertGreater(
+                overall_peak, max(gd._FMP_MAX_WORKERS, gd._YFINANCE_MAX_WORKERS),
+                "expected the FMP and yfinance pools to overlap in time, not run one after the other",
+            )
 
 
 if __name__ == "__main__":
