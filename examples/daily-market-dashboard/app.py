@@ -727,8 +727,7 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
             st.markdown(
                 f"""<div class="section-card">
                     <h3>VCP Candidates</h3>
-                    <p class="status-gray">No VCP candidates found.</p>
-                    {_skill_health_note(data, 'VCP Screener')}
+                    <p class="status-gray">No VCP candidates found.</p>{_skill_health_note(data, 'VCP Screener')}
                 </div>""",
                 unsafe_allow_html=True,
             )
