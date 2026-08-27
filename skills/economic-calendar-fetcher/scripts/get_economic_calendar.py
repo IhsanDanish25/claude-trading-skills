@@ -68,9 +68,6 @@ def fetch_economic_calendar(from_date: str, to_date: str, api_key: str) -> list[
 
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8") if e.fp else "No error details"
-        # Stable API returns 404 with [] when no events exist
-        if e.code == 404 and error_body.strip() == "[]":
-            return []
         raise urllib.error.HTTPError(
             e.url, e.code, f"FMP API error: {e.reason}. Details: {error_body}", e.hdrs, e.fp
         )
@@ -254,16 +251,11 @@ Examples:
         sys.exit(0)
 
     except Exception as e:
-        print(f"Warning: economic calendar fetch failed: {e}", file=sys.stderr)
-        # Write empty result so the dashboard shows 0 events (OK) rather than PARTIAL
-        if args.output:
-            try:
-                with open(args.output, "w", encoding="utf-8") as f:
-                    json.dump([], f)
-                print(f"Wrote empty result to {args.output}", file=sys.stderr)
-            except OSError:
-                pass
-        sys.exit(0)
+        # Exit non-zero (rather than faking an empty-but-successful result) so
+        # callers can tell "fetch failed" apart from "genuinely 0 events" --
+        # see the daily-market-dashboard skill_status/health-note handling.
+        print(f"Error: economic calendar fetch failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

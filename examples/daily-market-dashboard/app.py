@@ -757,9 +757,9 @@ def _render_dashboard_professional(data: dict[str, Any]) -> None:
             )
         else:
             st.markdown(
-                """<div class="section-card">
+                f"""<div class="section-card">
                     <h3>Economic Calendar</h3>
-                    <p class="status-gray">No upcoming events found.</p>
+                    <p class="status-gray">No upcoming events found.</p>{_skill_health_note(data, 'Economic Calendar')}
                 </div>""",
                 unsafe_allow_html=True,
             )

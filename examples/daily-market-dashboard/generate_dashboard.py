@@ -795,7 +795,7 @@ def generate_markdown(results: dict[str, Any], today: date, lang: str = "en") ->
                 impact = ev.get("impact", ev.get("importance", "?"))
                 lines.append(f"| {dt} | {name} | {impact} |")
     else:
-        lines.append(f"*{_t(lang, 'no_econ_cal')}*")
+        lines.append(f"*{_t(lang, 'no_econ_cal')}{_empty_state_note(results, 'Economic Calendar')}*")
     lines.append("")
 
     # ── 10 new skills ─────────────────────────────────────────────────────
