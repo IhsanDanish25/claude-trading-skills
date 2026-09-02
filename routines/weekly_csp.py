@@ -25,6 +25,12 @@ ET = pytz.timezone("America/New_York")
 
 STATE_FILE = os.path.join(config.STATE_DIR, "weekly_csp_order.json")
 
+# Cheapest name in the fallback watchlist (NOK) still needs ~$400-500 in
+# collateral at a 5%-OTM weekly strike; below this cash level no candidate
+# can ever fit the budget, so skip the whole routine instead of scanning
+# and failing every Monday.
+MIN_CASH_FOR_CSP = 600.0
+
 
 def run():
     config.validate()
@@ -36,6 +42,14 @@ def run():
     cash = float(acct.cash)
 
     log.info(f"Portfolio: ${pv:,.2f} | Cash: ${cash:,.2f}")
+
+    if cash < MIN_CASH_FOR_CSP:
+        log.info(
+            f"  Cash ${cash:,.2f} below ${MIN_CASH_FOR_CSP:,.2f} minimum — "
+            "no fallback CSP ticker fits this budget, skipping"
+        )
+        _save_skip(pv, "N/A", "account_too_small")
+        return
 
     # ── Market regime check ─────────────────────────────────────────────────
     try:
