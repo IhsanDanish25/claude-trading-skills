@@ -182,11 +182,22 @@ def _fit_best_model(
         candidate, candidate_ll = None, -math.inf
         for attempt in range(n_fit_attempts):
             try:
+                # min_covar only regularizes hmmlearn's k-means init, not the
+                # per-iteration M-step - the M-step's actual regularizer is
+                # covars_prior/covars_weight (a pseudo-observation prior on
+                # each state's covariance). Log-return and realized-vol
+                # features differ by ~2 orders of magnitude, so a state that
+                # collapses to near-zero occupancy during EM can produce a
+                # covariance too ill-conditioned for hmmlearn's symmetric-PD
+                # check even with the library defaults. Widening both here
+                # is the standard hmmlearn remedy for that failure mode.
                 model = GaussianHMM(
                     n_components=n_states,
                     covariance_type="full",
                     n_iter=n_iter,
                     random_state=random_state + attempt,
+                    min_covar=1e-2,
+                    covars_weight=2.0,
                 )
                 model.fit(X)
                 ll = model.score(X)
