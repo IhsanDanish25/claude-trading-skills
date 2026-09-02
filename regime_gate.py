@@ -9,12 +9,12 @@ WHEN to fire and when to sit in cash, using SPY as the market proxy:
   Trend direction : SMA-50 vs SMA-200  (golden/death cross logic)
   Trend strength  : ADX(14)
                       ADX > 25  -> strong trend  (momentum / VCP works)
-                      ADX < 18  -> ranging chop   (momentum DIES here -> stand down)
+                      ADX < 15  -> ranging chop   (momentum DIES here -> stand down)
 
 Decision:
   GO    -> SMA50 > SMA200  AND  ADX > 25         (uptrend + real strength)
-  STAND_DOWN -> ranging (ADX < 18)  OR  downtrend (SMA50 < SMA200)
-  NEUTRAL -> the in-between zone (trend up but ADX 18-25): allow, but you may
+  STAND_DOWN -> ranging (ADX < 15)  OR  downtrend (SMA50 < SMA200)
+  NEUTRAL -> the in-between zone (trend up but ADX 15-25): allow, but you may
              choose to size down here.
 
 Feed it daily SPY bars (your Alpaca IEX bars already give you this).
@@ -24,7 +24,7 @@ Pure-python ADX/SMA — no TA-Lib, lean for your M1.
 from dataclasses import dataclass
 
 ADX_TRENDING = 25.0
-ADX_RANGING = 18.0
+ADX_RANGING = 15.0
 
 
 @dataclass

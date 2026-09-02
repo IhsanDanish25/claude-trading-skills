@@ -20,8 +20,8 @@ def _bars(n=210, drift=0.4, start=400.0):
     return highs, lows, closes
 
 
-def test_adx_ranging_threshold_lowered_to_18():
-    assert rg.ADX_RANGING == 18.0
+def test_adx_ranging_threshold_lowered_to_15():
+    assert rg.ADX_RANGING == 15.0
 
 
 def test_adx_trending_threshold_unchanged():
@@ -42,7 +42,7 @@ def test_todays_1996_adx_no_longer_stands_down():
 def test_adx_at_new_floor_still_stands_down():
     """ADX exactly at/just under the new floor is still chop -> STAND_DOWN."""
     highs, lows, closes = _bars()
-    with patch("regime_gate._adx", return_value=17.9):
+    with patch("regime_gate._adx", return_value=14.9):
         regime = rg.classify(highs, lows, closes)
     assert regime.state == "STAND_DOWN"
     assert regime.can_trade is False
@@ -51,7 +51,7 @@ def test_adx_at_new_floor_still_stands_down():
 
 def test_adx_just_above_new_floor_trades():
     highs, lows, closes = _bars()
-    with patch("regime_gate._adx", return_value=18.1):
+    with patch("regime_gate._adx", return_value=15.1):
         regime = rg.classify(highs, lows, closes)
     assert regime.state == "NEUTRAL"
     assert regime.can_trade is True
