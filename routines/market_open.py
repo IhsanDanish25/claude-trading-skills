@@ -2535,6 +2535,20 @@ STRATEGY_HANDLERS = {
     "buffett_value": _run_buffett_value,
 }
 
+# Strategies whose entries depend on an established SPY trend (they need the
+# sma_adx regime gate below). Event-driven / countertrend strategies (meanrev,
+# insider, earnmom, pead, buffett_value, crypto, sector) don't need SPY to be
+# trending to have a valid signal, so STAND_DOWN must not silence them too.
+_TREND_GATED_STRATEGIES = {"breakout", "vcp", "momentum", "gapfill", "squeeze", "macross"}
+
+
+def _should_skip_for_regime(strategy: str, regime_standdown: bool) -> bool:
+    """True when the sma_adx regime gate is STAND_DOWN and `strategy` is one
+    of the trend-following strategies it's meant to gate. Event-driven /
+    countertrend strategies always return False here — they run regardless
+    of SPY's trend state."""
+    return regime_standdown and strategy in _TREND_GATED_STRATEGIES
+
 
 def run():
     config.validate()
@@ -2627,7 +2641,8 @@ def run():
     except Exception as _be:
         log.warning("Research brief load failed (non-fatal): %s", _be)
 
-    # ── Regime gate (shared by both strategies) ─────────────────────────────
+    # ── Regime gate (trend-following strategies only — see _TREND_GATED_STRATEGIES) ──
+    regime_standdown = False
     try:
         from core.screener import fetch_bars
 
@@ -2691,8 +2706,12 @@ def run():
                 log.warning(f"Regime exposure suggestion failed (non-blocking): {e}")
 
         if not reg.can_trade:
-            log.warning(f"REGIME GATE: STAND_DOWN — {reg.reason} — holding cash, no screening")
-            return
+            regime_standdown = True
+            log.warning(
+                f"REGIME GATE: STAND_DOWN — {reg.reason} — "
+                f"skipping trend-following strategies ({sorted(_TREND_GATED_STRATEGIES)}); "
+                f"event-driven/countertrend strategies still run"
+            )
     else:
         log.warning("Regime gate SKIPPED: no SPY bars available.")
         # Proceed with NEUTRAL regime so strategy still runs, but log explicitly
@@ -2747,6 +2766,10 @@ def run():
         if slots[0] <= 0:
             log.info("No slots remaining — stopping strategy loop")
             break
+
+        if _should_skip_for_regime(strategy, regime_standdown):
+            log.info(f"{strategy.upper()}: skipped — regime gate STAND_DOWN (trend-following)")
+            continue
 
         handler = STRATEGY_HANDLERS.get(strategy)
         if handler is None:
