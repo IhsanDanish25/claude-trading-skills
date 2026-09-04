@@ -111,6 +111,10 @@ testpaths = [
     "skills/ibd-distribution-day-monitor/scripts/tests",
     "skills/parabolic-short-trade-planner/scripts/tests",
     "skills/trading-skills-navigator/scripts/tests",
+    "skills/options-flow-scanner/scripts/tests",
+    "skills/insider-buying-detector/scripts/tests",
+    "skills/short-squeeze-scanner/scripts/tests",
+    "skills/earnings-momentum-tracker/scripts/tests",
     "scripts/tests",
 ]
 

@@ -1,48 +1,63 @@
 #!/usr/bin/env python3
-"""Earnings momentum tracker — finds post-earnings PEAD continuation plays."""
+"""Earnings momentum tracker — finds post-earnings PEAD continuation plays via yfinance.
+
+Scans a fixed watchlist (like the other yfinance-based dashboard skills) rather
+than a market-wide earnings calendar -- yfinance has no bulk "who reported this
+week" endpoint, only per-ticker earnings_dates.
+"""
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
-import requests
+try:
+    import yfinance as yf
+except ImportError:
+    print("Error: yfinance not installed.", file=sys.stderr)
+    sys.exit(1)
+
+DEFAULT_SYMBOLS = [
+    "AAPL", "MSFT", "NVDA", "AMD", "META", "GOOGL", "AMZN", "TSLA", "NFLX", "CRM",
+    "ADBE", "PANW", "CRWD", "SNOW", "DDOG", "MELI", "SQ", "SHOP", "NET", "ZS",
+]
 
 
-FMP_BASE = "https://financialmodelingprep.com/stable"
-
-
-def _get(endpoint: str, params: dict) -> Any:
+def get_latest_earnings(symbol: str, lookback_days: int) -> tuple[str, float] | None:
+    """Return (earnings_date, eps_surprise_pct) for symbol's latest reported
+    earnings within the lookback window, or None if there isn't one."""
     try:
-        r = requests.get(f"{FMP_BASE}/{endpoint}", params=params, timeout=15)
-        r.raise_for_status()
-        return r.json() or None
+        ed = yf.Ticker(symbol).earnings_dates
+        if ed is None or ed.empty:
+            return None
+        ed = ed.dropna(subset=["Reported EPS", "Surprise(%)"])
+        if ed.empty:
+            return None
+        cutoff = date.today() - timedelta(days=lookback_days)
+        ed = ed[(ed.index.date >= cutoff) & (ed.index.date <= date.today())]
+        if ed.empty:
+            return None
+        row = ed.sort_index(ascending=False).iloc[0]
+        return row.name.date().isoformat(), float(row["Surprise(%)"])
     except Exception as exc:
-        print(f"  API error ({endpoint}): {exc}", file=sys.stderr)
+        print(f"  yfinance error ({symbol}): {exc}", file=sys.stderr)
         return None
 
 
-def get_recent_earnings(api_key: str, from_date: str, to_date: str) -> list[dict]:
-    data = _get("earning_calendar", {
-        "from": from_date,
-        "to": to_date,
-        "apikey": api_key,
-    })
-    return data if isinstance(data, list) else []
-
-
-def get_price_history(symbol: str, api_key: str, days: int = 30) -> list[dict]:
-    data = _get(f"historical-price-eod/{symbol}", {
-        "timeseries": days,
-        "apikey": api_key,
-    })
-    if isinstance(data, dict):
-        return data.get("historical", [])
-    return []
+def get_price_history(symbol: str) -> list[dict]:
+    try:
+        hist = yf.Ticker(symbol).history(period="6mo")
+        if hist is None or hist.empty:
+            return []
+        return [
+            {"date": idx.strftime("%Y-%m-%d"), "close": float(row["Close"])}
+            for idx, row in hist.iterrows()
+        ]
+    except Exception as exc:
+        print(f"  yfinance error ({symbol}): {exc}", file=sys.stderr)
+        return []
 
 
 def calc_momentum(prices: list[dict], earnings_date: str, window: int) -> float | None:
@@ -73,9 +88,8 @@ def grade_momentum(momentum_20d: float | None) -> str:
     return "D"
 
 
-def analyze_stock(symbol: str, earnings_date: str, eps_surprise: float,
-                  api_key: str) -> dict | None:
-    prices = get_price_history(symbol, api_key, days=35)
+def analyze_stock(symbol: str, earnings_date: str, eps_surprise: float) -> dict | None:
+    prices = get_price_history(symbol)
     if len(prices) < 10:
         return None
 
@@ -116,8 +130,8 @@ def analyze_stock(symbol: str, earnings_date: str, eps_surprise: float,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Earnings Momentum Tracker")
-    parser.add_argument("--api-key", help="FMP API key (or set FMP_API_KEY)")
+    parser = argparse.ArgumentParser(description="Earnings Momentum Tracker (yfinance)")
+    parser.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS)
     parser.add_argument("--lookback-days", type=int, default=30)
     parser.add_argument("--min-gap-pct", type=float, default=3.0)
     parser.add_argument("--min-momentum-5d", type=float, default=0.0)
@@ -125,43 +139,26 @@ def main() -> None:
     parser.add_argument("--output-dir", default="reports/")
     args = parser.parse_args()
 
-    api_key = args.api_key or os.environ.get("FMP_API_KEY", "")
-    if not api_key:
-        print("Error: FMP_API_KEY not set.", file=sys.stderr)
-        sys.exit(1)
-
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d")
 
-    from_date = (date.today() - timedelta(days=args.lookback_days)).isoformat()
-    to_date = date.today().isoformat()
-
-    print(f"Earnings Momentum Tracker — last {args.lookback_days} days")
+    print(f"Earnings Momentum Tracker — {len(args.symbols)} symbols, last {args.lookback_days} days")
     print("-" * 50)
-    print("Fetching earnings calendar...")
-
-    earnings = get_recent_earnings(api_key, from_date, to_date)
-    print(f"  {len(earnings)} earnings events found")
 
     results = []
-    seen = set()
-    for e in earnings:
-        sym = e.get("symbol", "")
-        eps_surprise = float(e.get("epsEstimated") or 0)
-        actual_eps = float(e.get("eps") or 0)
-        surprise_pct = 0.0
-        if eps_surprise != 0:
-            surprise_pct = (actual_eps - eps_surprise) / abs(eps_surprise) * 100
-
-        if sym in seen or not sym:
+    for sym in args.symbols:
+        latest = get_latest_earnings(sym, args.lookback_days)
+        if latest is None:
+            print(f"  {sym}... no recent earnings")
             continue
-        seen.add(sym)
+        earnings_date, surprise_pct = latest
 
         if surprise_pct < args.min_gap_pct:
+            print(f"  {sym}... EPS surprise {surprise_pct:+.1f}% below threshold")
             continue
 
         print(f"  Analyzing {sym} (EPS surprise: +{surprise_pct:.1f}%)...", end=" ", flush=True)
-        result = analyze_stock(sym, e.get("date", ""), surprise_pct, api_key)
+        result = analyze_stock(sym, earnings_date, surprise_pct)
         if result and (result["momentum_5d"] or 0) >= args.min_momentum_5d:
             results.append(result)
             print(f"Grade {result['grade']}, 20d={result.get('momentum_20d', '?')}%")

@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Insider buying detector — FMP insider transactions, scores conviction signals."""
+"""Insider buying detector — yfinance insider transactions, scores conviction signals."""
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import requests
+import pandas as pd
 
-FMP_BASE = "https://financialmodelingprep.com/stable"
+try:
+    import yfinance as yf
+except ImportError:
+    print("Error: yfinance not installed.", file=sys.stderr)
+    sys.exit(1)
 
 DEFAULT_SYMBOLS = [
     "AAPL", "MSFT", "NVDA", "AMD", "META", "GOOGL", "AMZN", "TSLA", "NFLX", "CRM",
@@ -25,22 +28,43 @@ EXEC_WEIGHTS = {
 }
 
 
-def fetch_insider(symbol: str, api_key: str, days: int) -> list[dict]:
+def fetch_insider(symbol: str, days: int) -> list[dict]:
+    """Fetch open-market insider purchases from yfinance's Form 4 transaction feed.
+
+    yfinance's "Transaction" column is unreliable/blank on this data source; the
+    "Text" field (e.g. "Purchase at price 21.12 per share.") is what actually
+    carries the transaction type, so filter on that instead.
+    """
     try:
-        r = requests.get(f"{FMP_BASE}/insider-trading", params={
-            "symbol": symbol,
-            "transactionType": "P-Purchase",
-            "limit": 50,
-            "apikey": api_key,
-        }, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        if not isinstance(data, list):
+        df = yf.Ticker(symbol).insider_transactions
+        if df is None or df.empty:
             return []
-        cutoff = (date.today() - timedelta(days=days)).isoformat()
-        return [t for t in data if t.get("filingDate", "") >= cutoff]
+        cutoff = date.today() - timedelta(days=days)
+        out = []
+        for _, row in df.iterrows():
+            text = str(row.get("Text") or "").strip()
+            if not text.lower().startswith("purchase"):
+                continue
+            start = row.get("Start Date")
+            if pd.isna(start):
+                continue
+            txn_date = start.date()
+            if txn_date < cutoff:
+                continue
+            shares = row.get("Shares") or 0
+            value = row.get("Value")
+            value = 0.0 if pd.isna(value) else float(value)
+            price = (value / shares) if shares else 0.0
+            out.append({
+                "reportingName": row.get("Insider", "") or "",
+                "typeOfOwner": row.get("Position", "") or "",
+                "securitiesTransacted": float(shares) if shares else 0.0,
+                "price": price,
+                "filingDate": txn_date.isoformat(),
+            })
+        return out
     except Exception as exc:
-        print(f"  FMP insider error ({symbol}): {exc}", file=sys.stderr)
+        print(f"  yfinance error ({symbol}): {exc}", file=sys.stderr)
         return []
 
 
@@ -97,19 +121,13 @@ def score_transactions(symbol: str, txns: list[dict]) -> dict | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Insider Buying Detector")
-    parser.add_argument("--api-key", help="FMP API key (or set FMP_API_KEY)")
+    parser = argparse.ArgumentParser(description="Insider Buying Detector (yfinance)")
     parser.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS)
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--min-grade", choices=["A", "B", "C", "D"], default="C")
     parser.add_argument("--top", type=int, default=15)
     parser.add_argument("--output-dir", default="reports/")
     args = parser.parse_args()
-
-    api_key = args.api_key or os.environ.get("FMP_API_KEY", "")
-    if not api_key:
-        print("Error: FMP_API_KEY not set.", file=sys.stderr)
-        sys.exit(1)
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d")
@@ -122,7 +140,7 @@ def main() -> None:
     results = []
     for sym in args.symbols:
         print(f"  {sym}...", end=" ", flush=True)
-        txns = fetch_insider(sym, api_key, args.days)
+        txns = fetch_insider(sym, args.days)
         r = score_transactions(sym, txns)
         if r:
             grade_rank = {"A": 0, "B": 1, "C": 2, "D": 3}.get(r["grade"], 4)

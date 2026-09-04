@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Short squeeze scanner — FMP short interest + price/volume momentum."""
+"""Short squeeze scanner — short interest + price/volume momentum via yfinance."""
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
-import requests
-
-FMP_BASE = "https://financialmodelingprep.com/stable"
+try:
+    import yfinance as yf
+except ImportError:
+    print("Error: yfinance not installed.", file=sys.stderr)
+    sys.exit(1)
 
 DEFAULT_SYMBOLS = [
     "AAPL", "MSFT", "NVDA", "AMD", "META", "GOOGL", "AMZN", "TSLA", "NFLX", "CRM",
@@ -21,39 +22,22 @@ DEFAULT_SYMBOLS = [
 ]
 
 
-def fetch_short_interest(symbol: str, api_key: str) -> dict | None:
+def fetch_snapshot(symbol: str) -> dict | None:
+    """Fetch short interest + quote data for symbol in a single yfinance call."""
     try:
-        r = requests.get(f"{FMP_BASE}/short-interest", params={
-            "symbol": symbol,
-            "apikey": api_key,
-        }, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        if isinstance(data, list) and data:
-            return data[0]
-        if isinstance(data, dict) and data:
-            return data
-        return None
+        info = yf.Ticker(symbol).info
+        if not info or (info.get("currentPrice") is None and info.get("regularMarketPrice") is None):
+            return None
+        return info
     except Exception as exc:
-        print(f"  FMP short interest error ({symbol}): {exc}", file=sys.stderr)
+        print(f"  yfinance error ({symbol}): {exc}", file=sys.stderr)
         return None
 
 
-def fetch_quote(symbol: str, api_key: str) -> dict | None:
-    try:
-        r = requests.get(f"{FMP_BASE}/quote/{symbol}", params={"apikey": api_key}, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        return data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) and data else None)
-    except Exception as exc:
-        print(f"  FMP quote error ({symbol}): {exc}", file=sys.stderr)
-        return None
-
-
-def score_squeeze(symbol: str, short_data: dict, quote: dict,
+def score_squeeze(symbol: str, info: dict,
                   min_short_float: float, min_dtc: float) -> dict | None:
-    short_float = short_data.get("shortPercentOfFloat") or 0
-    short_ratio = short_data.get("shortRatio") or short_data.get("daysTocover") or 0
+    short_float = info.get("shortPercentOfFloat") or 0
+    short_ratio = info.get("shortRatio") or 0
 
     if isinstance(short_float, str):
         short_float = float(short_float.replace("%", "")) / 100 if "%" in short_float else float(short_float)
@@ -64,10 +48,11 @@ def score_squeeze(symbol: str, short_data: dict, quote: dict,
     if short_ratio < min_dtc:
         return None
 
-    price = quote.get("price") or quote.get("close") or 0
-    change_pct = quote.get("changesPercentage") or quote.get("changePercent") or 0
-    volume = quote.get("volume") or 0
-    avg_volume = quote.get("avgVolume") or 1
+    price = info.get("currentPrice") or info.get("regularMarketPrice") or 0
+    prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose") or price
+    change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
+    volume = info.get("volume") or info.get("regularMarketVolume") or 0
+    avg_volume = info.get("averageVolume") or 1
     vol_ratio = volume / avg_volume if avg_volume > 0 else 0
 
     short_float_score = min(40, short_float_pct * 1.5)
@@ -100,8 +85,7 @@ def score_squeeze(symbol: str, short_data: dict, quote: dict,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Short Squeeze Scanner")
-    parser.add_argument("--api-key", help="FMP API key (or set FMP_API_KEY)")
+    parser = argparse.ArgumentParser(description="Short Squeeze Scanner (yfinance)")
     parser.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS)
     parser.add_argument("--min-short-float", type=float, default=10.0,
                         help="Minimum short interest as %% of float")
@@ -109,11 +93,6 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=15)
     parser.add_argument("--output-dir", default="reports/")
     args = parser.parse_args()
-
-    api_key = args.api_key or os.environ.get("FMP_API_KEY", "")
-    if not api_key:
-        print("Error: FMP_API_KEY not set.", file=sys.stderr)
-        sys.exit(1)
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d")
@@ -125,15 +104,11 @@ def main() -> None:
     results = []
     for sym in args.symbols:
         print(f"  {sym}...", end=" ", flush=True)
-        short_data = fetch_short_interest(sym, api_key)
-        if not short_data:
-            print("no short data")
+        info = fetch_snapshot(sym)
+        if not info:
+            print("no data")
             continue
-        quote = fetch_quote(sym, api_key)
-        if not quote:
-            print("no quote")
-            continue
-        r = score_squeeze(sym, short_data, quote, args.min_short_float, args.min_days_to_cover)
+        r = score_squeeze(sym, info, args.min_short_float, args.min_days_to_cover)
         if r:
             results.append(r)
             print(f"short={r['short_float_pct']}% DTC={r['days_to_cover']} score={r['squeeze_score']} {r['setup']}")

@@ -30,7 +30,7 @@ RETENTION_DAYS = 3
 # in their own narrower pool so they queue instead of colliding.
 _FMP_SKILL_NAMES = {
     "FTD Detector", "Theme Detector", "Market Top Detector", "Economic Calendar",
-    "VCP Screener", "Earnings Momentum", "Insider Buying", "Short Squeeze",
+    "VCP Screener",
 }
 _FMP_MAX_WORKERS = 2
 
@@ -39,9 +39,13 @@ _FMP_MAX_WORKERS = 2
 # blocking/throttling bursts of concurrent requests from a single (especially
 # cloud-hosted) IP. These get their own narrow pool too, independent of the
 # FMP one, so a burst here doesn't also mask itself as "no candidates".
+# Earnings Momentum, Insider Buying, and Short Squeeze moved here after being
+# switched off FMP (its free tier 404s the earnings-calendar, insider-trading,
+# and short-interest endpoints) onto yfinance instead.
 _YFINANCE_SKILL_NAMES = {
     "Options Flow", "Sector Rotation", "Technical Indicators", "News Sentiment",
     "Mean Reversion", "Breakout Scanner", "Macro Signals",
+    "Earnings Momentum", "Insider Buying", "Short Squeeze",
 }
 _YFINANCE_MAX_WORKERS = 3
 
@@ -234,7 +238,7 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
         {
             "name": "Earnings Momentum",
             "script": str(skills_dir / "earnings-momentum-tracker" / "scripts" / "track_earnings_momentum.py"),
-            "args": [*_fmp_args("--api-key", fmp_key), "--output-dir", "{tmpdir}"],
+            "args": ["--symbols", *_COMPACT_WATCHLIST, "--output-dir", "{tmpdir}"],
             "glob": "earnings_momentum_*.json",
         },
         {
@@ -287,7 +291,6 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
             "name": "Insider Buying",
             "script": str(skills_dir / "insider-buying-detector" / "scripts" / "detect_insider_buying.py"),
             "args": [
-                *_fmp_args("--api-key", fmp_key),
                 "--symbols", *_COMPACT_WATCHLIST,
                 "--days", "30",
                 "--min-grade", "C",
@@ -299,7 +302,6 @@ def _skill_defs(project_root: Path) -> list[dict[str, Any]]:
             "name": "Short Squeeze",
             "script": str(skills_dir / "short-squeeze-scanner" / "scripts" / "scan_short_squeeze.py"),
             "args": [
-                *_fmp_args("--api-key", fmp_key),
                 "--symbols", *_COMPACT_WATCHLIST,
                 "--top", "10",
                 "--output-dir", "{tmpdir}",
