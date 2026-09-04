@@ -553,15 +553,19 @@ _SKILL_STATUS_LABELS = {
     "timeout": "Scan timed out",
     "error": "Scan errored",
     "no_output": "Scan produced no output",
+    "unavailable": "Not available on current API plan",
 }
 
 
 def _skill_health_note(data: dict[str, Any], skill_name: str) -> str:
-    """HTML snippet warning that an empty section is a failed run, not a confirmed empty scan.
+    """HTML snippet noting why an empty section has no data.
 
     A script that 401'd, timed out, or crashed writes no results file, so its
     section would otherwise render identically to a scan that legitimately
-    found nothing — this makes the two distinguishable in the UI.
+    found nothing — this makes the two distinguishable in the UI. "unavailable"
+    is a calmer third case: a known plan/API restriction (e.g. an endpoint not
+    included on the current FMP tier), not a failure, so it renders gray
+    instead of red and skips the "not confirmed empty" alarm wording.
     """
     info = data.get("skill_status", {}).get(skill_name, {})
     status = info.get("status", "unknown")
@@ -570,6 +574,8 @@ def _skill_health_note(data: dict[str, Any], skill_name: str) -> str:
     label = _SKILL_STATUS_LABELS.get(status, f"Scan status: {status}")
     error = (info.get("error") or "").strip().replace("\n", " ").rstrip(".")
     detail = f" — {html.escape(error[:200])}" if error else ""
+    if status == "unavailable":
+        return f'<p class="status-gray">ℹ {html.escape(label)}{detail}.</p>'
     return f'<p class="status-red">⚠ {html.escape(label)}{detail}. Not a confirmed empty result.</p>'
 
 

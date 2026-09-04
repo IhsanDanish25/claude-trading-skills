@@ -326,6 +326,18 @@ def _run_skill(name: str, script: str, args: list[str], tmpdir: str) -> dict[str
     except Exception as exc:
         logger.warning("%s failed: %s", name, exc)
         return {"name": name, "status": "error", "data": None, "error": str(exc)}
+    if result.returncode == 2:
+        # Convention: exit code 2 means "known unavailable" (e.g. an FMP
+        # endpoint not included on the current plan) rather than a genuine
+        # fetch failure — render as a calm status, not a red alarm.
+        detail = (result.stderr or result.stdout or "").strip()[-500:]
+        logger.info("%s unavailable: %s", name, detail[:300])
+        return {
+            "name": name,
+            "status": "unavailable",
+            "data": None,
+            "error": detail or "Not available on current plan",
+        }
     if result.returncode != 0:
         # The real failure (auth error, bad request, traceback) is usually the
         # last thing printed, not the first — keep the tail, not the head.

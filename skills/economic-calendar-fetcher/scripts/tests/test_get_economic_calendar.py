@@ -224,3 +224,27 @@ class TestMainErrorHandling:
         assert exc_info.value.code == 1
         assert not output_path.exists()
         assert "economic calendar fetch failed" in capsys.readouterr().err
+
+    def test_404_exits_with_distinct_code_not_generic_failure(self, monkeypatch, tmp_path, capsys):
+        """A 404 means "not on this FMP plan", not a transient fetch failure --
+        it must exit 2 (not 1) so generate_dashboard.py can render it as a
+        calm status instead of a red "scan failed" alarm.
+        """
+        monkeypatch.setenv("FMP_API_KEY", "fake_key")
+        output_path = tmp_path / "economic_calendar_latest.json"
+        monkeypatch.setattr(sys, "argv", ["get_economic_calendar.py", "--output", str(output_path)])
+
+        def raise_404(*args, **kwargs):
+            raise urllib.error.HTTPError(
+                "https://financialmodelingprep.com/stable/economics-calendar",
+                404, "Not Found", {}, io.BytesIO(b"[]"),
+            )
+
+        monkeypatch.setattr(gec, "fetch_economic_calendar", raise_404)
+
+        with pytest.raises(SystemExit) as exc_info:
+            gec.main()
+
+        assert exc_info.value.code == 2
+        assert not output_path.exists()
+        assert "not available on the current FMP plan" in capsys.readouterr().err

@@ -250,6 +250,23 @@ Examples:
 
         sys.exit(0)
 
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # FMP 404s this endpoint on plans that don't include it -- see
+            # core/fmp.py's _unavailable() handling for the same restriction
+            # in the main bot. This is a known plan limitation, not a
+            # transient fetch failure, so it gets its own exit code (2) that
+            # generate_dashboard.py can render as a calm status instead of a
+            # red "scan failed" alarm.
+            print(
+                "Economic calendar is not available on the current FMP plan "
+                "(endpoint returned 404). This is a plan limitation, not a "
+                "fetch failure.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(f"Error: economic calendar fetch failed: {e}", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         # Exit non-zero (rather than faking an empty-but-successful result) so
         # callers can tell "fetch failed" apart from "genuinely 0 events" --
