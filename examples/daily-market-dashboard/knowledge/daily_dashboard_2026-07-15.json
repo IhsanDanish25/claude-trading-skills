@@ -1,0 +1,107 @@
+{
+  "generated_at": "2026-07-15 20:10:54",
+  "date": "2026-07-15",
+  "ftd": {
+    "state": "N/A",
+    "score": "N/A",
+    "signal": "N/A",
+    "guidance": "N/A",
+    "exposure_range": "N/A"
+  },
+  "uptrend": {
+    "score": "N/A",
+    "zone": "N/A"
+  },
+  "breadth": {
+    "score": "N/A",
+    "zone": "N/A"
+  },
+  "themes": [],
+  "vcp_candidates": [],
+  "market_top": {
+    "signal": "N/A",
+    "score": "N/A",
+    "details": {}
+  },
+  "economic_calendar": [],
+  "options_flow": [],
+  "earnings_momentum": [],
+  "sector_rotation": [],
+  "technical_indicators": [],
+  "news_sentiment": [],
+  "mean_reversion": [],
+  "breakouts": [],
+  "insider_buying": [],
+  "short_squeeze": [],
+  "macro_signals": {},
+  "skill_status": {
+    "FTD Detector": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Uptrend Analyzer": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Market Breadth": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Options Flow": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Theme Detector": {
+      "status": "partial",
+      "has_data": false
+    },
+    "VCP Screener": {
+      "status": "cached",
+      "has_data": true
+    },
+    "Technical Indicators": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Market Top Detector": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Sector Rotation": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Earnings Momentum": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Mean Reversion": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Breakout Scanner": {
+      "status": "partial",
+      "has_data": false
+    },
+    "News Sentiment": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Macro Signals": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Insider Buying": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Short Squeeze": {
+      "status": "partial",
+      "has_data": false
+    },
+    "Economic Calendar": {
+      "status": "ok",
+      "has_data": true
+    }
+  }
+}

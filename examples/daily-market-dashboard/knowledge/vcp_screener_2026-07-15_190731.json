@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "metadata": {
+    "generated_at": "2026-07-15 19:07:31",
+    "universe_description": "Custom (30 stocks)",
+    "max_candidates": 100,
+    "ext_threshold": 8.0,
+    "tuning_params": {
+      "min_contractions": 2,
+      "t1_depth_min": 10.0,
+      "breakout_volume_ratio": 1.5,
+      "trend_min_score": 85.0,
+      "atr_multiplier": 1.5,
+      "contraction_ratio": 0.7,
+      "min_contraction_days": 5,
+      "lookback_days": 120,
+      "max_sma200_extension": 50.0,
+      "wide_and_loose_threshold": 15.0,
+      "strict": false
+    },
+    "funnel": {
+      "universe": 30,
+      "pre_filter_passed": 0,
+      "trend_template_passed": 0,
+      "vcp_candidates": 0
+    },
+    "api_stats": {
+      "cache_entries": 1,
+      "api_calls_made": 7,
+      "rate_limit_reached": false
+    }
+  },
+  "results": [],
+  "summary": {
+    "total": 0,
+    "textbook": 0,
+    "strong": 0,
+    "good": 0,
+    "developing": 0,
+    "weak": 0
+  },
+  "sector_distribution": {}
+}
