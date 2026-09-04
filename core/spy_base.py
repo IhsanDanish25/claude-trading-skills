@@ -163,6 +163,15 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
             return {"action": "insufficient_cash", "reason": "insufficient buying power", **info}
         est_qty = round(notional / spy_price, 4)
         log.info(f"SPY base: BUYING ${notional:,.2f} notional (~{est_qty} shares, underweight)")
+
+        if config.DRY_RUN:
+            log.info(
+                f"[DRY_RUN] Would BUY SPY ${notional:,.2f} notional (~{est_qty} shares) "
+                "-- no order submitted"
+            )
+            return {"action": "dry_run", "qty": est_qty, "notional": notional,
+                    "price": spy_price, **info}
+
         try:
             from alpaca.trading.enums import OrderSide, TimeInForce
             from alpaca.trading.requests import MarketOrderRequest
@@ -192,6 +201,14 @@ def rebalance_to_spy(broker: BrokerClient) -> dict:
         if sell_qty <= 0:
             return {"action": "none", "reason": "no_spy_to_sell", **info}
         log.info(f"SPY base: SELLING {sell_qty:.4f} shares (${sell_dollars:,.0f} overweight)")
+
+        if config.DRY_RUN:
+            log.info(
+                f"[DRY_RUN] Would SELL {sell_qty:.4f} SPY shares (${sell_dollars:,.0f}) "
+                "-- no order submitted"
+            )
+            return {"action": "dry_run", "qty": sell_qty, "price": spy_price, **info}
+
         try:
             from alpaca.trading.enums import OrderSide, TimeInForce
             from alpaca.trading.requests import MarketOrderRequest
@@ -263,6 +280,18 @@ def free_cash_for_pead(broker: BrokerClient, amount_needed: float) -> bool:
     sell_qty = round(min(spy_pos["qty"], (shortfall / spy_price) * 1.01), 9)
 
     log.info(f"SPY base: selling {sell_qty:.4f} SPY to fund PEAD entry (need ${shortfall:,.0f})")
+
+    if config.DRY_RUN:
+        log.info(
+            f"[DRY_RUN] Would SELL {sell_qty:.4f} SPY to fund PEAD entry "
+            f"(need ${shortfall:,.0f}) -- no order submitted"
+        )
+        # Report success so the caller's downstream buy() still runs (and
+        # itself no-ops under DRY_RUN) -- returning False here would block
+        # every dry-run buy behind a cash-freeing sell that never happens,
+        # defeating DRY_RUN's purpose of validating the full pipeline.
+        return True
+
     import time as _time
 
     from alpaca.trading.enums import OrderSide, TimeInForce
