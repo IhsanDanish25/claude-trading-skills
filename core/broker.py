@@ -39,12 +39,12 @@ from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeIn
 from core import cost_tracker, trade_logger
 from core.config import (
     ALPACA_API_KEY,
-    ALPACA_BASE_URL,
     ALPACA_SECRET_KEY,
     DRY_RUN,
     MAX_OPEN_POSITIONS,
     MAX_POSITION_SIZE_PCT,
     MAX_SPREAD_PCT,
+    PAPER_TRADE,
     RISK_PCT,
     STOP_LOSS_PCT,
     TAKE_PROFIT_PCT,
@@ -55,13 +55,46 @@ from core.safe_oco_attach import safe_attach_oco
 log = logging.getLogger(__name__)
 ET = pytz.timezone("America/New_York")
 
+# Alpaca's live trading endpoint. alpaca-py's TradingClient picks the base
+# URL from the `paper` bool, not from ALPACA_BASE_URL (no url_override is
+# passed below) -- ALPACA_BASE_URL defaults to the *paper* URL in
+# core/config.py and was never actually wired into this client, so logging
+# it here previously claimed "[LIVE]" while printing a paper-api.alpaca.markets
+# URL. This constant reflects what the client actually connects to.
+LIVE_URL = "https://api.alpaca.markets"
+
 
 class BrokerClient:
+    """Alpaca broker client — LIVE TRADING ONLY.
+
+    Every routine that instantiates this (market_open, midday_review,
+    market_close, weekly_csp, scheduler, ...) trades the real account.
+    Unlike auto_trader.py's own TradingClient(paper=config.PAPER_TRADE),
+    `paper=False` here is intentional and hardcoded, not read from config.
+
+    Because of that, ALPACA_PAPER_TRADE/ALPACA_PAPER being set to true is a
+    live/paper mismatch, not a supported "run this on paper" toggle -- it
+    would leave an operator watching a paper dashboard while every order
+    placed through this client executes live. That exact class of mismatch
+    ("silently missing" orders because the wrong account was being
+    watched) is why __init__ now fails loudly instead of only logging
+    "[LIVE]" and proceeding.
+    """
+
     def __init__(self):
+        if PAPER_TRADE:
+            raise RuntimeError(
+                "BrokerClient is LIVE-ONLY, but ALPACA_PAPER_TRADE/ALPACA_PAPER "
+                "is set to true. This client always trades the live account "
+                "regardless of that flag -- refusing to start rather than "
+                "silently trading live while you believe you're on paper. "
+                "Unset ALPACA_PAPER_TRADE (or set it to false) to confirm you "
+                "intend to trade the live account."
+            )
         self.trade = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=False)
         self.data = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
         self.crypto_data = CryptoHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-        log.info(f"Broker init [LIVE] → {ALPACA_BASE_URL}")
+        log.info(f"Broker init [LIVE] → {LIVE_URL}")
 
     # ── Account ───────────────────────────────────────────────────────────────
     def get_account(self):
