@@ -250,6 +250,28 @@ TRADE_LOG_PATH = os.path.join(config.STATE_DIR, "trade_log.jsonl")
 MAX_BUYS = 3
 
 
+def _send_trade_alert_if_live(result: dict, **kwargs) -> None:
+    """Send the trade-alert email unless this fill was a DRY_RUN simulation.
+
+    core.broker._dry_run_fill() (and buy_simple()'s DRY_RUN branch) never
+    submits anything to Alpaca — it returns a result dict with
+    ``"dry_run": True`` so the pipeline can still be validated end-to-end.
+    Every strategy runner only checked "blocked"/"stop_attached" before
+    emailing, so a simulated fill produced an identical "BUY" confirmation
+    email to a real one (see 2026-09-04 OXY/MRK incident: DRY_RUN=true on
+    Railway, "no order submitted" logged, then "Email sent: BUY" logged
+    right after). Route every BUY alert through here instead of calling
+    send_trade_alert() directly.
+    """
+    if result.get("dry_run"):
+        log.info(
+            "  [DRY_RUN] %s — simulated fill, no order reached Alpaca, email skipped",
+            kwargs.get("ticker"),
+        )
+        return
+    send_trade_alert(**kwargs)
+
+
 def _append_trade_log(entry: dict) -> None:
     """Record one order to BOTH sinks: state/trade_log.jsonl (local, kept for
     _reconcile_closed_trades) AND Axiom (durable, survives Railway redeploys).
@@ -576,7 +598,8 @@ def _run_pead(broker, cb, pv, slots, held, already_bought_today, sector_counts):
             # Track for time-based exit
             pead_track(sym, result["price"], surprise, c["report_date"])
 
-            send_trade_alert(
+            _send_trade_alert_if_live(
+                result,
                 action="BUY",
                 ticker=sym,
                 shares=result["qty"],
@@ -768,7 +791,8 @@ def _run_meanrev(broker, cb, pv, slots, held, already_bought_today, sector_count
                 strategy="meanrev",
                 hold_days=config.MEANREV_HOLD_DAYS,
             )
-            send_trade_alert(
+            _send_trade_alert_if_live(
+                result,
                 action="BUY",
                 ticker=sym,
                 shares=result["qty"],
@@ -942,7 +966,8 @@ def _run_insider(broker, cb, pv, slots, held, already_bought_today, sector_count
                 strategy="insider",
                 hold_days=config.INSIDER_HOLD_DAYS,
             )
-            send_trade_alert(
+            _send_trade_alert_if_live(
+                result,
                 action="BUY",
                 ticker=sym,
                 shares=result["qty"],
@@ -1112,7 +1137,8 @@ def _run_squeeze(broker, cb, pv, slots, held, already_bought_today, sector_count
                 strategy="squeeze",
                 hold_days=config.SQUEEZE_HOLD_DAYS,
             )
-            send_trade_alert(
+            _send_trade_alert_if_live(
+                result,
                 action="BUY",
                 ticker=sym,
                 shares=result["qty"],
@@ -1284,7 +1310,8 @@ def _run_breakout(broker, cb, pv, slots, held, already_bought_today, sector_coun
                 strategy="breakout",
                 hold_days=config.BREAKOUT_HOLD_DAYS,
             )
-            send_trade_alert(
+            _send_trade_alert_if_live(
+                result,
                 action="BUY",
                 ticker=sym,
                 shares=result["qty"],
@@ -1441,7 +1468,8 @@ def _run_buffett_value(broker, cb, pv, slots, held, already_bought_today, sector
 
             buffett_track(sym, result["price"], result["qty"], entry_snapshot=candidate)
 
-            send_trade_alert(
+            _send_trade_alert_if_live(
+                result,
                 action="BUY",
                 ticker=sym,
                 shares=result["qty"],
@@ -1614,7 +1642,8 @@ def _run_macross(broker, cb, pv, slots, held, already_bought_today, sector_count
                 strategy="macross",
                 hold_days=config.MACROSS_HOLD_DAYS,
             )
-            send_trade_alert(
+            _send_trade_alert_if_live(
+                result,
                 action="BUY",
                 ticker=sym,
                 shares=result["qty"],
@@ -1788,7 +1817,8 @@ def _run_earnmom(broker, cb, pv, slots, held, already_bought_today, sector_count
                 strategy="earnmom",
                 hold_days=config.EARNMOM_HOLD_DAYS,
             )
-            send_trade_alert(
+            _send_trade_alert_if_live(
+                result,
                 action="BUY",
                 ticker=sym,
                 shares=result["qty"],
@@ -2315,7 +2345,8 @@ def _run_vcp(broker, cb, pv, slots, held, already_bought_today, sector_counts):
                 strategy="vcp",
                 hold_days=config.VCP_HOLD_DAYS,
             )
-            send_trade_alert(
+            _send_trade_alert_if_live(
+                result,
                 action="BUY",
                 ticker=sym,
                 shares=result["qty"],
