@@ -93,3 +93,30 @@ def test_midday_review_alpaca_fallback_suppresses_stale_alert(tmp_path, monkeypa
     now = scheduler.ET.localize(datetime.datetime(2026, 8, 7, 19, 30, 0))
     assert scheduler.get_catchup_routine(now) is None
     assert alerts == []
+
+
+def test_pre_window_tick_never_calls_alpaca_backed_checks(tmp_path, monkeypatch):
+    """Regression: get_catchup_routine used to call _market_open_ran_today()
+    and _midday_review_ran_today() — each spins up a fresh BrokerClient and
+    hits the Alpaca API — unconditionally on every 10-min tick, including
+    overnight/pre-market ticks where neither catch-up window can possibly
+    apply yet. Those calls must only happen once `now` is actually past a
+    routine's window; a tick before both windows (e.g. 3 AM) should never
+    touch either Alpaca-backed check."""
+    monkeypatch.setattr(scheduler, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(scheduler, "SKIPPED_ROUTINES_FILE", str(tmp_path / "skipped_routines.json"))
+    monkeypatch.setattr(scheduler, "CATCHUP_FILE", str(tmp_path / ".scheduler_ran_today.json"))
+
+    calls = []
+    monkeypatch.setattr(
+        scheduler, "_market_open_ran_today", lambda: calls.append("market_open") or False
+    )
+    monkeypatch.setattr(
+        scheduler, "_midday_review_ran_today", lambda: calls.append("midday_review") or False
+    )
+
+    # 03:00 ET is before both the market_open (9:35-9:44) and midday_review
+    # (12:00-12:09) catch-up windows even start.
+    now = scheduler.ET.localize(datetime.datetime(2026, 8, 7, 3, 0, 0))
+    assert scheduler.get_catchup_routine(now) is None
+    assert calls == []

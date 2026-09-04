@@ -58,6 +58,16 @@ ET = pytz.timezone("America/New_York")
 
 class BrokerClient:
     def __init__(self):
+        # Always talks to the LIVE Alpaca endpoint (paper=False), not gated by
+        # PAPER_TRADE/ALPACA_PAPER_TRADE/ALPACA_PAPER — those only control
+        # auto_trader.py, a separate entry point. There is no paper account
+        # to fall back to (deleted 2026-08-01, see core/config.py), so wiring
+        # this to a "paper" flag that has nothing to point at would be a fake
+        # safety net. DRY_RUN (core/config.py) is the one real safety
+        # mechanism for this client: it runs the full pipeline against real
+        # market data but short-circuits every order right before submission
+        # (see buy()/buy_simple()/sell_limit()'s DRY_RUN branches) — no order
+        # ever reaches Alpaca while it's set.
         self.trade = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=False)
         self.data = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
         self.crypto_data = CryptoHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)

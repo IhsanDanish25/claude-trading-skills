@@ -184,35 +184,51 @@ def get_catchup_routine(now: datetime.datetime):
     for (sched_h, m_min, m_max, module) in catchup_targets:
         if module in ran_today:
             continue
+
+        # Check the time window FIRST — this is pure local arithmetic, no
+        # network call. Only once we're actually past the window is it worth
+        # hitting Alpaca at all. Previously the Alpaca-backed checks below
+        # ran unconditionally on every 10-min tick, including overnight/
+        # pre-market ticks where the window can't possibly apply yet —
+        # 2 checks x ~3 ticks/hour x ~14 off-window hours/day == 50+ wasted
+        # Alpaca API calls/day with no behavior change either way.
+        scheduled = now.replace(hour=sched_h, minute=m_max, second=0, microsecond=0)
+        age_hours = (now - scheduled).total_seconds() / 3600.0
+        past_window = age_hours >= 0
+
+        if not past_window:
+            continue
+
         # Fix 8: double-check against Alpaca so a lost state-file doesn't
         # cause a false-positive "already ran" claim after a Railway redeploy.
+        # This must run BEFORE the staleness check below: a routine that
+        # Alpaca confirms already ran should never be reported/alerted as a
+        # stale catch-up, however many hours late this tick happens to be.
         if module == "routines.market_open" and _market_open_ran_today():
             log.info("market_open: ran today (Alpaca history confirms)")
             continue
         if module == "routines.midday_review" and _midday_review_ran_today():
             log.info("midday_review: ran today (Alpaca history confirms)")
             continue
-        scheduled = now.replace(hour=sched_h, minute=m_max, second=0, microsecond=0)
-        age_hours = (now - scheduled).total_seconds() / 3600.0
-        past_window = age_hours >= 0
-        if past_window and age_hours <= CATCHUP_MAX_AGE_HOURS:
+
+        if age_hours <= CATCHUP_MAX_AGE_HOURS:
             return module
-        if past_window and age_hours > CATCHUP_MAX_AGE_HOURS:
-            reason = f"{age_hours:.1f}h late, cap={CATCHUP_MAX_AGE_HOURS}h"
-            log.info(f"Skipping stale catch-up for {module} ({reason})")
-            if _record_skipped_routine(now, module, reason):
-                # First time today this module was given up on — alert now
-                # instead of only surfacing in the EOD summary hours later.
-                try:
-                    from core.notifier import send_error_alert
-                    send_error_alert(
-                        module,
-                        f"Gave up on catch-up after repeated timeouts/misses "
-                        f"({reason}). No further attempts will be made for "
-                        f"this routine today.",
-                    )
-                except Exception:
-                    pass
+
+        reason = f"{age_hours:.1f}h late, cap={CATCHUP_MAX_AGE_HOURS}h"
+        log.info(f"Skipping stale catch-up for {module} ({reason})")
+        if _record_skipped_routine(now, module, reason):
+            # First time today this module was given up on — alert now
+            # instead of only surfacing in the EOD summary hours later.
+            try:
+                from core.notifier import send_error_alert
+                send_error_alert(
+                    module,
+                    f"Gave up on catch-up after repeated timeouts/misses "
+                    f"({reason}). No further attempts will be made for "
+                    f"this routine today.",
+                )
+            except Exception:
+                pass
 
     return None
 
