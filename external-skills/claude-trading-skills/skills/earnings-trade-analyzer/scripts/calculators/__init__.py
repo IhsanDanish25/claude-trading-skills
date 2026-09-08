@@ -1,1 +1,0 @@
-# Earnings Trade Analyzer Calculators

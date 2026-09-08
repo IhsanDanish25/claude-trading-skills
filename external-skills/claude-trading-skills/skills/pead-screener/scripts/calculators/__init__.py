@@ -1,1 +1,0 @@
-# PEAD Screener Calculators

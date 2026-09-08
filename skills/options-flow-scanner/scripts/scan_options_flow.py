@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -43,6 +44,23 @@ def fetch_options(symbol: str, max_expiries: int = 3) -> list[dict]:
         return []
 
 
+def _safe_int(value: object, default: int = 0) -> int:
+    """int() that treats NaN/None/unparseable values as `default` instead of raising.
+
+    yfinance option chains routinely report NaN volume/openInterest for
+    illiquid far-OTM contracts -- and NaN is truthy in Python, so a plain
+    `value or 0` guard doesn't catch it, leaving `int(nan)` to raise and abort
+    the whole symbol's scan on the first such contract.
+    """
+    try:
+        if value is None:
+            return default
+        f = float(value)
+        return default if math.isnan(f) else int(f)
+    except (TypeError, ValueError):
+        return default
+
+
 def _row_to_dict(symbol: str, row: object, opt_type: str, expiry: str, dte: int) -> dict:
     return {
         "symbol": symbol,
@@ -50,8 +68,8 @@ def _row_to_dict(symbol: str, row: object, opt_type: str, expiry: str, dte: int)
         "strike": getattr(row, "strike", None),
         "expiry": expiry,
         "dte": dte,
-        "volume": int(getattr(row, "volume", 0) or 0),
-        "open_interest": int(getattr(row, "openInterest", 0) or 0),
+        "volume": _safe_int(getattr(row, "volume", 0)),
+        "open_interest": _safe_int(getattr(row, "openInterest", 0)),
         "implied_volatility": float(getattr(row, "impliedVolatility", 0) or 0),
         "last_price": float(getattr(row, "lastPrice", 0) or 0),
         "in_the_money": bool(getattr(row, "inTheMoney", False)),

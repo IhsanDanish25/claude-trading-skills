@@ -1,1 +1,0 @@
-# Uptrend Analyzer - Calculator modules

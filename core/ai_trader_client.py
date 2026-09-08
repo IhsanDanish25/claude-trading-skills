@@ -14,6 +14,7 @@ Env vars (set in Railway secrets):
 """
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 
@@ -26,6 +27,21 @@ _TOKEN = os.environ.get("AI_TRADER_TOKEN", "")
 _BASE_URL = os.environ.get("AI_TRADER_BASE_URL", "https://ai4trade.ai")
 
 _VALID_ACTIONS = {"buy", "sell", "short", "cover"}
+
+
+def _to_utc_iso(ts: str) -> str:
+    """Convert an offset-aware ISO 8601 timestamp to UTC, Z-suffixed.
+
+    market_open._append_trade_log stores `ts` in ET (e.g.
+    "2026-09-04T09:39:45-04:00") for the local trade log/journal — that's
+    the right format for everything else that reads it. AI-Trader's API
+    rejects any non-UTC offset with a 400, so convert only at this publish
+    boundary rather than changing what the rest of the trade log expects.
+    """
+    dt = datetime.datetime.fromisoformat(ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def publish_trade(entry: dict) -> bool:
@@ -46,6 +62,12 @@ def publish_trade(entry: dict) -> bool:
     executed_at = entry.get("ts")
     if action not in _VALID_ACTIONS or not symbol or price is None or qty is None or not executed_at:
         log.debug("AI-Trader publish skipped — incomplete entry: %s", entry)
+        return False
+
+    try:
+        executed_at = _to_utc_iso(executed_at)
+    except ValueError as exc:
+        log.debug("AI-Trader publish skipped — unparseable ts %r: %s", executed_at, exc)
         return False
 
     strategy = entry.get("strategy", "")
