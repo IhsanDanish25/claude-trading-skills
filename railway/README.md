@@ -42,15 +42,22 @@ Set on each service (Railway → service → Variables):
 |---|---|
 | `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` | Brokerage creds |
 | `ALPACA_BASE_URL` | `https://paper-api.alpaca.markets` (paper) |
-| `ALPACA_PAPER_TRADE` | `true` = paper, `false` = live. Controls `core/broker.py`. |
+| `ALPACA_PAPER_TRADE` / `ALPACA_PAPER` | `true` = paper, `false` = live. Controls **`auto_trader.py` only** — see note below. |
+| `DRY_RUN` | `true` = full pipeline runs against real market data, but every order is short-circuited right before submission — nothing reaches Alpaca. Controls `core/broker.py`. |
 | `ANTHROPIC_API_KEY` | Claude analyst |
 | `FMP_API_KEY` | Market data |
 | `RESEND_API_KEY` | Resend API key for email alerts |
 | `TZ` | `America/New_York` |
 
-> **Paper vs live:** live/paper is decided by `ALPACA_PAPER_TRADE` (not the
-> base URL). Keep the keys, base URL, and this flag consistent — a paper key
-> (`PK…`) with `ALPACA_PAPER_TRADE=false` will 401 against the live endpoint.
+> **Paper vs live:** `core/broker.py` (used by the scheduler/worker routines —
+> the actual live-money path) always talks to the LIVE Alpaca endpoint;
+> `ALPACA_PAPER_TRADE`/`ALPACA_PAPER` do **not** affect it. Those flags only
+> gate `auto_trader.py`, a separate entry point. There has been no paper
+> account to fall back to since 2026-08-01 (it was deleted), so `broker.py`'s
+> only real safety mechanism is `DRY_RUN` — set it `true` to validate the
+> pipeline end-to-end without risking real capital. Do not rely on
+> `ALPACA_PAPER_TRADE=true` to make the scheduler/worker paper-safe — it
+> won't.
 
 ## Health checks
 

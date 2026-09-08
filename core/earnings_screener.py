@@ -272,10 +272,10 @@ def screen_earnings(
 
     Data source: FMP's bulk /stable/earnings-calendar endpoint (one API call
     for the whole lookback window, restricted to the S&P 500 universe). Falls
-    back to the legacy per-symbol yfinance/FMP scan (via earnings_data disk
-    cache) only when FMP_API_KEY is unset or the bulk call fails — that path
-    is much slower on a cold cache (~1s/symbol x 503 symbols) so it should be
-    the exception, not the norm, in live (non-backtest) runs.
+    back to the per-symbol yfinance/FMP scan (fetch_symbol_earnings, uncached)
+    only when FMP_API_KEY is unset or the bulk call fails — that path is much
+    slower (~1s/symbol x 503 symbols) so it should be the exception, not the
+    norm, in live runs.
     """
     end = as_of or datetime.date.today()
     start = end - datetime.timedelta(days=lookback_days)
@@ -307,10 +307,8 @@ def screen_earnings(
                     "report_date": d,
                 }
     else:
-        from backtest_harness.earnings_data import get_symbol_earnings
-
         for sym in symbols:
-            rows = get_symbol_earnings(sym)
+            rows = fetch_symbol_earnings(sym) or []
             for row in rows:
                 d = row.get("date", "")
                 sp = row.get("surprise_pct")
